@@ -1372,6 +1372,41 @@ INDEX_HTML = r"""<!doctype html>
                         color: var(--bg); border: none; border-radius: 4px;
                         font-weight: 600; cursor: pointer; }
   #guest-modal button:hover { background: #50b0f0; }
+
+  /* ── Mobile / narrow viewport ── */
+  #side-toggle { display: none; background: var(--panel); color: var(--fg);
+                 border: 1px solid var(--border); border-radius: 3px;
+                 width: 32px; height: 28px; font-size: 16px; line-height: 1;
+                 cursor: pointer; padding: 0; user-select: none;
+                 align-items: center; justify-content: center; flex-shrink: 0; }
+  #side-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  #side-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+                   z-index: 40; }
+  #side-backdrop.open { display: block; }
+
+  @media (max-width: 720px) {
+    #side-toggle { display: inline-flex; }
+    #app { grid-template-columns: 1fr; }
+    header { gap: 6px; padding: 0 8px; flex-wrap: wrap; min-height: 42px; height: auto;
+             padding-top: 4px; padding-bottom: 4px; }
+    header #font-picker { display: none; }
+    header #filter { width: 100px; flex: 1; min-width: 80px; }
+    header .pill#btn-compact { display: none; }
+    header .pill { font-size: 10px; padding: 2px 6px; }
+    header .title { font-size: 12px; }
+    header .meta { display: none; }
+    #chat { padding: 8px 10px; }
+    #side { position: fixed; top: 0; right: 0; height: 100vh;
+            width: min(300px, 88vw); transform: translateX(100%);
+            transition: transform 0.18s ease; z-index: 50;
+            border-left: 1px solid var(--border); grid-row: auto; grid-column: auto; }
+    #side.open { transform: translateX(0); box-shadow: -8px 0 24px rgba(0,0,0,0.5); }
+    #composer { padding: 6px 8px; grid-column: 1 / 2; }
+    #hint { display: none; }
+    #input { font-size: 14px; }
+    #send-btn { padding: 0 14px; }
+    #jump-btn { right: 10px; bottom: 10px; }
+  }
 </style>
 </head>
 <body>
@@ -1411,12 +1446,15 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
+    <button id="side-toggle" title="members" aria-label="toggle members panel">☰</button>
   </header>
 
   <div id="chat-wrap">
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
   </div>
+
+  <div id="side-backdrop"></div>
 
   <aside id="side">
     <section>
@@ -1463,6 +1501,22 @@ INDEX_HTML = r"""<!doctype html>
   const rosterHeading = document.getElementById('r-heading');
   const chanStatsEl = document.getElementById('chanstats');
   const sparkEl = document.getElementById('sparkline');
+  const sideEl = document.getElementById('side');
+  const sideToggle = document.getElementById('side-toggle');
+  const sideBackdrop = document.getElementById('side-backdrop');
+  const closeSide = () => { sideEl.classList.remove('open'); sideBackdrop.classList.remove('open'); };
+  const openSide  = () => { sideEl.classList.add('open');    sideBackdrop.classList.add('open'); };
+  sideToggle.addEventListener('click', () => {
+    if (sideEl.classList.contains('open')) closeSide(); else openSide();
+  });
+  sideBackdrop.addEventListener('click', closeSide);
+  // Close drawer if a member row is tapped (so the user can switch focus on mobile).
+  document.getElementById('r-list').addEventListener('click', (ev) => {
+    if (window.matchMedia('(max-width: 720px)').matches && ev.target.closest('.member')) {
+      // Let the existing handler run first; defer close so it doesn't swallow the click.
+      setTimeout(closeSide, 0);
+    }
+  });
   const hChannel = document.getElementById('h-channel');
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
