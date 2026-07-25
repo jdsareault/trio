@@ -1286,7 +1286,7 @@ INDEX_HTML = r"""<!doctype html>
     --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
     --fg: #d8dde6; --dim: #7a8596; --dimmer: #4a5262;
     --accent: #3ba0e6; --accent-hi: #50b0f0; --accent2: #59cb79;
-    --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c;
+    --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c; --mention-rgb: 227,195,76;
     --hover: #0f1420; --ov: 255,255,255;
   }
   :root[data-theme="light"] {
@@ -1294,7 +1294,7 @@ INDEX_HTML = r"""<!doctype html>
     --bg: #f6f7f9; --bg2: #eceef2; --panel: #e2e6ec; --border: #c8cfd8;
     --fg: #1c2430; --dim: #5a6675; --dimmer: #9aa4b2;
     --accent: #1f7fd0; --accent-hi: #2b93e6; --accent2: #2e9e52;
-    --warn: #b8860b; --err: #cc4a2c; --mention: #b8860b;
+    --warn: #b8860b; --err: #cc4a2c; --mention: #b8860b; --mention-rgb: 184,134,11;
     --hover: #dce1e8; --ov: 0,0,0;
   }
   :root[data-theme="nord"] {
@@ -1302,7 +1302,7 @@ INDEX_HTML = r"""<!doctype html>
     --bg: #2e3440; --bg2: #2b303b; --panel: #3b4252; --border: #434c5e;
     --fg: #e5e9f0; --dim: #8f9bb3; --dimmer: #616e88;
     --accent: #88c0d0; --accent-hi: #8fbcbb; --accent2: #a3be8c;
-    --warn: #ebcb8b; --err: #bf616a; --mention: #ebcb8b;
+    --warn: #ebcb8b; --err: #bf616a; --mention: #ebcb8b; --mention-rgb: 235,203,139;
     --hover: #353c4a; --ov: 255,255,255;
   }
   :root[data-theme="dracula"] {
@@ -1310,7 +1310,7 @@ INDEX_HTML = r"""<!doctype html>
     --bg: #282a36; --bg2: #21222c; --panel: #343746; --border: #44475a;
     --fg: #f8f8f2; --dim: #a0a3b1; --dimmer: #6272a4;
     --accent: #bd93f9; --accent-hi: #caa9fa; --accent2: #50fa7b;
-    --warn: #f1fa8c; --err: #ff5555; --mention: #ffb86c;
+    --warn: #f1fa8c; --err: #ff5555; --mention: #ffb86c; --mention-rgb: 255,184,108;
     --hover: #313442; --ov: 255,255,255;
   }
   :root[data-theme="solarized"] {
@@ -1318,7 +1318,7 @@ INDEX_HTML = r"""<!doctype html>
     --bg: #fdf6e3; --bg2: #eee8d5; --panel: #e7e0c9; --border: #d3cbb2;
     --fg: #073642; --dim: #657b83; --dimmer: #93a1a1;
     --accent: #268bd2; --accent-hi: #3a9bde; --accent2: #859900;
-    --warn: #b58900; --err: #dc322f; --mention: #b58900;
+    --warn: #b58900; --err: #dc322f; --mention: #b58900; --mention-rgb: 181,137,0;
     --hover: #eee8d5; --ov: 0,0,0;
   }
   * { box-sizing: border-box; }
@@ -1403,9 +1403,9 @@ INDEX_HTML = r"""<!doctype html>
                                   margin-right: 2px; }
   .msg .mentions-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
                                padding: 1px 7px 1px 5px; border-radius: 10px;
-                               background: rgba(255, 196, 116, 0.15);
+                               background: rgba(var(--mention-rgb), 0.15);
                                color: var(--mention);
-                               border: 1px solid rgba(255, 196, 116, 0.3);
+                               border: 1px solid rgba(var(--mention-rgb), 0.3);
                                font-weight: 600; }
   .msg .mentions-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   /* #pound references bar — "about" someone, not "to" them. Muted vs. @ pings. */
@@ -1438,6 +1438,25 @@ INDEX_HTML = r"""<!doctype html>
   .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   .msg .body { word-wrap: break-word; overflow-wrap: break-word; }
   .msg .body.plain { white-space: pre-wrap; }
+  /* Valid @mentions stay visible in the prose itself, not only in the
+     routing bar above the message. The member-colored inset makes adjacent
+     mentions distinguishable while the shared mention color preserves the
+     meaning across themes. */
+  /* Text-forward mention: a member-colored dot + member-tinted text, faint
+     tint behind. The dot carries the "who" color pop; text stays legible on
+     every theme via color-mix toward the theme foreground. @all falls back to
+     the theme --mention color (no per-member color is set for it). */
+  .msg .body .inline-mention {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 11%, transparent);
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)), var(--fg) 38%);
+    font-weight: 700; white-space: nowrap;
+  }
+  .msg .body .inline-mention::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, var(--mention));
+    margin-right: 4px; vertical-align: 1px;
+  }
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
@@ -1482,7 +1501,7 @@ INDEX_HTML = r"""<!doctype html>
   .msg.compact .body::after { content: ""; }
   .msg.system .body { color: var(--dim); font-style: italic; }
   .msg.mine .author { color: var(--accent2); }
-  .msg.targeted { background: #1a2030; border-left-color: var(--mention); }
+  .msg.targeted { background: rgba(var(--mention-rgb), 0.09); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
   .msg.dm-hidden { display: none; }
   body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
@@ -1543,7 +1562,7 @@ INDEX_HTML = r"""<!doctype html>
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
                            user-select: none; }
   .member .dm-btn { font-size: 9px; padding: 2px 5px; border-radius: 3px;
-                    background: #1c2432; color: var(--dim); border: 1px solid #283242;
+                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
                     cursor: pointer; flex-shrink: 0; user-select: none;
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
@@ -1552,7 +1571,7 @@ INDEX_HTML = r"""<!doctype html>
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
                    border: 1px solid transparent; }
-  .member .fmode.all   { color: var(--dim); background: #1c2432; border-color: #283242; }
+  .member .fmode.all   { color: var(--dim); background: var(--bg2); border-color: var(--border); }
   .member .fmode.about { color: #9ccf9c; background: rgba(126, 222, 126, 0.08);
                          border-color: rgba(126, 222, 126, 0.25); }
   .member .fmode.at    { color: #f0c060; background: rgba(240, 192, 96, 0.1);
@@ -1592,7 +1611,7 @@ INDEX_HTML = r"""<!doctype html>
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
   #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
                letter-spacing: -1px; padding-top: 4px; }
-  #filter-banner { padding: 4px 8px; background: #1a2030; color: var(--mention);
+  #filter-banner { padding: 4px 8px; background: rgba(var(--mention-rgb), 0.12); color: var(--mention);
                    font-size: 10px; border-radius: 3px; margin-bottom: 6px;
                    display: none; cursor: pointer; }
   #filter-banner.active { display: block; }
@@ -1623,10 +1642,39 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-pill.tb-all.on { border-style: solid; }
   body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
-  #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+  #input-stack { flex: 1; position: relative; min-width: 0; background: var(--bg);
+                 border-radius: 4px; }
+  #input-highlight {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    padding: 8px 10px; border: 1px solid transparent; border-radius: 4px;
+    font-family: inherit; font-size: 13px; line-height: 1.45;
+    white-space: pre-wrap; overflow-wrap: break-word; overflow: hidden;
+    color: var(--fg);
+  }
+  /* Composer highlight mirrors the textarea 1:1, so it must NOT change text
+     metrics — background tint ONLY (no dot / padding / border / underline that
+     would add width or a baseline shift), or the overlay drifts from the typed
+     text. It echoes the inline mention's member tint; the dot + member-colored
+     text can't be reproduced here because the visible glyphs are the real
+     textarea text (single --fg color). Member color is wired in per-token by
+     renderComposerMentionHighlights(). */
+  #input-highlight .composer-mention {
+    color: var(--mention-member-color, var(--mention));
+    box-shadow: inset 0 -2px 0 var(--mention-member-color, var(--mention));
+  }
+  /* The textarea's own glyphs are hidden (color: transparent) so the colored
+     #input-highlight mirror behind it is what the user reads; caret-color keeps
+     the caret visible. Placeholder + selection are restored explicitly since
+     they'd otherwise inherit the transparent text color. */
+  #input { position: relative; z-index: 1; width: 100%; display: block;
+           background: transparent; color: transparent; caret-color: var(--fg);
+           border: 1px solid var(--border);
            padding: 8px 10px; border-radius: 4px; font-family: inherit; font-size: 13px;
-           resize: none; min-height: 36px; max-height: 160px; }
+           line-height: 1.45; resize: none; min-height: 36px; max-height: 160px; }
   #input:focus { outline: none; border-color: var(--accent); }
+  #input::placeholder { color: var(--dim); opacity: 1; }
+  /* Translucent selection so the colored mirror text stays readable through it. */
+  #input::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
   #send-btn { background: var(--accent); color: var(--bg); border: none;
               padding: 0 18px; height: 36px; border-radius: 4px; cursor: pointer;
               font-weight: 600; font-family: inherit; font-size: 13px; }
@@ -1771,7 +1819,10 @@ INDEX_HTML = r"""<!doctype html>
     <div id="input-row">
       <div id="completions"></div>
       <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
-      <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
+      <div id="input-stack">
+        <div id="input-highlight" aria-hidden="true"></div>
+        <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
+      </div>
       <button id="send-btn">Send</button>
     </div>
     <div id="hint">
@@ -1804,6 +1855,7 @@ INDEX_HTML = r"""<!doctype html>
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
   const input = document.getElementById('input');
+  const inputHighlight = document.getElementById('input-highlight');
   const sendBtn = document.getElementById('send-btn');
   const preview = document.getElementById('preview');
   const compEl = document.getElementById('completions');
@@ -2240,6 +2292,104 @@ INDEX_HTML = r"""<!doctype html>
     });
   }
 
+  function mentionMemberForToken(token, allowedIds) {
+    const lower = (token || '').toLowerCase();
+    if (lower === 'all') return { id: 'all', name: 'all' };
+    for (const mem of state.members.values()) {
+      if (allowedIds && !allowedIds.has(mem.id)) continue;
+      if ((mem.id || '').toLowerCase() === lower ||
+          (mem.name || '').toLowerCase() === lower) return mem;
+    }
+    return null;
+  }
+
+  // Find only syntactically complete, roster-resolved @mentions. Unknown
+  // @words stay unadorned, which doubles as feedback that they will not ping
+  // a participant.
+  function collectMentionMatches(text, allowedIds) {
+    const matches = [];
+    const re = /(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]+)/g;
+    let hit;
+    while ((hit = re.exec(text || ''))) {
+      // The token class greedily swallows trailing sentence punctuation
+      // (".", "-") — e.g. "thanks @Claude." captures "Claude.". Resolve the
+      // full token first (so names that legitimately contain "."/"-" like
+      // jen.chen / gabe-guest still match), then trim trailing "."/"-" and
+      // retry so the mention still highlights, matching the server's routing.
+      let token = hit[2];
+      let member = mentionMemberForToken(token, allowedIds);
+      while (!member && (token.endsWith('.') || token.endsWith('-'))) {
+        token = token.slice(0, -1);
+        member = mentionMemberForToken(token, allowedIds);
+      }
+      if (!member) continue;
+      const start = hit.index + hit[1].length;
+      matches.push({ start, end: start + token.length + 1, member });
+    }
+    return matches;
+  }
+
+  function decorateInlineMentions(root, mentionIds) {
+    if (!root || !mentionIds || !mentionIds.length) return;
+    const allowed = new Set(mentionIds);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest('code, pre, a, .inline-mention')) continue;
+      if (collectMentionMatches(node.nodeValue || '', allowed).length) nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const matches = collectMentionMatches(text, allowed);
+      if (!matches.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const match of matches) {
+        frag.appendChild(document.createTextNode(text.slice(cursor, match.start)));
+        const span = document.createElement('span');
+        span.className = 'inline-mention';
+        span.textContent = text.slice(match.start, match.end);
+        span.dataset.memberId = match.member.id;
+        span.title = match.member.id === 'all'
+          ? 'Mentions every participant'
+          : 'Mentions ' + (match.member.name || match.member.id);
+        if (match.member.id !== 'all') {
+          span.style.setProperty('--mention-member-color', colorFor(match.member.id));
+        }
+        frag.appendChild(span);
+        cursor = match.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  function renderComposerMentionHighlights() {
+    if (!inputHighlight) return;
+    const text = input.value || '';
+    const matches = collectMentionMatches(text, null);
+    let html = '';
+    let cursor = 0;
+    for (const match of matches) {
+      html += escapeHtml(text.slice(cursor, match.start));
+      // colorFor returns a fixed palette hex (injection-safe); @all has no
+      // per-member color and falls back to --mention via the CSS default.
+      const mc = match.member.id === 'all' ? '' : colorFor(match.member.id);
+      const styleAttr = mc ? ' style="--mention-member-color:' + mc + '"' : '';
+      html += '<span class="composer-mention"' + styleAttr + '>' +
+              escapeHtml(text.slice(match.start, match.end)) + '</span>';
+      cursor = match.end;
+    }
+    html += escapeHtml(text.slice(cursor));
+    // Preserve a final blank line so the mirror stays aligned with textarea
+    // scrollHeight and wrapping behavior.
+    inputHighlight.innerHTML = html + (text.endsWith('\n') ? '\n ' : '');
+    inputHighlight.scrollTop = input.scrollTop;
+    inputHighlight.scrollLeft = input.scrollLeft;
+  }
+
   // ── Per-member agent stats (client-side aggregate, derived from event stream) ──
   function agentState(id) {
     if (!state.agentStats.has(id)) {
@@ -2472,6 +2622,7 @@ INDEX_HTML = r"""<!doctype html>
       body.textContent = humanizeIdSigils(m.content || '');
     } else {
       body.innerHTML = renderMarkdown(m.content || '');
+      decorateInlineMentions(body, m.mentions || []);
     }
     div.appendChild(body);
 
@@ -2586,6 +2737,7 @@ INDEX_HTML = r"""<!doctype html>
         } else {
           body.classList.remove('plain');
           body.innerHTML = renderMarkdown(m.content || '');
+          decorateInlineMentions(body, m.mentions || []);
         }
       }
       function rebuildBar(bar, ids, sigil) {
@@ -2778,6 +2930,9 @@ INDEX_HTML = r"""<!doctype html>
     rosterHeading.textContent = `Members (${members.length})`;
 
     renderComposerTargets();
+    // A roster arrival/rename can turn an existing @token from unresolved to
+    // valid without another keystroke, so refresh the composer mirror too.
+    updatePreview();
     updateAllAckBadges();
     renderWatermarkPins();
     scheduleHereUpdate();
@@ -3126,6 +3281,7 @@ INDEX_HTML = r"""<!doctype html>
   function resolveRefs(text)     { return resolveSigilTokens(text, '#'); }
   function resolveBangs(text)    { return resolveSigilTokens(text, '!'); }
   function updatePreview() {
+    renderComposerMentionHighlights();
     const pings = resolveMentions(input.value);
     const refs  = resolveRefs(input.value);
     const bangs = resolveBangs(input.value);
@@ -3157,6 +3313,11 @@ INDEX_HTML = r"""<!doctype html>
   function autoResizeInput() {
     input.style.height = 'auto';
     input.style.height = Math.min(160, Math.max(36, input.scrollHeight)) + 'px';
+    if (inputHighlight) {
+      inputHighlight.style.height = input.style.height;
+      inputHighlight.scrollTop = input.scrollTop;
+      inputHighlight.scrollLeft = input.scrollLeft;
+    }
   }
 
   // ── Send ──
@@ -3365,6 +3526,25 @@ INDEX_HTML = r"""<!doctype html>
   input.addEventListener('input', () => {
     autoResizeInput();
     refreshCompletions();
+    updatePreview();
+  });
+  input.addEventListener('scroll', () => {
+    if (!inputHighlight) return;
+    inputHighlight.scrollTop = input.scrollTop;
+    inputHighlight.scrollLeft = input.scrollLeft;
+  });
+  // IME / dead-key / emoji composition: the provisional (pre-commit) glyphs are
+  // drawn by the browser in the textarea itself, which is normally transparent
+  // (the colored mirror is what shows). Reveal the textarea and hide the mirror
+  // for the duration of composition so the preview is visible; on commit, revert
+  // and re-render the mirror from the now-updated value.
+  input.addEventListener('compositionstart', () => {
+    input.style.color = 'var(--fg)';
+    if (inputHighlight) inputHighlight.style.color = 'transparent';
+  });
+  input.addEventListener('compositionend', () => {
+    input.style.color = '';
+    if (inputHighlight) inputHighlight.style.color = '';
     updatePreview();
   });
   sendBtn.addEventListener('click', sendMessage);
