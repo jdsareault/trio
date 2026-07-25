@@ -84,6 +84,7 @@ STT_WORKER = Path(__file__).resolve().with_name("nth_stt_worker.py")
 STT_WORKER_START_TIMEOUT = 180          # generous: first spawn may download ~1.5GB
 STT_TRANSCRIBE_TIMEOUT = 60             # per-clip inference ceiling
 STT_IMPORT_PROBE_TIMEOUT = 8            # cheap "is mlx_whisper importable" check
+STT_MAX_CONCURRENT = int(os.environ.get("NTH_STT_MAX_CONCURRENT", "2"))  # in-flight transcribes
 
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
@@ -850,7 +851,8 @@ class SttWorker:
         if self._proc is not None:
             try:
                 self._proc.kill()
-            except OSError:
+                self._proc.wait(timeout=2)   # reap so we don't leave a zombie
+            except (OSError, subprocess.TimeoutExpired):
                 pass
         self._proc = None
         self._q = None
@@ -898,7 +900,8 @@ class SttWorker:
     def _reset_proc(proc: subprocess.Popen) -> None:
         try:
             proc.kill()
-        except OSError:
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
     def transcribe(self, audio_path: str) -> Dict[str, Any]:
@@ -927,6 +930,7 @@ class SttWorker:
             try:
                 msg = json.loads(line)
             except ValueError:
+                self._reset()   # stdout desynced — kill so the next call respawns clean
                 raise RuntimeError("worker sent malformed response")
             if not msg.get("ok"):
                 raise RuntimeError(msg.get("error") or "transcription failed")
@@ -936,7 +940,8 @@ class SttWorker:
         """Fast availability check for the settings status line — never loads the
         model into this process."""
         base = {"engine": "mlx_whisper", "model": self.model}
-        if self._alive():
+        proc = self._proc            # snapshot once — health() runs without the lock
+        if proc is not None and proc.poll() is None:
             return {**base, "available": True, "warm": True,
                     "detail": "worker running — model is warm"}
         try:
@@ -944,13 +949,14 @@ class SttWorker:
                 [sys.executable, "-c", "import mlx_whisper"],
                 capture_output=True, timeout=STT_IMPORT_PROBE_TIMEOUT,
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
+        except (subprocess.TimeoutExpired, OSError):
+            # Deliberately generic — this endpoint is unauthenticated, so we don't
+            # echo exception text that can carry local filesystem paths / username.
             return {**base, "available": False, "warm": False,
-                    "detail": f"probe failed: {e}"}
+                    "detail": "speech engine probe failed"}
         if r.returncode != 0:
-            tail = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1]
             return {**base, "available": False, "warm": False,
-                    "detail": f"mlx_whisper not importable: {tail}"}
+                    "detail": "speech engine (mlx_whisper) not available"}
         cached = _stt_model_cached(self.model)
         return {**base, "available": True, "warm": False,
                 "detail": ("model cached — first use warms it (~2s)" if cached
@@ -958,6 +964,9 @@ class SttWorker:
 
 
 STT = SttWorker(STT_MODEL, STT_LANGUAGE)
+# Bounds in-flight /api/stt/transcribe requests so a burst of large uploads can't
+# buffer N×MAX_STT_BYTES in memory or pile up behind the single worker lock.
+STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
 
 
 # ───────── HTTP handler ─────────
@@ -1411,43 +1420,51 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
-        try:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-        except (TypeError, ValueError):
-            self._json({"ok": False, "error": "invalid Content-Length"}, status=400)
+        # Bound concurrency before reading the (up to 25 MB) body, so a burst of
+        # uploads can't buffer N×MAX_STT_BYTES or pile up behind the worker lock.
+        if not STT_SLOTS.acquire(blocking=False):
+            self._json({"ok": False, "error": "transcription busy — try again in a moment"},
+                       status=503)
             return
-        if length <= 0 or length > MAX_STT_BYTES:
-            self._json({"ok": False,
-                        "error": f"missing or oversized audio (max {MAX_STT_BYTES} bytes)"},
-                       status=400)
-            return
-        try:
-            data = self.rfile.read(length)
-        except OSError:
-            self._json({"ok": False, "error": "read failed"}, status=400)
-            return
-        if len(data) != length:
-            self._json({"ok": False, "error": "incomplete upload"}, status=400)
-            return
-
-        ext = _stt_ext_for(self.headers.get("Content-Type", ""))
         tmp = None
         try:
-            fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            result = STT.transcribe(tmp)
-            self._json({"ok": True, "text": result.get("text", ""),
-                        "seconds": result.get("seconds"),
-                        "no_speech": bool(result.get("no_speech")),
-                        "engine": "mlx_whisper", "model": STT_MODEL})
-        except RuntimeError as e:
-            # Engine/worker failure — 200 with ok:false so the browser reads the
-            # reason and falls back to web speech (per the configured behavior).
-            self._json({"ok": False, "error": str(e)})
-        except OSError as e:
-            self._json({"ok": False, "error": f"audio write failed: {e}"}, status=500)
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                self._json({"ok": False, "error": "invalid Content-Length"}, status=400)
+                return
+            if length <= 0 or length > MAX_STT_BYTES:
+                self._json({"ok": False,
+                            "error": f"missing or oversized audio (max {MAX_STT_BYTES} bytes)"},
+                           status=400)
+                return
+            try:
+                data = self.rfile.read(length)
+            except OSError:
+                self._json({"ok": False, "error": "read failed"}, status=400)
+                return
+            if len(data) != length:
+                self._json({"ok": False, "error": "incomplete upload"}, status=400)
+                return
+
+            ext = _stt_ext_for(self.headers.get("Content-Type", ""))
+            try:
+                fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                result = STT.transcribe(tmp)
+                self._json({"ok": True, "text": result.get("text", ""),
+                            "seconds": result.get("seconds"),
+                            "no_speech": bool(result.get("no_speech")),
+                            "engine": "mlx_whisper", "model": STT_MODEL})
+            except RuntimeError as e:
+                # Engine/worker failure — 200 with ok:false so the browser reads the
+                # reason and falls back to web speech (per the configured behavior).
+                self._json({"ok": False, "error": str(e)})
+            except OSError as e:
+                self._json({"ok": False, "error": f"audio write failed: {e}"}, status=500)
         finally:
+            STT_SLOTS.release()
             if tmp:
                 try:
                     os.unlink(tmp)
@@ -3722,6 +3739,17 @@ INDEX_HTML = r"""<!doctype html>
   // sent to Whisper (which otherwise hallucinates words from noise). Kept lenient
   // so quiet speech still goes through; the server no_speech check is the backstop.
   const STT_SILENCE_PEAK = 0.015;
+  const STT_FETCH_TIMEOUT_MS = 240000;   // backstop; cold start can download ~1.5GB
+  // Turn an internal engine reason into something a person can read.
+  function humanizeSttError(reason) {
+    reason = String(reason || '');
+    if (/timed out|timeout/i.test(reason)) return 'it timed out';
+    if (/busy/i.test(reason)) return 'it was busy';
+    if (/pipe|exited|respawn|malformed/i.test(reason)) return 'the engine restarted';
+    if (/not (importable|available|installed)/i.test(reason)) return 'it isn’t installed';
+    if (/HTTP\s*\d/i.test(reason)) return 'the server returned an error';
+    return 'an unexpected error';
+  }
   try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
 
   function showSttBanner(msg, kind) {
@@ -3843,7 +3871,9 @@ INDEX_HTML = r"""<!doctype html>
       return;
     }
     if (fallbackReason) {
-      showSttBanner('Local transcription failed: ' + fallbackReason + ' — switched to web speech. Speak now.', 'warn');
+      showSttBanner('On-device transcription unavailable (' + humanizeSttError(fallbackReason)
+        + '). Switched to the browser’s speech recognition, which may send audio to the browser'
+        + ' vendor. Speak again to use it, or pick a different Dictation mode in settings.', 'warn');
     }
     hideViz();   // web mode exposes no stream to visualize; the pulsing button conveys state
     const base = input.value + ((input.value && !/\s$/.test(input.value)) ? ' ' : '');
@@ -3878,18 +3908,22 @@ INDEX_HTML = r"""<!doctype html>
 
   // Local dictation: record with MediaRecorder, POST the clip to the sidecar.
   let mediaRec = null, mediaChunks = [], mediaStream = null;
+  let localStarting = false;   // synchronous guard: mic is opening (pre-getUserMedia resolve)
+  let composerAbort = null;    // AbortController for the in-flight transcribe fetch
   function stopTracks() {
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   }
   async function startLocalDictation() {
+    if (localStarting) return;   // ignore a second click before the mic opens
+    localStarting = true;
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch (e) { showSttBanner('Microphone permission denied: ' + (e.message || e.name), 'err'); setMicState('idle'); return; }
+    catch (e) { localStarting = false; showSttBanner('Microphone permission denied: ' + (e.message || e.name), 'err'); setMicState('idle'); return; }
     mediaStream = stream;
     mediaChunks = [];
     const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm')) ? 'audio/webm' : '';
     try { mediaRec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
-    catch (e) { stopTracks(); showSttBanner('Recording unsupported: ' + e.message, 'err'); setMicState('idle'); return; }
+    catch (e) { stopTracks(); localStarting = false; showSttBanner('Recording unsupported: ' + e.message, 'err'); setMicState('idle'); return; }
     mediaChunks = [];
     mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) mediaChunks.push(e.data); };
     mediaRec.onstop = async () => {
@@ -3904,11 +3938,16 @@ INDEX_HTML = r"""<!doctype html>
       }
       setMicState('working');
       showViz('spin', 'transcribing…');
+      composerAbort = new AbortController();
+      // Relabel if it's slow — the first run downloads the model, not a hang.
+      const slowTimer = setTimeout(() => showViz('spin', 'preparing model (first run)…'), 4000);
+      const killTimer = setTimeout(() => { try { composerAbort.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
       try {
         const r = await fetch('/api/stt/transcribe', {
           method: 'POST',
           headers: { 'Content-Type': blob.type || 'audio/webm' },
           body: blob,
+          signal: composerAbort.signal,
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok || !data.ok) { startWebDictation((data && data.error) || ('HTTP ' + r.status)); return; }
@@ -3921,7 +3960,14 @@ INDEX_HTML = r"""<!doctype html>
         insertTranscript(data.text);
         setMicState('idle');
       } catch (e) {
-        startWebDictation(e.message || 'network error');
+        if (e && e.name === 'AbortError') {
+          setMicState('idle');
+          showSttBanner('Transcription cancelled.', 'warn');
+        } else {
+          startWebDictation(e.message || 'network error');
+        }
+      } finally {
+        clearTimeout(slowTimer); clearTimeout(killTimer); composerAbort = null;
       }
     };
     try {
@@ -3929,6 +3975,7 @@ INDEX_HTML = r"""<!doctype html>
       setMicState('recording');
       showViz('wave', 'listening…', stream);
     } catch (e) { stopTracks(); showSttBanner('Could not start recording: ' + e.message, 'err'); setMicState('idle'); }
+    localStarting = false;   // recording is live (or failed) — allow the next action
   }
   function stopLocalDictation() {
     state.sttRecording = false;
@@ -3936,7 +3983,11 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   function micToggle() {
-    if (micBtn && micBtn.classList.contains('working')) return;   // busy transcribing
+    if (micBtn && micBtn.classList.contains('working')) {   // transcribing → click cancels
+      if (composerAbort) { try { composerAbort.abort('cancel'); } catch (_) {} }
+      return;
+    }
+    if (localStarting) return;   // mic is opening — ignore extra clicks
     if (state.sttRecording) { stopWebDictation(); stopLocalDictation(); return; }
     hideSttBanner();
     if (!window.isSecureContext) {
@@ -4380,7 +4431,7 @@ INDEX_HTML = r"""<!doctype html>
   const testWave = makeWaveform(sttTestWave);
 
   function openSttPage() { settingsPanel.classList.add('stt-page-open'); refreshSttStatus(); }
-  function closeSttPage() { settingsPanel.classList.remove('stt-page-open'); }
+  function closeSttPage() { stopTestRecording(); settingsPanel.classList.remove('stt-page-open'); }
   sttOpenBtn.addEventListener('click', openSttPage);
   sttBack.addEventListener('click', closeSttPage);
 
@@ -4408,40 +4459,61 @@ INDEX_HTML = r"""<!doctype html>
 
   // Test recorder: waveform while recording, spinner while transcribing.
   let sttTestRec = null, sttTestChunks = [], sttTestStream = null, sttTestRecording = false;
+  let sttTestStarting = false, sttTestCancelled = false;
+  // Cancel an in-progress test (mic OFF, no transcription). Used when leaving the
+  // test page or closing the settings drawer so the microphone never stays hot.
+  function stopTestRecording() {
+    if (!sttTestRecording && !sttTestStream) return;
+    sttTestCancelled = true;
+    sttTestRecording = false;
+    testWave.stop();
+    if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
+    if (sttTestStream) { try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; }
+    sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+    sttTestBtn.innerHTML = ICON_MIC + 'Test';
+    sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+  }
   sttTestBtn.addEventListener('click', async () => {
-    if (sttTestRecording) {
+    if (sttTestRecording) {   // "Stop" → finalize + transcribe (the actual test)
       sttTestRecording = false;
       if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
       return;
     }
+    if (sttTestStarting) return;   // ignore a second click before the mic opens
+    sttTestStarting = true;
+    sttTestCancelled = false;
     sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
-    if (!window.isSecureContext) { sttTestOut.textContent = 'needs HTTPS or localhost'; sttTestOut.className = 'stt-test-out err'; return; }
+    if (!window.isSecureContext) { sttTestStarting = false; sttTestOut.textContent = 'Dictation needs HTTPS or localhost.'; sttTestOut.className = 'stt-test-out err'; return; }
     try { sttTestStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch (e) { sttTestOut.textContent = 'mic denied'; sttTestOut.className = 'stt-test-out err'; return; }
+    catch (e) { sttTestStarting = false; sttTestOut.textContent = 'Microphone permission denied.'; sttTestOut.className = 'stt-test-out err'; return; }
+    if (sttTestCancelled) { sttTestStarting = false; try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; return; }
     sttTestChunks = [];
     try { sttTestRec = new MediaRecorder(sttTestStream); }
-    catch (e) { sttTestOut.textContent = 'recording unsupported'; sttTestOut.className = 'stt-test-out err'; sttTestStream.getTracks().forEach(t => t.stop()); return; }
+    catch (e) { sttTestStarting = false; sttTestOut.textContent = 'Recording unsupported.'; sttTestOut.className = 'stt-test-out err'; sttTestStream.getTracks().forEach(t => t.stop()); sttTestStream = null; return; }
     sttTestRec.ondataavailable = (e) => { if (e.data && e.data.size) sttTestChunks.push(e.data); };
     sttTestRec.onstop = async () => {
-      sttTestStream.getTracks().forEach(t => t.stop());
+      if (sttTestCancelled) { sttTestCancelled = false; return; }   // cancelled → no transcription
+      if (sttTestStream) { try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; }
       const peak = testWave.getPeak();
       testWave.stop();
       sttTestBtn.innerHTML = ICON_MIC + 'Test';
       const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
       if (peak >= 0 && peak < STT_SILENCE_PEAK) {   // silent — no round trip
         sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
-        sttTestOut.textContent = 'no message detected — try again';
+        sttTestOut.textContent = 'No message detected — try again.';
         sttTestOut.className = 'stt-test-out err';
         return;
       }
       sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
       sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+      const ctrl = new AbortController();
+      const killTimer = setTimeout(() => { try { ctrl.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
       try {
-        const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
+        const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob, signal: ctrl.signal });
         const d = await r.json().catch(() => ({}));
         if (r.ok && d.ok) {
           if (d.no_speech || !(d.text || '').trim()) {
-            sttTestOut.textContent = 'no message detected — try again';
+            sttTestOut.textContent = 'No message detected — try again.';
             sttTestOut.className = 'stt-test-out err';
           } else {
             sttTestOut.textContent = '✓ “' + d.text + '”' + (d.seconds != null ? ' (' + d.seconds + 's)' : '');
@@ -4452,13 +4524,15 @@ INDEX_HTML = r"""<!doctype html>
           sttTestOut.className = 'stt-test-out err';
         }
       } catch (e) {
-        sttTestOut.textContent = '✗ ' + (e.message || 'failed');
+        sttTestOut.textContent = (e && e.name === 'AbortError') ? '✗ timed out' : ('✗ ' + (e.message || 'failed'));
         sttTestOut.className = 'stt-test-out err';
+      } finally {
+        clearTimeout(killTimer);
       }
       sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
       refreshSttStatus();
     };
-    sttTestRec.start(); sttTestRecording = true;
+    sttTestRec.start(); sttTestRecording = true; sttTestStarting = false;
     sttTestBtn.innerHTML = ICON_STOP + 'Stop';
     sttTestVizWrap.hidden = false; sttTestWave.hidden = false; sttTestSpin.hidden = true; sttTestVizLabel.textContent = 'listening…';
     sttTestOut.textContent = '';
@@ -4476,7 +4550,7 @@ INDEX_HTML = r"""<!doctype html>
   function toggleSettings(force) {
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
     if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
-    else { settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
+    else { stopTestRecording(); settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
   btnSettings.addEventListener('click', (e) => { e.stopPropagation(); toggleSettings(); });
   document.addEventListener('click', (e) => {

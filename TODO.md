@@ -2,6 +2,14 @@
 
 ## Open
 
+### STT hardening follow-ups (deferred from LOTC review)
+**Severity:** Low | **Since:** STT feature (jdsareault fork)
+
+Lower-value items deferred from the LOTC review of the speech-to-text feature:
+- **ffmpeg grandchild reaping.** On a transcribe timeout the worker process is killed, but an `ffmpeg` subprocess it spawned (via `mlx_whisper.load_audio`) could be orphaned by a crafted/hanging media file. Consider a process-group kill.
+- **Worker stderr is discarded** (`DEVNULL`), which hides native (segfault) crashes, and there's no respawn backoff — a repeated crash-inducing payload triggers repeated ~cold restarts under the worker lock. Consider capturing stderr to a ring buffer + a crash-count backoff.
+- **No per-connection socket read timeout** (slow-loris). Deliberately not fixed globally because the SSE endpoint (`/api/events`) is intentionally long-lived; would need a per-endpoint timeout rather than a handler-wide one.
+
 ### Sonnet triage layer (~v8+)
 **Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06) | **Branch:** `v5.1-sonnet-triage`
 

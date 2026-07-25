@@ -7,6 +7,8 @@
 
 ## What Just Shipped
 
+**Fork additions (jdsareault fork; not in upstream thereprocase)** — web-dashboard features layered on v7.2: image attachments (web upload + agent vision via MCP image blocks), visible inline `@mentions`, and **speech-to-text dictation**. STT adds a 🎤 composer button backed by an optional local mlx-whisper sidecar (`server/nth_stt_worker.py` — warm model, RMS silence gate, browser web-speech fallback) with a settings mode toggle + a "Test ›" sub-page; endpoints `GET /api/stt/health` and `POST /api/stt/transcribe`. Reviewed via LOTC (Aragorn/Sauron/Frodo/Legolas/Uruk-Hai) and hardened: mic stops on settings close, double-click guard, `health()` lock-race + malformed-response worker reset, concurrency cap, fetch cancel/timeout, privacy-aware fallback. Tests: `tests/test-stt.py`.
+
 **v7.2** — Three-sigil model + simplified filter modes + filter awareness.
 
 - **`!name` / `!all` bangs.** Unfilterable pings. Wake the target regardless of their filter. `!all` wakes every member. For emergencies / channel-close; casual use is abusive. Stored in new `messages.bangs` column, parsed server-side alongside `@` and `#`.
