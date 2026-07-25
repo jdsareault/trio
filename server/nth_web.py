@@ -4084,7 +4084,7 @@ def main() -> int:
             server = QuietThreadingHTTPServer((host, port), NthWebHandler)
             break
         except OSError as exc:
-            if exc.errno == errno.EADDRINUSE:
+            if exc.errno in (errno.EADDRINUSE, errno.EACCES):
                 port += 1
                 continue
             raise
