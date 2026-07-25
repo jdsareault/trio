@@ -1937,6 +1937,28 @@ INDEX_HTML = r"""<!doctype html>
   .stt-test-out.ok { color: #5ec26a; }
   .stt-test-out.err { color: var(--err); }
   #settings-panel button.pill { padding: 2px 9px; }
+  /* STT recording waveform + transcription spinner */
+  .stt-spinner { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+                 border: 3px solid rgba(var(--ov), 0.25); border-top-color: var(--accent);
+                 animation: sttspin 0.8s linear infinite; }
+  .stt-spinner[hidden] { display: none; }
+  @keyframes sttspin { to { transform: rotate(360deg); } }
+  #stt-viz { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #stt-viz[hidden] { display: none; }
+  #stt-wave { width: 300px; max-width: 100%; height: 30px; }
+  #stt-wave[hidden] { display: none; }
+  #stt-viz-label, .stt-viz-label { font-size: 11px; color: var(--dim); }
+  /* Settings → local-transcription sub-page */
+  #settings-stt-page { display: none; }
+  #settings-panel.stt-page-open > :not(#settings-stt-page) { display: none; }
+  #settings-panel.stt-page-open > #settings-stt-page { display: block; }
+  #settings-stt-page .stt-back { background: none; border: none; color: var(--accent);
+                                 cursor: pointer; font-size: 12px; padding: 0 0 6px; }
+  #settings-stt-page h3 { margin: 2px 0 8px; }
+  #settings-stt-page .stt-status { margin-bottom: 8px; }
+  .stt-testviz { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .stt-testviz[hidden] { display: none; }
+  #stt-test-wave { width: 260px; max-width: 100%; height: 30px; }
   #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
   #attach-strip:empty { display: none; }
   .attach-thumb { position: relative; width: 60px; height: 60px; border-radius: 4px;
@@ -2068,6 +2090,11 @@ INDEX_HTML = r"""<!doctype html>
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
     <div id="stt-banner" hidden></div>
+    <div id="stt-viz" hidden>
+      <canvas id="stt-wave" width="300" height="30"></canvas>
+      <div id="stt-spinner" class="stt-spinner" hidden></div>
+      <span id="stt-viz-label"></span>
+    </div>
     <div id="attach-strip"></div>
     <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
@@ -3677,6 +3704,10 @@ INDEX_HTML = r"""<!doctype html>
   // show a banner — never a silent failure.
   const micBtn = document.getElementById('mic-btn');
   const sttBanner = document.getElementById('stt-banner');
+  const sttViz = document.getElementById('stt-viz');
+  const sttWaveCanvas = document.getElementById('stt-wave');
+  const sttSpinner = document.getElementById('stt-spinner');
+  const sttVizLabel = document.getElementById('stt-viz-label');
   try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
 
   function showSttBanner(msg, kind) {
@@ -3687,14 +3718,87 @@ INDEX_HTML = r"""<!doctype html>
   }
   function hideSttBanner() { if (sttBanner) sttBanner.hidden = true; }
 
+  // Live audio waveform on a <canvas> from a MediaStream. Reusable across the
+  // composer and the settings test page. Returns { start(stream), stop() }.
+  function makeWaveform(canvas) {
+    let raf = null, audioCtx = null, analyser = null, source = null, data = null;
+    function start(stream) {
+      stop();
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC || !canvas || !stream) return;
+      try {
+        audioCtx = new AC();
+        if (audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (_) {} }
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        source.connect(analyser);
+        data = new Uint8Array(analyser.fftSize);
+      } catch (_) { stop(); return; }
+      const cx = canvas.getContext('2d');
+      const stroke = (getComputedStyle(document.documentElement)
+                      .getPropertyValue('--accent') || '#62d7ef').trim() || '#62d7ef';
+      function draw() {
+        raf = requestAnimationFrame(draw);
+        analyser.getByteTimeDomainData(data);
+        const w = canvas.width, h = canvas.height;
+        cx.clearRect(0, 0, w, h);
+        cx.lineWidth = 2;
+        cx.strokeStyle = stroke;
+        cx.beginPath();
+        const slice = w / data.length;
+        let x = 0;
+        for (let i = 0; i < data.length; i++) {
+          const y = (data[i] / 128.0) * h / 2;   // 128 = silence midline
+          if (i === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
+          x += slice;
+        }
+        cx.stroke();
+      }
+      draw();
+    }
+    function stop() {
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      if (source) { try { source.disconnect(); } catch (_) {} source = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+      analyser = null; data = null;
+    }
+    return { start, stop };
+  }
+
+  const composerWave = makeWaveform(sttWaveCanvas);
+
+  // Composer visualizer: 'wave' while recording, 'spin' while transcribing.
+  function showViz(kind, label, stream) {
+    if (!sttViz) return;
+    sttViz.hidden = false;
+    if (sttVizLabel) sttVizLabel.textContent = label || '';
+    if (kind === 'wave') {
+      if (sttWaveCanvas) sttWaveCanvas.hidden = false;
+      if (sttSpinner) sttSpinner.hidden = true;
+      composerWave.start(stream);
+    } else {   // 'spin'
+      composerWave.stop();
+      if (sttWaveCanvas) sttWaveCanvas.hidden = true;
+      if (sttSpinner) sttSpinner.hidden = false;
+    }
+  }
+  function hideViz() {
+    composerWave.stop();
+    if (sttViz) sttViz.hidden = true;
+    if (sttWaveCanvas) sttWaveCanvas.hidden = false;
+    if (sttSpinner) sttSpinner.hidden = true;
+  }
+
   function setMicState(s) {   // 'idle' | 'recording' | 'working'
     state.sttRecording = (s === 'recording');
-    if (!micBtn) return;
-    micBtn.classList.toggle('recording', s === 'recording');
-    micBtn.classList.toggle('working', s === 'working');
-    micBtn.textContent = (s === 'working') ? '⏳' : '🎤';
-    micBtn.title = (s === 'recording') ? 'stop dictation'
-                 : (s === 'working') ? 'transcribing…' : 'dictate (speech to text)';
+    if (micBtn) {
+      micBtn.classList.toggle('recording', s === 'recording');
+      micBtn.classList.toggle('working', s === 'working');
+      micBtn.title = (s === 'recording') ? 'stop dictation'
+                   : (s === 'working') ? 'transcribing…' : 'dictate (speech to text)';
+    }
+    if (s === 'idle') hideViz();
   }
 
   function insertTranscript(text) {
@@ -3718,6 +3822,7 @@ INDEX_HTML = r"""<!doctype html>
     if (fallbackReason) {
       showSttBanner('Local transcription failed: ' + fallbackReason + ' — switched to web speech. Speak now.', 'warn');
     }
+    hideViz();   // web mode exposes no stream to visualize; the pulsing button conveys state
     const base = input.value + ((input.value && !/\s$/.test(input.value)) ? ' ' : '');
     let finalTxt = '';
     const rec = new SR();
@@ -3769,6 +3874,7 @@ INDEX_HTML = r"""<!doctype html>
       const blob = new Blob(mediaChunks, { type: (mediaRec && mediaRec.mimeType) || 'audio/webm' });
       if (!blob.size) { setMicState('idle'); return; }
       setMicState('working');
+      showViz('spin', 'transcribing…');
       try {
         const r = await fetch('/api/stt/transcribe', {
           method: 'POST',
@@ -3784,8 +3890,11 @@ INDEX_HTML = r"""<!doctype html>
         startWebDictation(e.message || 'network error');
       }
     };
-    try { mediaRec.start(); setMicState('recording'); }
-    catch (e) { stopTracks(); showSttBanner('Could not start recording: ' + e.message, 'err'); setMicState('idle'); }
+    try {
+      mediaRec.start();
+      setMicState('recording');
+      showViz('wave', 'listening…', stream);
+    } catch (e) { stopTracks(); showSttBanner('Could not start recording: ' + e.message, 'err'); setMicState('idle'); }
   }
   function stopLocalDictation() {
     state.sttRecording = false;
@@ -4175,40 +4284,77 @@ INDEX_HTML = r"""<!doctype html>
   const notifyWhenRow = addSettingRow('Notify when', notifyWhenSel);
 
   // ── Transcription (speech-to-text) ──
+  // Main panel keeps a SINGLE control (the mode). Status + Test live on their
+  // own sub-page, opened via "Test ›".
   try { const sm = localStorage.getItem('trio.sttMode'); if (sm === 'web' || sm === 'local') state.sttMode = sm; } catch (_) {}
   const sttModeSel = prefSelect(
     [['local', 'local — Whisper (on-device)'], ['web', 'web — browser']], state.sttMode);
   sttModeSel.addEventListener('change', () => {
     state.sttMode = sttModeSel.value;
     try { localStorage.setItem('trio.sttMode', state.sttMode); } catch (_) {}
-    refreshSttStatus();
+    updateSttEntry();
   });
-  addSettingRow('Dictation', sttModeSel);
+  const sttOpenBtn = document.createElement('button');
+  sttOpenBtn.className = 'pill';
+  sttOpenBtn.textContent = 'Test ›';
+  sttOpenBtn.title = 'check local transcription works';
+  const sttDictWrap = document.createElement('div');
+  sttDictWrap.style.display = 'flex';
+  sttDictWrap.style.gap = '8px';
+  sttDictWrap.style.alignItems = 'center';
+  sttDictWrap.appendChild(sttModeSel);
+  sttDictWrap.appendChild(sttOpenBtn);
+  addSettingRow('Dictation', sttDictWrap);
 
-  const sttStatus = document.createElement('span');
+  // Sub-page: back link, status, test recorder (waveform → spinner → result).
+  const sttPage = document.createElement('div');
+  sttPage.id = 'settings-stt-page';
+  const sttBack = document.createElement('button');
+  sttBack.className = 'stt-back';
+  sttBack.textContent = '‹ Settings';
+  const sttPageTitle = document.createElement('h3');
+  sttPageTitle.textContent = 'Local transcription';
+  const sttStatus = document.createElement('div');
   sttStatus.className = 'stt-status';
   sttStatus.textContent = '…';
-  const sttStatusRow = addSettingRow('Local STT', sttStatus);
-
   const sttTestBtn = document.createElement('button');
   sttTestBtn.className = 'pill';
-  sttTestBtn.textContent = 'Test';
+  sttTestBtn.textContent = '● Test';
   sttTestBtn.title = 'record a short clip and transcribe it locally';
-  const sttTestOut = document.createElement('span');
+  const sttTestVizWrap = document.createElement('div');
+  sttTestVizWrap.className = 'stt-testviz';
+  sttTestVizWrap.hidden = true;
+  const sttTestWave = document.createElement('canvas');
+  sttTestWave.id = 'stt-test-wave'; sttTestWave.width = 260; sttTestWave.height = 30;
+  const sttTestSpin = document.createElement('div');
+  sttTestSpin.className = 'stt-spinner'; sttTestSpin.hidden = true;
+  const sttTestVizLabel = document.createElement('span');
+  sttTestVizLabel.className = 'stt-viz-label';
+  sttTestVizWrap.appendChild(sttTestWave);
+  sttTestVizWrap.appendChild(sttTestSpin);
+  sttTestVizWrap.appendChild(sttTestVizLabel);
+  const sttTestOut = document.createElement('div');
   sttTestOut.className = 'stt-test-out';
-  const sttTestWrap = document.createElement('div');
-  sttTestWrap.style.display = 'flex';
-  sttTestWrap.style.gap = '8px';
-  sttTestWrap.style.alignItems = 'center';
-  sttTestWrap.appendChild(sttTestBtn);
-  sttTestWrap.appendChild(sttTestOut);
-  const sttTestRow = addSettingRow('Test local', sttTestWrap);
+  sttPage.appendChild(sttBack);
+  sttPage.appendChild(sttPageTitle);
+  sttPage.appendChild(sttStatus);
+  sttPage.appendChild(sttTestBtn);
+  sttPage.appendChild(sttTestVizWrap);
+  sttPage.appendChild(sttTestOut);
+  settingsPanel.appendChild(sttPage);
+
+  const testWave = makeWaveform(sttTestWave);
+
+  function openSttPage() { settingsPanel.classList.add('stt-page-open'); refreshSttStatus(); }
+  function closeSttPage() { settingsPanel.classList.remove('stt-page-open'); }
+  sttOpenBtn.addEventListener('click', openSttPage);
+  sttBack.addEventListener('click', closeSttPage);
+
+  // The test is local-only; hide its entry in web mode.
+  function updateSttEntry() { sttOpenBtn.hidden = (state.sttMode !== 'local'); }
+  updateSttEntry();
 
   async function refreshSttStatus() {
-    const isLocal = state.sttMode === 'local';
-    if (sttStatusRow) sttStatusRow.hidden = !isLocal;
-    if (sttTestRow) sttTestRow.hidden = !isLocal;
-    if (!isLocal) return;
     sttStatus.textContent = 'checking…'; sttStatus.className = 'stt-status';
     try {
       const r = await fetch('/api/stt/health');
@@ -4226,7 +4372,7 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
-  // Test button: record until clicked again, then transcribe + show the result.
+  // Test recorder: waveform while recording, spinner while transcribing.
   let sttTestRec = null, sttTestChunks = [], sttTestStream = null, sttTestRecording = false;
   sttTestBtn.addEventListener('click', async () => {
     if (sttTestRecording) {
@@ -4234,7 +4380,7 @@ INDEX_HTML = r"""<!doctype html>
       if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
       return;
     }
-    sttTestOut.className = 'stt-test-out';
+    sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
     if (!window.isSecureContext) { sttTestOut.textContent = 'needs HTTPS or localhost'; sttTestOut.className = 'stt-test-out err'; return; }
     try { sttTestStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
     catch (e) { sttTestOut.textContent = 'mic denied'; sttTestOut.className = 'stt-test-out err'; return; }
@@ -4244,9 +4390,11 @@ INDEX_HTML = r"""<!doctype html>
     sttTestRec.ondataavailable = (e) => { if (e.data && e.data.size) sttTestChunks.push(e.data); };
     sttTestRec.onstop = async () => {
       sttTestStream.getTracks().forEach(t => t.stop());
-      sttTestBtn.textContent = 'Test';
+      testWave.stop();
+      sttTestBtn.textContent = '● Test';
+      sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
       const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
-      sttTestOut.textContent = 'transcribing…'; sttTestOut.className = 'stt-test-out';
+      sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
       try {
         const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
         const d = await r.json().catch(() => ({}));
@@ -4261,14 +4409,15 @@ INDEX_HTML = r"""<!doctype html>
         sttTestOut.textContent = '✗ ' + (e.message || 'failed');
         sttTestOut.className = 'stt-test-out err';
       }
+      sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
       refreshSttStatus();
     };
     sttTestRec.start(); sttTestRecording = true;
-    sttTestBtn.textContent = '■ stop';
-    sttTestOut.textContent = 'recording… click stop when done';
+    sttTestBtn.textContent = '■ Stop';
+    sttTestVizWrap.hidden = false; sttTestWave.hidden = false; sttTestSpin.hidden = true; sttTestVizLabel.textContent = 'listening…';
+    sttTestOut.textContent = '';
+    testWave.start(sttTestStream);
   });
-
-  refreshSttStatus();
 
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
@@ -4280,7 +4429,7 @@ INDEX_HTML = r"""<!doctype html>
 
   function toggleSettings(force) {
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
-    if (show) { settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
+    if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
     else { settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
   btnSettings.addEventListener('click', (e) => { e.stopPropagation(); toggleSettings(); });
