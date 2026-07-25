@@ -1,5 +1,14 @@
 # nth Changelog
 
+## fork — speech-to-text dictation (jdsareault fork)
+
+Layered on the jdsareault fork (which also carries image attachments + inline `@mentions`, not in upstream). Adds local speech-to-text dictation to the web dashboard.
+
+- **`server/nth_stt_worker.py`** — optional persistent sidecar; loads an mlx-whisper model (`large-v3-turbo`) once and transcribes over a line-delimited JSON protocol (~0.8s warm). Spawned by `nth_web.py` only when local dictation is used; exits on stdin EOF.
+- **RMS silence gate** — clips below an energy floor skip Whisper entirely, because it hallucinates words from silence and its own `no_speech_prob` returns ~0 even for pure silence. Measured: silence ≈0.000, quiet noise ≈0.010, speech ≈0.156; floor 0.02, tunable via `NTH_STT_SILENCE_RMS`.
+- **Web UI** — 🎤 composer button (SVG mic→stop icon, live waveform, transcription spinner), settings Dictation mode (local Whisper vs browser web-speech) + a "Test ›" sub-page; local failures auto-fall back to web speech with a banner. Endpoints `GET /api/stt/health`, `POST /api/stt/transcribe` (identity-gated, concurrency-capped via `NTH_STT_MAX_CONCURRENT`).
+- **LOTC review hardening** — mic stops on settings close / drawer close; double-click guard against orphaned streams; `health()` lock-race fix; worker reset on malformed response; fetch cancel + timeout; privacy-aware fallback wording; per-request temp-file cleanup; health error redaction. Coverage in `tests/test-stt.py` (pure helpers + stub-worker error/respawn branches + real transcription).
+
 ## v7.2 — 2026-04-20
 
 ### Three-sigil model, simplified filters, filter awareness, security fix
