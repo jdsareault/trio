@@ -1918,6 +1918,10 @@ INDEX_HTML = r"""<!doctype html>
              height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
              font-size: 16px; line-height: 1; }
   #mic-btn:hover { border-color: var(--accent); }
+  #attach-btn, #mic-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+  #attach-btn svg, #mic-btn svg { width: 18px; height: 18px; }
+  #settings-stt-page .pill { display: inline-flex; align-items: center; gap: 5px; }
+  #settings-stt-page .pill svg { width: 13px; height: 13px; }
   #mic-btn.recording { border-color: var(--err); color: var(--err);
                        animation: micpulse 1.2s ease-in-out infinite; }
   #mic-btn.working { opacity: 0.6; cursor: default; }
@@ -2099,8 +2103,8 @@ INDEX_HTML = r"""<!doctype html>
     <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
       <div id="completions"></div>
-      <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
-      <button id="mic-btn" title="dictate (speech to text)">🎤</button>
+      <button id="attach-btn" title="attach image (or paste / drop into the box)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></button>
+      <button id="mic-btn" title="dictate (speech to text)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/><line x1="8" x2="16" y1="22" y2="22"/></svg></button>
       <div id="input-stack">
         <div id="input-highlight" aria-hidden="true"></div>
         <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
@@ -3708,6 +3712,10 @@ INDEX_HTML = r"""<!doctype html>
   const sttWaveCanvas = document.getElementById('stt-wave');
   const sttSpinner = document.getElementById('stt-spinner');
   const sttVizLabel = document.getElementById('stt-viz-label');
+  // Inline SVG icons (crisp + theme-colored via currentColor). ICON_MIC is
+  // captured from the button's static markup so the glyph lives in one place.
+  const ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+  const ICON_MIC = micBtn ? micBtn.innerHTML : '';
   try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
 
   function showSttBanner(msg, kind) {
@@ -3795,6 +3803,7 @@ INDEX_HTML = r"""<!doctype html>
     if (micBtn) {
       micBtn.classList.toggle('recording', s === 'recording');
       micBtn.classList.toggle('working', s === 'working');
+      micBtn.innerHTML = (s === 'recording') ? ICON_STOP : ICON_MIC;
       micBtn.title = (s === 'recording') ? 'stop dictation'
                    : (s === 'working') ? 'transcribing…' : 'dictate (speech to text)';
     }
@@ -4319,7 +4328,7 @@ INDEX_HTML = r"""<!doctype html>
   sttStatus.textContent = '…';
   const sttTestBtn = document.createElement('button');
   sttTestBtn.className = 'pill';
-  sttTestBtn.textContent = '● Test';
+  sttTestBtn.innerHTML = ICON_MIC + 'Test';
   sttTestBtn.title = 'record a short clip and transcribe it locally';
   const sttTestVizWrap = document.createElement('div');
   sttTestVizWrap.className = 'stt-testviz';
@@ -4391,7 +4400,7 @@ INDEX_HTML = r"""<!doctype html>
     sttTestRec.onstop = async () => {
       sttTestStream.getTracks().forEach(t => t.stop());
       testWave.stop();
-      sttTestBtn.textContent = '● Test';
+      sttTestBtn.innerHTML = ICON_MIC + 'Test';
       sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
       const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
       sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
@@ -4413,7 +4422,7 @@ INDEX_HTML = r"""<!doctype html>
       refreshSttStatus();
     };
     sttTestRec.start(); sttTestRecording = true;
-    sttTestBtn.textContent = '■ Stop';
+    sttTestBtn.innerHTML = ICON_STOP + 'Stop';
     sttTestVizWrap.hidden = false; sttTestWave.hidden = false; sttTestSpin.hidden = true; sttTestVizLabel.textContent = 'listening…';
     sttTestOut.textContent = '';
     testWave.start(sttTestStream);
