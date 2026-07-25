@@ -137,6 +137,7 @@ cp "$SCRIPT_DIR/server/nth_monitor.py" "$SERVER_DIR/nth_monitor.py"
 cp "$SCRIPT_DIR/server/nth_console.py" "$SERVER_DIR/nth_console.py"
 cp "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
 cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
+cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 
