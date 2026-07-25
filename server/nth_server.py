@@ -29,7 +29,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import SLEEPING_KEYWORDS
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 DB_DIR = Path.home() / ".claude" / "nth"
 DB_PATH = DB_DIR / "nth.db"
@@ -1083,8 +1083,27 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         db.close()
 
 
+# ── Image attachment delivery (Phase 2): poll returns MCP image blocks ──
+POLL_IMAGE_FORMATS = {
+    "image/png": "png", "image/jpeg": "jpeg",
+    "image/gif": "gif", "image/webp": "webp",
+}
+MAX_POLL_IMAGE_BYTES = 8 * 1024 * 1024   # total raw image bytes per poll response
+
+
+def _attachments_for(db: sqlite3.Connection, msg_id: int):
+    """Attachment rows for a message, or [] if the table doesn't exist yet."""
+    try:
+        return db.execute(
+            "SELECT id, mime, filename, path FROM attachments "
+            "WHERE message_id = ? ORDER BY id", (msg_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False) -> str:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False):
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -1264,6 +1283,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 # Enrich with mention / reference / bang flags
                 has_mentions = False
                 msg_list = []
+                image_blocks = []
+                image_budget = MAX_POLL_IMAGE_BYTES
                 for m in display_msgs:
                     mentions_raw = m["mentions"] if m["mentions"] else ""
                     try:
@@ -1297,6 +1318,29 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         entry["referenced"] = True
                     if banged:
                         entry["banged"] = True
+                    # Phase 2: attach image metadata always; deliver actual
+                    # pixels as MCP Image blocks within the per-poll byte budget.
+                    atts = _attachments_for(db, m["id"])
+                    if atts:
+                        meta = []
+                        for a in atts:
+                            item = {"id": a["id"], "mime": a["mime"],
+                                    "filename": a["filename"] or ""}
+                            fmt = POLL_IMAGE_FORMATS.get(a["mime"])
+                            raw = None
+                            if fmt and a["path"]:
+                                try:
+                                    raw = Path(a["path"]).read_bytes()
+                                except OSError:
+                                    raw = None
+                            if raw is not None and len(raw) <= image_budget:
+                                image_blocks.append(Image(data=raw, format=fmt))
+                                image_budget -= len(raw)
+                                item["delivered"] = True
+                            else:
+                                item["delivered"] = False
+                            meta.append(item)
+                        entry["attachments"] = meta
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
@@ -1311,7 +1355,13 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     resp["has_mentions"] = True
                 if from_name_lower:
                     resp["filtered_by"] = from_name
-                return json.dumps(resp)
+                # Text JSON first (backward-compatible), then any image blocks.
+                # A plain str return still becomes a single TextContent, so
+                # text-only clients are unaffected.
+                payload = json.dumps(resp)
+                if image_blocks:
+                    return [payload, *image_blocks]
+                return payload
 
             if time.time() >= deadline:
                 nag = _sentinel_nag(member)
