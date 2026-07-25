@@ -36,18 +36,21 @@ DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.02"))
 
 
-def _audio_rms(path):
-    """RMS amplitude of an audio file (0..1), or None if it can't be measured
-    (in which case we do NOT gate — better to transcribe than wrongly reject)."""
+def _load_and_rms(path):
+    """Decode the audio ONCE and return (samples, rms). `samples` is the decoded
+    float32 array (reused for transcription so ffmpeg isn't run twice); rms is the
+    0..1 amplitude used for the silence gate. Returns (None, None) if it can't be
+    measured — in which case we do NOT gate and fall back to path-based decode."""
     try:
         import numpy as np
         from mlx_whisper.audio import load_audio
         a = np.asarray(load_audio(path), dtype=np.float32)
         if a.size == 0:
-            return 0.0
-        return float(np.sqrt(np.mean(np.square(a.astype(np.float64)))))
+            return a, 0.0
+        rms = float(np.sqrt(np.mean(np.square(a.astype(np.float64)))))
+        return a, rms
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
 
 
 def _emit(obj) -> None:
@@ -110,16 +113,19 @@ def main() -> int:
             continue
         t0 = time.time()
         try:
-            rms = _audio_rms(audio)
+            samples, rms = _load_and_rms(audio)
             if rms is not None and rms < RMS_SILENCE_THRESHOLD:
                 # Silence / quiet noise — skip Whisper so it can't hallucinate.
                 _emit({"ok": True, "text": "", "seconds": round(time.time() - t0, 2),
                        "no_speech": True, "rms": round(rms, 5)})
                 continue
+            # Reuse the decoded samples when available (avoids a 2nd ffmpeg decode);
+            # fall back to the path if decoding failed above.
+            src = samples if samples is not None else audio
             if lang:
-                result = mlx_whisper.transcribe(audio, path_or_hf_repo=model, language=lang)
+                result = mlx_whisper.transcribe(src, path_or_hf_repo=model, language=lang)
             else:
-                result = mlx_whisper.transcribe(audio, path_or_hf_repo=model)
+                result = mlx_whisper.transcribe(src, path_or_hf_repo=model)
             text = str(result.get("text") or "").strip()
             _emit({"ok": True, "text": text, "seconds": round(time.time() - t0, 2),
                    "no_speech": (not text),
