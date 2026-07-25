@@ -41,6 +41,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import errno
 import time
@@ -70,6 +71,20 @@ ALLOWED_IMAGE_MIME = {
     "image/png": ".png", "image/jpeg": ".jpg",
     "image/gif": ".gif", "image/webp": ".webp",
 }
+# ── Local speech-to-text (optional; powers /api/stt/*) ──
+# Transcription runs via a persistent nth_stt_worker.py sidecar that keeps the
+# whisper model warm, so each dictation costs only inference (~0.8s). The web
+# server itself stays stdlib-only and just pipes audio paths to that process.
+STT_MODEL = os.environ.get("NTH_STT_MODEL", "mlx-community/whisper-large-v3-turbo")
+STT_LANGUAGE = os.environ.get("NTH_STT_LANG", "en")   # "" = auto-detect
+MAX_STT_BYTES = 25 * 1024 * 1024        # 25 MB hard cap per audio clip
+# resolve() follows a symlinked install back to the repo, so the sidecar is
+# found whether nth_web.py is deployed as a symlink (link.sh) or a copy (setup.sh).
+STT_WORKER = Path(__file__).resolve().with_name("nth_stt_worker.py")
+STT_WORKER_START_TIMEOUT = 180          # generous: first spawn may download ~1.5GB
+STT_TRANSCRIBE_TIMEOUT = 60             # per-clip inference ceiling
+STT_IMPORT_PROBE_TIMEOUT = 8            # cheap "is mlx_whisper importable" check
+
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
@@ -784,6 +799,167 @@ class EventHub:
                 pass
 
 
+# ───────── Local speech-to-text worker ─────────
+def _stt_model_cached(model: str) -> bool:
+    """True if the HF weights for `model` appear to be on disk already, so the
+    UI can say 'ready' vs 'will download ~1.5GB on first use'."""
+    candidates = []
+    if os.environ.get("HUGGINGFACE_HUB_CACHE"):
+        candidates.append(Path(os.environ["HUGGINGFACE_HUB_CACHE"]))
+    if os.environ.get("HF_HOME"):
+        candidates.append(Path(os.environ["HF_HOME"]) / "hub")
+    candidates.append(Path.home() / ".cache" / "huggingface" / "hub")
+    folder = "models--" + model.replace("/", "--")
+    for hub in candidates:
+        d = hub / folder
+        try:
+            if d.is_dir() and any((d / "snapshots").glob("*/*")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _stt_ext_for(content_type: str) -> str:
+    ct = (content_type or "").split(";")[0].strip().lower()
+    return {
+        "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/wav": ".wav",
+        "audio/x-wav": ".wav", "audio/mp4": ".mp4", "audio/mpeg": ".mp3",
+        "audio/aac": ".aac", "audio/aiff": ".aiff", "audio/x-aiff": ".aiff",
+    }.get(ct, ".webm")
+
+
+class SttWorker:
+    """Manages one persistent nth_stt_worker.py subprocess that holds the whisper
+    model in memory. Thread-safe: transcription requests are serialized behind a
+    lock (dictation is one-at-a-time). Spawns lazily; respawns on death; kills a
+    hung worker on timeout. The worker exits on stdin EOF, so it self-cleans when
+    this server dies."""
+
+    def __init__(self, model: str, language: str):
+        self.model = model
+        self.language = language
+        self._proc: Optional[subprocess.Popen] = None
+        self._q: "Optional[queue.Queue]" = None
+        self._lock = threading.Lock()
+
+    def _alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _reset(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+        self._proc = None
+        self._q = None
+
+    def _spawn(self) -> None:
+        # sys.executable is the interpreter running this server; on the hub it is
+        # the env that has mlx_whisper installed.
+        proc = subprocess.Popen(
+            [sys.executable, str(STT_WORKER), self.model],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        )
+        q: "queue.Queue" = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    q.put(line)
+            except (OSError, ValueError):
+                pass
+            q.put(None)  # EOF sentinel
+
+        threading.Thread(target=_reader, daemon=True).start()
+        try:
+            first = q.get(timeout=STT_WORKER_START_TIMEOUT)
+        except queue.Empty:
+            self._reset_proc(proc)
+            raise RuntimeError("worker start timed out")
+        if first is None:
+            self._reset_proc(proc)
+            raise RuntimeError("worker exited during startup")
+        try:
+            msg = json.loads(first)
+        except ValueError:
+            self._reset_proc(proc)
+            raise RuntimeError("worker sent malformed startup line")
+        if not msg.get("ready"):
+            self._reset_proc(proc)
+            raise RuntimeError(msg.get("error") or "worker failed to load model")
+        self._proc = proc
+        self._q = q
+
+    @staticmethod
+    def _reset_proc(proc: subprocess.Popen) -> None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    def transcribe(self, audio_path: str) -> Dict[str, Any]:
+        """Blocking; returns {'text', 'seconds'} or raises RuntimeError."""
+        with self._lock:
+            if not self._alive():
+                self._spawn()
+            assert self._proc is not None and self._proc.stdin is not None and self._q is not None
+            req: Dict[str, Any] = {"audio": audio_path}
+            if self.language:
+                req["language"] = self.language
+            try:
+                self._proc.stdin.write(json.dumps(req) + "\n")
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                self._reset()
+                raise RuntimeError("worker pipe broken")
+            try:
+                line = self._q.get(timeout=STT_TRANSCRIBE_TIMEOUT)
+            except queue.Empty:
+                self._reset()   # kill the hung worker so the next call respawns
+                raise RuntimeError("transcription timed out")
+            if line is None:
+                self._reset()
+                raise RuntimeError("worker exited mid-request")
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                raise RuntimeError("worker sent malformed response")
+            if not msg.get("ok"):
+                raise RuntimeError(msg.get("error") or "transcription failed")
+            return msg
+
+    def health(self) -> Dict[str, Any]:
+        """Fast availability check for the settings status line — never loads the
+        model into this process."""
+        base = {"engine": "mlx_whisper", "model": self.model}
+        if self._alive():
+            return {**base, "available": True, "warm": True,
+                    "detail": "worker running — model is warm"}
+        try:
+            r = subprocess.run(
+                [sys.executable, "-c", "import mlx_whisper"],
+                capture_output=True, timeout=STT_IMPORT_PROBE_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return {**base, "available": False, "warm": False,
+                    "detail": f"probe failed: {e}"}
+        if r.returncode != 0:
+            tail = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1]
+            return {**base, "available": False, "warm": False,
+                    "detail": f"mlx_whisper not importable: {tail}"}
+        cached = _stt_model_cached(self.model)
+        return {**base, "available": True, "warm": False,
+                "detail": ("model cached — first use warms it (~2s)" if cached
+                           else "model will download (~1.5GB) on first use")}
+
+
+STT = SttWorker(STT_MODEL, STT_LANGUAGE)
+
+
 # ───────── HTTP handler ─────────
 class NthWebHandler(BaseHTTPRequestHandler):
     # Populated in main()
@@ -886,6 +1062,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._serve_sse()
         elif path.startswith("/api/attachment/"):
             self._serve_attachment(path)
+        elif path == "/api/stt/health":
+            self._json(STT.health())
         else:
             self._error(404, "not found")
 
@@ -897,6 +1075,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_identify()
         elif parsed.path == "/api/upload":
             self._handle_upload()
+        elif parsed.path == "/api/stt/transcribe":
+            self._handle_transcribe()
         else:
             self._error(404, "not found")
 
@@ -1222,6 +1402,56 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "id": att_id, "mime": mime,
                     "filename": filename, "url": f"/api/attachment/{att_id}"})
+
+    def _handle_transcribe(self) -> None:
+        """Accept a raw audio body (webm/ogg/wav/…), transcribe locally with the
+        warm mlx_whisper worker, and return {ok, text, seconds}. Engine failures
+        return ok:false (HTTP 200) so the client can show its fallback banner."""
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except (TypeError, ValueError):
+            self._json({"ok": False, "error": "invalid Content-Length"}, status=400)
+            return
+        if length <= 0 or length > MAX_STT_BYTES:
+            self._json({"ok": False,
+                        "error": f"missing or oversized audio (max {MAX_STT_BYTES} bytes)"},
+                       status=400)
+            return
+        try:
+            data = self.rfile.read(length)
+        except OSError:
+            self._json({"ok": False, "error": "read failed"}, status=400)
+            return
+        if len(data) != length:
+            self._json({"ok": False, "error": "incomplete upload"}, status=400)
+            return
+
+        ext = _stt_ext_for(self.headers.get("Content-Type", ""))
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            result = STT.transcribe(tmp)
+            self._json({"ok": True, "text": result.get("text", ""),
+                        "seconds": result.get("seconds"),
+                        "engine": "mlx_whisper", "model": STT_MODEL})
+        except RuntimeError as e:
+            # Engine/worker failure — 200 with ok:false so the browser reads the
+            # reason and falls back to web speech (per the configured behavior).
+            self._json({"ok": False, "error": str(e)})
+        except OSError as e:
+            self._json({"ok": False, "error": f"audio write failed: {e}"}, status=500)
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     def _serve_attachment(self, path: str) -> None:
         tail = path.rsplit("/", 1)[-1]
@@ -1684,6 +1914,29 @@ INDEX_HTML = r"""<!doctype html>
                 height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
                 font-size: 16px; line-height: 1; }
   #attach-btn:hover { border-color: var(--accent); }
+  #mic-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+             height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
+             font-size: 16px; line-height: 1; }
+  #mic-btn:hover { border-color: var(--accent); }
+  #mic-btn.recording { border-color: var(--err); color: var(--err);
+                       animation: micpulse 1.2s ease-in-out infinite; }
+  #mic-btn.working { opacity: 0.6; cursor: default; }
+  @keyframes micpulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(229,106,74,0.5); }
+    50%      { box-shadow: 0 0 0 4px rgba(229,106,74,0); }
+  }
+  #stt-banner { padding: 5px 9px; margin-bottom: 6px; border-radius: 4px; font-size: 12px; }
+  #stt-banner[hidden] { display: none; }
+  #stt-banner.warn { background: rgba(var(--mention-rgb), 0.14); color: var(--fg);
+                     border: 1px solid rgba(var(--mention-rgb), 0.45); }
+  #stt-banner.err  { background: rgba(229,106,74,0.14); color: var(--fg);
+                     border: 1px solid rgba(229,106,74,0.5); }
+  .stt-status.ok { color: #5ec26a; }
+  .stt-status.err { color: var(--err); }
+  .stt-test-out { font-size: 11px; color: var(--dim); }
+  .stt-test-out.ok { color: #5ec26a; }
+  .stt-test-out.err { color: var(--err); }
+  #settings-panel button.pill { padding: 2px 9px; }
   #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
   #attach-strip:empty { display: none; }
   .attach-thumb { position: relative; width: 60px; height: 60px; border-radius: 4px;
@@ -1814,11 +2067,13 @@ INDEX_HTML = r"""<!doctype html>
   <div id="composer">
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
+    <div id="stt-banner" hidden></div>
     <div id="attach-strip"></div>
     <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
       <div id="completions"></div>
       <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
+      <button id="mic-btn" title="dictate (speech to text)">🎤</button>
       <div id="input-stack">
         <div id="input-highlight" aria-hidden="true"></div>
         <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
@@ -1938,6 +2193,8 @@ INDEX_HTML = r"""<!doctype html>
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     initialLoad: true,        // pin to newest until the history burst settles
     pendingAttachments: [],   // images uploaded but not yet attached to a send
+    sttMode: 'local',         // 'local' (Whisper sidecar) | 'web' (browser SpeechRecognition)
+    sttRecording: false,      // mic is actively capturing
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     rateBins: new Map(),            // bin_epoch_10s → count
@@ -3413,6 +3670,141 @@ INDEX_HTML = r"""<!doctype html>
     for (const f of files) uploadImage(f);
   });
 
+  // ── Speech-to-text: mic → composer ──
+  // Two modes (state.sttMode): 'local' records a clip and POSTs it to the warm
+  // Whisper sidecar (/api/stt/transcribe); 'web' uses the browser's streaming
+  // SpeechRecognition. If a LOCAL attempt fails, we auto-fall back to web and
+  // show a banner — never a silent failure.
+  const micBtn = document.getElementById('mic-btn');
+  const sttBanner = document.getElementById('stt-banner');
+  try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
+
+  function showSttBanner(msg, kind) {
+    if (!sttBanner) return;
+    sttBanner.textContent = msg;
+    sttBanner.className = kind || '';
+    sttBanner.hidden = false;
+  }
+  function hideSttBanner() { if (sttBanner) sttBanner.hidden = true; }
+
+  function setMicState(s) {   // 'idle' | 'recording' | 'working'
+    state.sttRecording = (s === 'recording');
+    if (!micBtn) return;
+    micBtn.classList.toggle('recording', s === 'recording');
+    micBtn.classList.toggle('working', s === 'working');
+    micBtn.textContent = (s === 'working') ? '⏳' : '🎤';
+    micBtn.title = (s === 'recording') ? 'stop dictation'
+                 : (s === 'working') ? 'transcribing…' : 'dictate (speech to text)';
+  }
+
+  function insertTranscript(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    const cur = input.value;
+    input.value = cur + ((cur && !/\s$/.test(cur)) ? ' ' : '') + text;
+    input.dispatchEvent(new Event('input'));   // autosize + mention mirror + preview
+    input.focus();
+  }
+
+  // Web SpeechRecognition (streaming; interim words appear live).
+  let webRec = null;
+  function startWebDictation(fallbackReason) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      showSttBanner('Web speech recognition isn’t supported here (try Chrome or Safari).', 'err');
+      setMicState('idle');
+      return;
+    }
+    if (fallbackReason) {
+      showSttBanner('Local transcription failed: ' + fallbackReason + ' — switched to web speech. Speak now.', 'warn');
+    }
+    const base = input.value + ((input.value && !/\s$/.test(input.value)) ? ' ' : '');
+    let finalTxt = '';
+    const rec = new SR();
+    webRec = rec;
+    rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalTxt += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      input.value = base + finalTxt + interim;
+      input.dispatchEvent(new Event('input'));
+    };
+    rec.onerror = (e) => { showSttBanner('Web speech error: ' + (e.error || 'unknown'), 'err'); };
+    rec.onend = () => {
+      // Chrome auto-ends on silence/timeout; while still recording, restart so
+      // long dictation keeps going.
+      if (state.sttRecording && webRec === rec) { try { rec.start(); return; } catch (_) {} }
+      if (webRec === rec) webRec = null;
+      setMicState('idle');
+    };
+    try { rec.start(); setMicState('recording'); }
+    catch (e) { showSttBanner('Could not start web speech: ' + e.message, 'err'); setMicState('idle'); }
+  }
+  function stopWebDictation() {
+    state.sttRecording = false;
+    if (webRec) { try { webRec.stop(); } catch (_) {} }
+  }
+
+  // Local dictation: record with MediaRecorder, POST the clip to the sidecar.
+  let mediaRec = null, mediaChunks = [], mediaStream = null;
+  function stopTracks() {
+    if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  }
+  async function startLocalDictation() {
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { showSttBanner('Microphone permission denied: ' + (e.message || e.name), 'err'); setMicState('idle'); return; }
+    mediaStream = stream;
+    mediaChunks = [];
+    const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm')) ? 'audio/webm' : '';
+    try { mediaRec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+    catch (e) { stopTracks(); showSttBanner('Recording unsupported: ' + e.message, 'err'); setMicState('idle'); return; }
+    mediaChunks = [];
+    mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) mediaChunks.push(e.data); };
+    mediaRec.onstop = async () => {
+      stopTracks();
+      const blob = new Blob(mediaChunks, { type: (mediaRec && mediaRec.mimeType) || 'audio/webm' });
+      if (!blob.size) { setMicState('idle'); return; }
+      setMicState('working');
+      try {
+        const r = await fetch('/api/stt/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'audio/webm' },
+          body: blob,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok) { startWebDictation((data && data.error) || ('HTTP ' + r.status)); return; }
+        hideSttBanner();
+        insertTranscript(data.text);
+        setMicState('idle');
+      } catch (e) {
+        startWebDictation(e.message || 'network error');
+      }
+    };
+    try { mediaRec.start(); setMicState('recording'); }
+    catch (e) { stopTracks(); showSttBanner('Could not start recording: ' + e.message, 'err'); setMicState('idle'); }
+  }
+  function stopLocalDictation() {
+    state.sttRecording = false;
+    if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (_) {} }
+  }
+
+  function micToggle() {
+    if (micBtn && micBtn.classList.contains('working')) return;   // busy transcribing
+    if (state.sttRecording) { stopWebDictation(); stopLocalDictation(); return; }
+    hideSttBanner();
+    if (!window.isSecureContext) {
+      showSttBanner('Dictation needs HTTPS or localhost (this page is insecure). Use “tailscale serve” for HTTPS on your phone.', 'err');
+      return;
+    }
+    if (state.sttMode === 'web') startWebDictation();
+    else startLocalDictation();
+  }
+  if (micBtn) micBtn.addEventListener('click', micToggle);
+
   async function sendMessage() {
     let text = input.value.trim();
     const readyAtt = state.pendingAttachments.filter(a => a.id && !a.uploading);
@@ -3781,6 +4173,102 @@ INDEX_HTML = r"""<!doctype html>
     try { localStorage.setItem('trio.notifyWhen', state.notifyWhen); } catch (_) {}
   });
   const notifyWhenRow = addSettingRow('Notify when', notifyWhenSel);
+
+  // ── Transcription (speech-to-text) ──
+  try { const sm = localStorage.getItem('trio.sttMode'); if (sm === 'web' || sm === 'local') state.sttMode = sm; } catch (_) {}
+  const sttModeSel = prefSelect(
+    [['local', 'local — Whisper (on-device)'], ['web', 'web — browser']], state.sttMode);
+  sttModeSel.addEventListener('change', () => {
+    state.sttMode = sttModeSel.value;
+    try { localStorage.setItem('trio.sttMode', state.sttMode); } catch (_) {}
+    refreshSttStatus();
+  });
+  addSettingRow('Dictation', sttModeSel);
+
+  const sttStatus = document.createElement('span');
+  sttStatus.className = 'stt-status';
+  sttStatus.textContent = '…';
+  const sttStatusRow = addSettingRow('Local STT', sttStatus);
+
+  const sttTestBtn = document.createElement('button');
+  sttTestBtn.className = 'pill';
+  sttTestBtn.textContent = 'Test';
+  sttTestBtn.title = 'record a short clip and transcribe it locally';
+  const sttTestOut = document.createElement('span');
+  sttTestOut.className = 'stt-test-out';
+  const sttTestWrap = document.createElement('div');
+  sttTestWrap.style.display = 'flex';
+  sttTestWrap.style.gap = '8px';
+  sttTestWrap.style.alignItems = 'center';
+  sttTestWrap.appendChild(sttTestBtn);
+  sttTestWrap.appendChild(sttTestOut);
+  const sttTestRow = addSettingRow('Test local', sttTestWrap);
+
+  async function refreshSttStatus() {
+    const isLocal = state.sttMode === 'local';
+    if (sttStatusRow) sttStatusRow.hidden = !isLocal;
+    if (sttTestRow) sttTestRow.hidden = !isLocal;
+    if (!isLocal) return;
+    sttStatus.textContent = 'checking…'; sttStatus.className = 'stt-status';
+    try {
+      const r = await fetch('/api/stt/health');
+      const d = await r.json();
+      if (d.available) {
+        sttStatus.textContent = (d.warm ? '✓ ready (warm) — ' : '✓ ready — ') + (d.model || '');
+        sttStatus.className = 'stt-status ok';
+      } else {
+        sttStatus.textContent = '✗ ' + (d.detail || 'unavailable');
+        sttStatus.className = 'stt-status err';
+      }
+    } catch (e) {
+      sttStatus.textContent = '✗ health check failed';
+      sttStatus.className = 'stt-status err';
+    }
+  }
+
+  // Test button: record until clicked again, then transcribe + show the result.
+  let sttTestRec = null, sttTestChunks = [], sttTestStream = null, sttTestRecording = false;
+  sttTestBtn.addEventListener('click', async () => {
+    if (sttTestRecording) {
+      sttTestRecording = false;
+      if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
+      return;
+    }
+    sttTestOut.className = 'stt-test-out';
+    if (!window.isSecureContext) { sttTestOut.textContent = 'needs HTTPS or localhost'; sttTestOut.className = 'stt-test-out err'; return; }
+    try { sttTestStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { sttTestOut.textContent = 'mic denied'; sttTestOut.className = 'stt-test-out err'; return; }
+    sttTestChunks = [];
+    try { sttTestRec = new MediaRecorder(sttTestStream); }
+    catch (e) { sttTestOut.textContent = 'recording unsupported'; sttTestOut.className = 'stt-test-out err'; sttTestStream.getTracks().forEach(t => t.stop()); return; }
+    sttTestRec.ondataavailable = (e) => { if (e.data && e.data.size) sttTestChunks.push(e.data); };
+    sttTestRec.onstop = async () => {
+      sttTestStream.getTracks().forEach(t => t.stop());
+      sttTestBtn.textContent = 'Test';
+      const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
+      sttTestOut.textContent = 'transcribing…'; sttTestOut.className = 'stt-test-out';
+      try {
+        const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+          sttTestOut.textContent = '✓ “' + (d.text || '(silence)') + '”' + (d.seconds != null ? ' (' + d.seconds + 's)' : '');
+          sttTestOut.className = 'stt-test-out ok';
+        } else {
+          sttTestOut.textContent = '✗ ' + (d.error || ('HTTP ' + r.status));
+          sttTestOut.className = 'stt-test-out err';
+        }
+      } catch (e) {
+        sttTestOut.textContent = '✗ ' + (e.message || 'failed');
+        sttTestOut.className = 'stt-test-out err';
+      }
+      refreshSttStatus();
+    };
+    sttTestRec.start(); sttTestRecording = true;
+    sttTestBtn.textContent = '■ stop';
+    sttTestOut.textContent = 'recording… click stop when done';
+  });
+
+  refreshSttStatus();
 
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
