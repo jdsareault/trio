@@ -28,6 +28,26 @@ import time
 import wave
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+# Whisper hallucinates words from silence/near-silence, and its own
+# no_speech_prob is unreliable (mlx returns ~0 even for pure silence). So we gate
+# on actual audio energy (RMS): below this floor we skip transcription entirely
+# and report no speech. Measured: silence≈0.000, quiet room noise≈0.010,
+# speech≈0.156 — so 0.02 cleanly separates speech from silence/quiet noise.
+RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.02"))
+
+
+def _audio_rms(path):
+    """RMS amplitude of an audio file (0..1), or None if it can't be measured
+    (in which case we do NOT gate — better to transcribe than wrongly reject)."""
+    try:
+        import numpy as np
+        from mlx_whisper.audio import load_audio
+        a = np.asarray(load_audio(path), dtype=np.float32)
+        if a.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(a.astype(np.float64)))))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _emit(obj) -> None:
@@ -90,12 +110,20 @@ def main() -> int:
             continue
         t0 = time.time()
         try:
+            rms = _audio_rms(audio)
+            if rms is not None and rms < RMS_SILENCE_THRESHOLD:
+                # Silence / quiet noise — skip Whisper so it can't hallucinate.
+                _emit({"ok": True, "text": "", "seconds": round(time.time() - t0, 2),
+                       "no_speech": True, "rms": round(rms, 5)})
+                continue
             if lang:
                 result = mlx_whisper.transcribe(audio, path_or_hf_repo=model, language=lang)
             else:
                 result = mlx_whisper.transcribe(audio, path_or_hf_repo=model)
             text = str(result.get("text") or "").strip()
-            _emit({"ok": True, "text": text, "seconds": round(time.time() - t0, 2)})
+            _emit({"ok": True, "text": text, "seconds": round(time.time() - t0, 2),
+                   "no_speech": (not text),
+                   "rms": (round(rms, 5) if rms is not None else None)})
         except Exception as e:  # noqa: BLE001
             _emit({"ok": False, "error": str(e)})
     return 0

@@ -88,6 +88,19 @@ else:
         check("second call stays warm (still transcribes)",
               "quick brown fox" in (r2.get("text") or "").lower())
 
+        # Silence must be flagged no_speech (Whisper skipped) — not hallucinated.
+        import wave
+        silent = str(Path(tmpdir) / "silence.wav")
+        with wave.open(silent, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 32000)   # 2s of digital silence
+        rs = worker.transcribe(silent)
+        check("silence flagged no_speech", rs.get("no_speech") is True)
+        check("silence yields no text", not (rs.get("text") or "").strip())
+
+        # Real speech must NOT be flagged no_speech.
+        check("speech not flagged no_speech", r1.get("no_speech") is False)
+
         # Bad audio path -> RuntimeError (surfaces as ok:false to the client).
         raised = False
         try:

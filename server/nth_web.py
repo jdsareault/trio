@@ -1439,6 +1439,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             result = STT.transcribe(tmp)
             self._json({"ok": True, "text": result.get("text", ""),
                         "seconds": result.get("seconds"),
+                        "no_speech": bool(result.get("no_speech")),
                         "engine": "mlx_whisper", "model": STT_MODEL})
         except RuntimeError as e:
             # Engine/worker failure — 200 with ok:false so the browser reads the
@@ -3717,6 +3718,10 @@ INDEX_HTML = r"""<!doctype html>
   // captured from the button's static markup so the glyph lives in one place.
   const ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
   const ICON_MIC = micBtn ? micBtn.innerHTML : '';
+  // Below this normalized peak amplitude a clip is treated as silent and never
+  // sent to Whisper (which otherwise hallucinates words from noise). Kept lenient
+  // so quiet speech still goes through; the server no_speech check is the backstop.
+  const STT_SILENCE_PEAK = 0.015;
   try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
 
   function showSttBanner(msg, kind) {
@@ -3731,8 +3736,10 @@ INDEX_HTML = r"""<!doctype html>
   // composer and the settings test page. Returns { start(stream), stop() }.
   function makeWaveform(canvas) {
     let raf = null, audioCtx = null, analyser = null, source = null, data = null;
+    let peak = 0, sampled = false;   // loudest normalized sample seen this session (0..1)
     function start(stream) {
       stop();
+      peak = 0; sampled = false;
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC || !canvas || !stream) return;
       try {
@@ -3756,12 +3763,16 @@ INDEX_HTML = r"""<!doctype html>
         cx.strokeStyle = stroke;
         cx.beginPath();
         const slice = w / data.length;
-        let x = 0;
+        let x = 0, frameMax = 0;
         for (let i = 0; i < data.length; i++) {
+          const dev = Math.abs(data[i] - 128);
+          if (dev > frameMax) frameMax = dev;
           const y = (data[i] / 128.0) * h / 2;   // 128 = silence midline
           if (i === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
           x += slice;
         }
+        sampled = true;
+        if (frameMax / 128 > peak) peak = frameMax / 128;   // energy proxy for silence detection
         cx.stroke();
       }
       draw();
@@ -3772,7 +3783,9 @@ INDEX_HTML = r"""<!doctype html>
       if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
       analyser = null; data = null;
     }
-    return { start, stop };
+    // getPeak() returns -1 when no audio was ever sampled (analyser unavailable),
+    // so callers can distinguish "silent" from "couldn't measure".
+    return { start, stop, getPeak: () => (sampled ? peak : -1) };
   }
 
   const composerWave = makeWaveform(sttWaveCanvas);
@@ -3881,8 +3894,14 @@ INDEX_HTML = r"""<!doctype html>
     mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) mediaChunks.push(e.data); };
     mediaRec.onstop = async () => {
       stopTracks();
+      const peak = composerWave.getPeak();
       const blob = new Blob(mediaChunks, { type: (mediaRec && mediaRec.mimeType) || 'audio/webm' });
       if (!blob.size) { setMicState('idle'); return; }
+      if (peak >= 0 && peak < STT_SILENCE_PEAK) {   // essentially silent — don't feed Whisper
+        setMicState('idle');
+        showSttBanner('No message detected — try again.', 'warn');
+        return;
+      }
       setMicState('working');
       showViz('spin', 'transcribing…');
       try {
@@ -3893,6 +3912,11 @@ INDEX_HTML = r"""<!doctype html>
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok || !data.ok) { startWebDictation((data && data.error) || ('HTTP ' + r.status)); return; }
+        if (data.no_speech || !(data.text || '').trim()) {   // Whisper's own no-speech backstop
+          setMicState('idle');
+          showSttBanner('No message detected — try again.', 'warn');
+          return;
+        }
         hideSttBanner();
         insertTranscript(data.text);
         setMicState('idle');
@@ -4400,17 +4424,29 @@ INDEX_HTML = r"""<!doctype html>
     sttTestRec.ondataavailable = (e) => { if (e.data && e.data.size) sttTestChunks.push(e.data); };
     sttTestRec.onstop = async () => {
       sttTestStream.getTracks().forEach(t => t.stop());
+      const peak = testWave.getPeak();
       testWave.stop();
       sttTestBtn.innerHTML = ICON_MIC + 'Test';
-      sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
       const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
+      if (peak >= 0 && peak < STT_SILENCE_PEAK) {   // silent — no round trip
+        sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+        sttTestOut.textContent = 'no message detected — try again';
+        sttTestOut.className = 'stt-test-out err';
+        return;
+      }
+      sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
       sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
       try {
         const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
         const d = await r.json().catch(() => ({}));
         if (r.ok && d.ok) {
-          sttTestOut.textContent = '✓ “' + (d.text || '(silence)') + '”' + (d.seconds != null ? ' (' + d.seconds + 's)' : '');
-          sttTestOut.className = 'stt-test-out ok';
+          if (d.no_speech || !(d.text || '').trim()) {
+            sttTestOut.textContent = 'no message detected — try again';
+            sttTestOut.className = 'stt-test-out err';
+          } else {
+            sttTestOut.textContent = '✓ “' + d.text + '”' + (d.seconds != null ? ' (' + d.seconds + 's)' : '');
+            sttTestOut.className = 'stt-test-out ok';
+          }
         } else {
           sttTestOut.textContent = '✗ ' + (d.error || ('HTTP ' + r.status));
           sttTestOut.className = 'stt-test-out err';
