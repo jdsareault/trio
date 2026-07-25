@@ -1921,7 +1921,8 @@ INDEX_HTML = r"""<!doctype html>
   #attach-btn, #mic-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
   #attach-btn svg, #mic-btn svg { width: 18px; height: 18px; }
   #settings-stt-page .pill { display: inline-flex; align-items: center; gap: 5px; }
-  #settings-stt-page .pill svg { width: 13px; height: 13px; }
+  .pill svg { width: 13px; height: 13px; flex-shrink: 0; }
+  .pill-icon { display: inline-flex; align-items: center; gap: 5px; }
   #mic-btn.recording { border-color: var(--err); color: var(--err);
                        animation: micpulse 1.2s ease-in-out infinite; }
   #mic-btn.working { opacity: 0.6; cursor: default; }
@@ -2063,9 +2064,9 @@ INDEX_HTML = r"""<!doctype html>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
-    <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
-    <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
-    <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
+    <span class="pill pill-icon" id="btn-notify" title="desktop notifications on @you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="lbl">off</span></span>
+    <span class="pill pill-icon" id="btn-sound" title="play a chime on any new message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
+    <span class="pill pill-icon" id="btn-settings" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">settings</span></span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
   <div id="settings-panel" hidden>
@@ -4121,11 +4122,11 @@ INDEX_HTML = r"""<!doctype html>
         return;
       }
       state.notifyEnabled = true;
-      btnNotify.textContent = '🔔 on';
+      btnNotify.querySelector('.lbl').textContent = 'on';
       btnNotify.classList.add('on');
     } else {
       state.notifyEnabled = false;
-      btnNotify.textContent = '🔔 off';
+      btnNotify.querySelector('.lbl').textContent = 'off';
       btnNotify.classList.remove('on');
     }
     if (typeof syncSettingVisibility === 'function') syncSettingVisibility();
@@ -4169,7 +4170,7 @@ INDEX_HTML = r"""<!doctype html>
   // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
   btnSound.addEventListener('click', () => {
     state.soundEnabled = !state.soundEnabled;
-    btnSound.textContent = state.soundEnabled ? '🔊 on' : '🔊 off';
+    btnSound.querySelector('.lbl').textContent = state.soundEnabled ? 'on' : 'off';
     btnSound.classList.toggle('on', state.soundEnabled);
     try { localStorage.setItem('trio.sound', state.soundEnabled ? '1' : '0'); } catch (_) {}
     // The click is a user gesture — unlock the AudioContext and preview the chime.
@@ -4180,7 +4181,7 @@ INDEX_HTML = r"""<!doctype html>
   try {
     if (localStorage.getItem('trio.sound') === '1') {
       state.soundEnabled = true;
-      btnSound.textContent = '🔊 on';
+      btnSound.querySelector('.lbl').textContent = 'on';
       btnSound.classList.add('on');
     }
   } catch (_) {}
@@ -4210,7 +4211,7 @@ INDEX_HTML = r"""<!doctype html>
     }
   });
 
-  // ── Settings panel: relocate controls out of the header into a ⚙ drawer ──
+  // ── Settings panel: relocate controls out of the header into a gear drawer ──
   // appendChild MOVES the live elements, so every existing handler/state stays
   // intact — no rewiring, no reproducing the font list.
   const btnSettings = document.getElementById('btn-settings');
