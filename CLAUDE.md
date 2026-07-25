@@ -51,14 +51,26 @@ Read CURRENT.md first when picking up this project cold.
 
 ## Development Workflow
 
+Two deploy modes:
+
+- **Copy deploy — `setup.sh`** (releases / other machines): copies repo files into
+  `~/.claude/skills/{trio,quartet,nth}/`. Independent copies → editing the install
+  drifts from the repo.
+- **Symlink deploy — `link.sh`** (active local dev, preferred here): symlinks the
+  same install paths at this repo working tree, so the running server + skills ARE
+  the checked-out code — no copy, no drift. Idempotent; re-run after adding a new
+  server module. ⚠️ Running `setup.sh` overwrites the symlinks with copies — re-run
+  `link.sh` to restore the dev links.
+
 ```bash
-# Install/update after editing
-bash setup.sh
+# Dev deploy via symlinks (this clone lives at ~/Development/trio)
+bash link.sh
 
 # Verify MCP registration
 claude mcp list
 
-# Test: restart Claude Code, then run /trio in any session
+# Apply code changes: restart Claude Code (reloads nth-trio + /trio from disk).
+# nth_web.py changes need only a dashboard re-run — no Claude Code restart.
 ```
 
 There are no automated tests. Validation is done through live multi-agent sessions. The `reviews/` directory contains code review reports and live test logs from prior sessions.
