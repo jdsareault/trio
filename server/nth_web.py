@@ -3106,35 +3106,11 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   // ── Selectable answers (trio_ask picker / questionnaire) ──
-  // Normalize a choices payload to a list of question objects, tolerating both
-  // the batched shape ({target, questions:[…]}) and the legacy single shape
-  // ({target, question, options, mode}).
-  function askQuestions(choices) {
-    if (choices && Array.isArray(choices.questions)) return choices.questions;
-    if (choices && Array.isArray(choices.options)) {
-      return [{ question: choices.question, options: choices.options, mode: choices.mode }];
-    }
-    return [];
-  }
-  // Normalize a stored selection to a per-question answer list, tolerating the
-  // legacy single-answer shape ({picked, custom:string}).
-  function askAnswers(sel) {
-    if (sel && Array.isArray(sel.answers)) return sel.answers;
-    if (sel && (Array.isArray(sel.picked) || typeof sel.custom === 'string')) {
-      return [{ picked: sel.picked || [],
-                custom: sel.custom ? [sel.custom] : [] }];
-    }
-    return [];
-  }
-  // One question's answer string: selected option texts + typed answers, all
-  // comma-joined. This is what the asking agent reads.
-  function answerStringFor(q, picked, customList) {
-    const parts = [];
-    const opts = Array.isArray(q.options) ? q.options : [];
-    for (const i of picked) { if (opts[i] !== undefined) parts.push(opts[i]); }
-    for (const c of (customList || [])) { const t = (c || '').trim(); if (t) parts.push(t); }
-    return parts.join(', ');
-  }
+  // Pure, DOM-free helpers (askQuestions / isAskChoices / askAnswers /
+  // answerStringFor / composeAnswer) are injected here from
+  // server/nth_ask_client.js so they can be unit-tested under Node. See that
+  // file — do NOT redefine them inline.
+  /*__ASK_HELPERS__*/
   function askHeader(q, qi) {
     const h = document.createElement('div');
     h.className = 'ask-qnum';
@@ -3263,13 +3239,8 @@ INDEX_HTML = r"""<!doctype html>
       if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
     }
     function composedAnswer() {
-      return questions.map((q, qi) => {
-        const st = qstate[qi];
-        const picked = [...st.selected].sort((a, b) => a - b);
-        const customs = st.customInputs.map(i => i.value.trim()).filter(Boolean);
-        const a = answerStringFor(q, picked, customs);
-        return multi ? ((q.question || ('Q' + (qi + 1))) + ' → ' + a) : a;
-      }).join(multi ? '\n' : '');
+      // Delegate the (pure, unit-tested) text composition to composeAnswer.
+      return composeAnswer(questions, selectionPayload().answers, multi);
     }
     function selectionPayload() {
       return { answers: questions.map((q, qi) => {
@@ -3562,7 +3533,7 @@ INDEX_HTML = r"""<!doctype html>
 
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
-    const isAsk = !isSystem && askQuestions(m.choices).length > 0;
+    const isAsk = !isSystem && isAskChoices(m.choices);
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
@@ -5490,12 +5461,27 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
+# Pure ask helpers live in nth_ask_client.js so they can be unit-tested under
+# Node; inject them into the page here. .resolve() follows the symlinked
+# install back to the repo dir where the sibling .js lives. Drop the trailing
+# CommonJS export guard for the inline copy.
+def _load_ask_helpers() -> str:
+    try:
+        js = Path(__file__).resolve().with_name("nth_ask_client.js").read_text()
+    except OSError as e:
+        sys.stderr.write(f"[nth_web] could not load nth_ask_client.js: {e}\n")
+        return "/* ask helpers unavailable */"
+    return js.split("if (typeof module")[0].rstrip()
+
+
 # One-shot substitution at import time — inject the emoji list into the JS
-# so server-side animal_for() and client-side animalFor() stay in sync.
+# so server-side animal_for() and client-side animalFor() stay in sync, plus
+# the pure ask helpers.
 INDEX_HTML = (
     INDEX_HTML
     .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
     .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
+    .replace("/*__ASK_HELPERS__*/", _load_ask_helpers())
 )
 
 
