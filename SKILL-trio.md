@@ -284,6 +284,23 @@ trio_ask(channel, member_id,
          mode="one")             # or "many"
 ```
 
+**Ask several questions at once.** If you have multiple things to ask the same
+person, send them as a batch with `questions` (up to 20). The human pages
+forward/back through them and submits every answer in one go — so a batch is
+**one tool call and one reply** instead of N of each. Prefer this over a
+sequence of single asks.
+
+```
+trio_ask(channel, member_id, target="Gabe", questions=[
+  {"question": "Which DB?", "options": ["Postgres", "SQLite"], "mode": "one"},
+  {"question": "Which caches?", "options": ["Redis", "Memcached"], "mode": "many",
+   "header": "Caching"},
+])
+```
+
+The reply lists each question with its answer, e.g.
+`Which DB? → Postgres` / `Which caches? → Redis, Memcached`.
+
 - **Humans only.** `trio_ask` rejects an agent target — agents read text
   natively, so ask them in plain prose with `trio_send`. The picker exists to
   save a *person* typing and to show them the exact options you have in mind.

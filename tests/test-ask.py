@@ -91,10 +91,12 @@ check("ask: returns resolved target name", r.get("target") == "Gabe")
 qid = r.get("message_id")
 row = msg_row(CH, qid)
 ch = json.loads(row["choices"]) if row and row["choices"] else {}
-check("ask: choices.mode stored", ch.get("mode") == "one")
-check("ask: choices.options stored", ch.get("options") == ["Postgres", "SQLite"])
+q0 = (ch.get("questions") or [{}])[0]
+check("ask: single question stored as 1-item questions list", len(ch.get("questions") or []) == 1)
+check("ask: choices.mode stored", q0.get("mode") == "one")
+check("ask: choices.options stored", q0.get("options") == ["Postgres", "SQLite"])
 check("ask: choices.target is the human id", ch.get("target") == human)
-check("ask: choices.question stored", ch.get("question") == "Which database?")
+check("ask: choices.question stored", q0.get("question") == "Which database?")
 check("ask: pings the target", human in json.loads(row["mentions"] or "[]"))
 check("ask: content carries a readable transcript",
       "Which database?" in (row["content"] or "") and "Postgres" in (row["content"] or ""))
@@ -103,7 +105,34 @@ check("ask: content carries a readable transcript",
 r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="Pick tools",
                            options=["a", "b", "c"], target=human, mode="many"))
 ch = json.loads(msg_row(CH, r["message_id"])["choices"])
-check("ask: mode=many stored", ch.get("mode") == "many")
+check("ask: mode=many stored", ch["questions"][0].get("mode") == "many")
+
+# batched questionnaire: multiple questions in one ask
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=[
+    {"question": "Size?", "options": ["S", "M", "L"], "mode": "one"},
+    {"question": "Toppings?", "options": ["Cheese", "Pepperoni"], "mode": "many", "header": "Extras"},
+]))
+check("ask: batch accepted", r.get("ok") is True and r.get("questions") == 2)
+chb = json.loads(msg_row(CH, r["message_id"])["choices"])
+check("ask: batch stores all questions", len(chb.get("questions") or []) == 2)
+check("ask: batch keeps per-question mode", chb["questions"][1]["mode"] == "many")
+check("ask: batch keeps header", chb["questions"][1]["header"] == "Extras")
+check("ask: batch transcript lists both", "Size?" in msg_row(CH, r["message_id"])["content"]
+      and "Toppings?" in msg_row(CH, r["message_id"])["content"])
+
+# batch validation: empty list, too many, a bad question in the set
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=[]))
+check("ask: empty questions list rejected", "error" in r and "non-empty" in r["error"].lower())
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human,
+                           questions=[{"question": f"q{i}?", "options": ["a", "b"]}
+                                      for i in range(srv.MAX_ASK_QUESTIONS + 1)]))
+check("ask: too many questions rejected", "error" in r and "too many questions" in r["error"].lower())
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=[
+    {"question": "ok?", "options": ["a", "b"]},
+    {"question": "bad?", "options": ["only"]},   # <2 options
+]))
+check("ask: bad question in batch rejected (indexed)",
+      "error" in r and "question 2" in r["error"].lower())
 
 # agent target rejected
 r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
@@ -119,7 +148,8 @@ check("ask: unknown target rejected", "error" in r and "no member" in r["error"]
 r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
                            options=["Yes", "yes", "  ", "No"], target=human))
 ch = json.loads(msg_row(CH, r["message_id"])["choices"])
-check("ask: dedupes case-insensitively + drops blanks", ch.get("options") == ["Yes", "No"])
+check("ask: dedupes case-insensitively + drops blanks",
+      ch["questions"][0].get("options") == ["Yes", "No"])
 
 # fewer than 2 distinct options
 r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
@@ -341,27 +371,50 @@ try:
         check("live: ask accepted for loopback human", r.get("ok") is True)
         qid3 = r["message_id"]
 
-        # Human answers via the picker's POST shape.
+        # Human answers via the picker's POST shape (answers list, one entry).
         st, resp = http(port, "/api/send", "POST",
                         {"content": "Yes", "reply_to": qid3,
-                         "selection": {"picked": [0], "custom": ""}})
+                         "selection": {"answers": [{"picked": [0], "custom": []}]}})
         check("live: answer send accepted", st == 200 and resp.get("ok"))
         arow = msg_row(CH3, resp.get("id")) if resp.get("id") else None
         check("live: answer row links reply_to", arow and arow["reply_to"] == qid3)
         sel = json.loads(arow["selection"]) if arow and arow["selection"] else {}
-        check("live: answer row stores selection", sel.get("picked") == [0])
+        check("live: answer row stores selection",
+              (sel.get("answers") or [{}])[0].get("picked") == [0])
+
+        # Batched questionnaire: answer a 2-question ask in one submit.
+        rb = json.loads(srv.nth_ask(channel=CH3, member_id=asker3, target=human3, questions=[
+            {"question": "Size?", "options": ["S", "M"], "mode": "one"},
+            {"question": "Toppings?", "options": ["Cheese", "Pepperoni"], "mode": "many"},
+        ]))
+        qidb = rb["message_id"]
+        st, resp = http(port, "/api/send", "POST",
+                        {"content": "Size? → M\nToppings? → Cheese, Pepperoni",
+                         "reply_to": qidb,
+                         "selection": {"answers": [{"picked": [1], "custom": []},
+                                                   {"picked": [0, 1], "custom": ["Olives"]}]}})
+        check("live: batch answer accepted", st == 200 and resp.get("ok"))
+        # answer-count mismatch on a FRESH batch → 400
+        rb2 = json.loads(srv.nth_ask(channel=CH3, member_id=asker3, target=human3, questions=[
+            {"question": "A?", "options": ["1", "2"]},
+            {"question": "B?", "options": ["3", "4"]},
+        ]))
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": rb2["message_id"],
+                      "selection": {"answers": [{"picked": [0], "custom": []}]}})
+        check("live: batch answer-count mismatch -> 400", st == 400)
 
         # Answer-path invariants (the LOTC hardening).
-        # (a) already-answered → 409 (qid3 was just answered above).
+        # (a) already-answered → 409 (qid3 was answered above).
         st, _ = http(port, "/api/send", "POST",
                      {"content": "No", "reply_to": qid3,
-                      "selection": {"picked": [1], "custom": ""}})
+                      "selection": {"answers": [{"picked": [1], "custom": []}]}})
         check("live: second answer to same question -> 409", st == 409)
 
         # (b) selection on a non-question message → 400.
         st, _ = http(port, "/api/send", "POST",
                      {"content": "x", "reply_to": hello_id,
-                      "selection": {"picked": [0], "custom": ""}})
+                      "selection": {"answers": [{"picked": [0], "custom": []}]}})
         check("live: selection on non-ask message -> 400", st == 400)
 
         # (c) answering a question addressed to someone else → 403.
@@ -378,7 +431,7 @@ try:
         qid_other = r["message_id"]
         st, _ = http(port, "/api/send", "POST",
                      {"content": "A", "reply_to": qid_other,
-                      "selection": {"picked": [0], "custom": ""}})
+                      "selection": {"answers": [{"picked": [0], "custom": []}]}})
         check("live: answering someone else's question -> 403", st == 403)
 
         # (d) picked index out of range → 400.
@@ -386,19 +439,19 @@ try:
                                    options=["A", "B"], target=human3))
         st, _ = http(port, "/api/send", "POST",
                      {"content": "?", "reply_to": r["message_id"],
-                      "selection": {"picked": [99], "custom": ""}})
+                      "selection": {"answers": [{"picked": [99], "custom": []}]}})
         check("live: selection.picked out of range -> 400", st == 400)
 
         # Negative validation (request-shape).
         st, _ = http(port, "/api/send", "POST",
-                     {"content": "x", "selection": {"picked": [0], "custom": ""}})
+                     {"content": "x", "selection": {"answers": [{"picked": [0], "custom": []}]}})
         check("live: selection without reply_to -> 400", st == 400)
         st, _ = http(port, "/api/send", "POST",
                      {"content": "x", "reply_to": 999999})
         check("live: reply_to to missing message -> 400", st == 400)
         st, _ = http(port, "/api/send", "POST",
                      {"content": "x", "reply_to": qid3,
-                      "selection": {"picked": ["nope"], "custom": ""}})
+                      "selection": {"answers": [{"picked": ["nope"], "custom": []}]}})
         check("live: non-int selection.picked -> 400", st == 400)
 except OSError as e:
     skip("live round-trip", f"could not start server: {e}")

@@ -1100,6 +1100,47 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 # ── Selectable answers: agent poses a multiple-choice question to a human ──
 MAX_ASK_OPTIONS = 12
 MAX_ASK_OPTION_LEN = 300
+MAX_ASK_QUESTIONS = 20          # a single trio_ask can bundle up to this many
+MAX_ASK_HEADER_LEN = 60
+
+
+def _normalize_ask_question(item):
+    """Validate + normalize one question dict {question, options, mode?, header?}.
+    Returns (qdict, error) with exactly one non-None. Shared by the single- and
+    batched-question paths so both enforce identical rules."""
+    if not isinstance(item, dict):
+        return None, "each question must be an object with question + options."
+    q = (item.get("question") or "").strip()
+    if not q:
+        return None, "question cannot be empty."
+    if len(q) > 2000:
+        return None, f"question too long ({len(q)} > 2000)."
+    mode = (item.get("mode") or "one").strip().lower()
+    if mode not in ("one", "many"):
+        return None, 'mode must be "one" or "many".'
+    opts = item.get("options")
+    if not isinstance(opts, list):
+        return None, "options must be a list of strings."
+    seen: set = set()
+    clean: list[str] = []
+    for o in opts:
+        if not isinstance(o, str):
+            return None, "each option must be a string."
+        o = o.strip()
+        if not o:
+            continue
+        if len(o) > MAX_ASK_OPTION_LEN:
+            return None, f"option too long (max {MAX_ASK_OPTION_LEN} chars)."
+        if o.lower() in seen:
+            continue
+        seen.add(o.lower())
+        clean.append(o)
+    if len(clean) < 2:
+        return None, "provide at least 2 distinct options."
+    if len(clean) > MAX_ASK_OPTIONS:
+        return None, f"too many options (max {MAX_ASK_OPTIONS})."
+    header = (item.get("header") or "").strip()[:MAX_ASK_HEADER_LEN]
+    return {"question": q, "options": clean, "mode": mode, "header": header}, None
 
 
 def _resolve_human_target(db, channel: str, target: str):
@@ -1137,24 +1178,35 @@ def _resolve_human_target(db, channel: str, target: str):
 def nth_ask(
     channel: str,
     member_id: str,
-    question: str,
-    options: list[str],
     target: str,
+    question: str = "",
+    options: list[str] | None = None,
     mode: str = "one",
+    questions: list[dict] | None = None,
     session_token: str = "",
 ) -> str:
-    """Ask a HUMAN a multiple-choice question they answer by clicking in the
-    web dashboard. Use this ONLY for questions directed at a person — never at
-    another agent. Agents should just ask each other in plain prose with
-    nth_send; the clickable picker exists to save a human typing and to show
-    them the exact option set you have in mind.
+    """Ask a HUMAN one or more multiple-choice questions they answer by clicking
+    in the web dashboard. Use this ONLY for questions directed at a person —
+    never at another agent. Agents should just ask each other in plain prose
+    with nth_send; the clickable picker exists to save a human typing and to
+    show them the exact option set you have in mind.
 
-    The human sees your question with your options as buttons (radio for
-    mode="one", checkboxes for mode="many"), plus a free-text box so they can
-    always type their own answer instead. Nothing is sent until they confirm.
-    Their answer comes back to the channel as an ordinary reply message (a
-    reply_to this question) — you just read it like any other message. You do
-    NOT need to poll differently or parse a special format; read the words.
+    Two ways to call it:
+      • Single question — pass `question` + `options` (+ optional `mode`).
+      • A SET of questions — pass `questions`, a list of objects each with
+        {"question", "options", "mode"?, "header"?}. The human pages
+        forward/back through them and submits every answer at once, so a
+        batch costs ONE tool call and ONE reply instead of N of each. Prefer
+        this whenever you have several things to ask the same person.
+
+    The human sees each question's options as clickable choices (single-select
+    for mode="one", multi-select for mode="many"), plus free-text boxes so they
+    can always type their own answer. Nothing is sent until they submit.
+
+    Their answer comes back to the channel as ONE ordinary reply message (a
+    reply_to this ask) — you just read it like any other message. You do NOT
+    need to poll differently or parse a special format; read the words. For a
+    batch the reply lists each question with its answer.
 
     The target MUST be a human (someone who joined via the web dashboard).
     Asking an agent is rejected — address agents directly with nth_send.
@@ -1162,51 +1214,40 @@ def nth_ask(
     Args:
         channel: Channel code
         member_id: Your member ID (from nth_connect)
-        question: The question to ask (max 2000 chars)
-        options: The choices to offer (2–12 items). The human can also type
-                 their own answer regardless of these.
         target: Who to ask — a human member's name, guest stem, or member id.
-        mode: "one" for a single choice (radio), "many" to allow multiple
-              selections (checkboxes). Default "one".
+        question: The question to ask (single-question form; max 2000 chars).
+        options: The choices to offer (single-question form; 2–12 items).
+        mode: "one" (single choice) or "many" (multiple); single-question form.
+        questions: A list of question objects for a batched questionnaire (up
+                   to 20). Each: {"question": str, "options": [str,...],
+                   "mode": "one"|"many", "header": short label?}. When given,
+                   `question`/`options`/`mode` are ignored.
         session_token: Optional session capability token (from nth_connect).
     """
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
 
-    question = (question or "").strip()
-    if not question:
-        return json.dumps({"error": "question cannot be empty."})
-    if len(question) > 2000:
-        return json.dumps({"error": f"question too long ({len(question)} > 2000)."})
-
-    mode = (mode or "one").strip().lower()
-    if mode not in ("one", "many"):
-        return json.dumps({"error": 'mode must be "one" or "many".'})
-
-    # Normalize options: strip, drop blanks, cap length and count, dedupe
-    # while preserving order (a duplicate option would render two identical
-    # buttons that map to the same answer — pointless and confusing).
-    if not isinstance(options, list):
-        return json.dumps({"error": "options must be a list of strings."})
-    seen_opt: set = set()
-    clean_opts: list[str] = []
-    for o in options:
-        if not isinstance(o, str):
-            return json.dumps({"error": "each option must be a string."})
-        o = o.strip()
-        if not o:
-            continue
-        if len(o) > MAX_ASK_OPTION_LEN:
-            return json.dumps({"error": f"option too long (max {MAX_ASK_OPTION_LEN} chars)."})
-        if o.lower() in seen_opt:
-            continue
-        seen_opt.add(o.lower())
-        clean_opts.append(o)
-    if len(clean_opts) < 2:
-        return json.dumps({"error": "provide at least 2 distinct options."})
-    if len(clean_opts) > MAX_ASK_OPTIONS:
-        return json.dumps({"error": f"too many options (max {MAX_ASK_OPTIONS})."})
+    # Build the normalized question list from either the batched `questions`
+    # param or the single question/options args. Both paths share the same
+    # per-question validation (_normalize_ask_question).
+    if questions is not None:
+        if not isinstance(questions, list) or not questions:
+            return json.dumps({"error": "questions must be a non-empty list."})
+        if len(questions) > MAX_ASK_QUESTIONS:
+            return json.dumps({"error": f"too many questions (max {MAX_ASK_QUESTIONS})."})
+        qlist: list[dict] = []
+        for idx, item in enumerate(questions, 1):
+            qn, qerr = _normalize_ask_question(item)
+            if qerr or qn is None:
+                return json.dumps({"error": f"question {idx}: {qerr or 'invalid'}"})
+            qlist.append(qn)
+    else:
+        qn, qerr = _normalize_ask_question(
+            {"question": question, "options": options, "mode": mode})
+        if qerr or qn is None:
+            return json.dumps({"error": qerr or "invalid question"})
+        qlist = [qn]
 
     db = get_db()
     try:
@@ -1243,22 +1284,29 @@ def nth_ask(
                 "Ask an agent directly with a plain nth_send message."
             )})
 
-        # Human-readable transcript form so console tailers and other agents
-        # see the full question + options. The web dashboard renders the
-        # interactive picker from the `choices` payload instead of this text.
-        lines = [question, ""]
-        for i, o in enumerate(clean_opts, 1):
-            lines.append(f"  {i}. {o}")
-        lines.append("")
-        lines.append(f"_(select {'one' if mode == 'one' else 'one or more'} in the dashboard, "
-                     "or type your own answer)_")
-        content = "\n".join(lines)
+        # Human-readable transcript so console tailers and other agents see the
+        # full questions + options. The web dashboard renders the interactive
+        # picker from the `choices` payload instead of this text.
+        if len(qlist) == 1:
+            q = qlist[0]
+            lines = [q["question"], ""]
+            for i, o in enumerate(q["options"], 1):
+                lines.append(f"  {i}. {o}")
+            lines.append("")
+            lines.append(f"_(select {'one' if q['mode'] == 'one' else 'one or more'} "
+                         "in the dashboard, or type your own answer)_")
+        else:
+            lines = [f"{len(qlist)} questions — answer in the dashboard:", ""]
+            for qi, q in enumerate(qlist, 1):
+                lines.append(f"{qi}. {q['question']}")
+                for o in q["options"]:
+                    lines.append(f"     - {o}")
+                lines.append("")
+        content = "\n".join(lines).rstrip()
 
         choices_json = json.dumps({
-            "mode": mode,
-            "options": clean_opts,
             "target": tgt["id"],
-            "question": question,
+            "questions": qlist,
         })
         # Ping the target directly by id (guaranteed, independent of how the
         # display name would parse) so they wake and see the → bar.
@@ -1289,7 +1337,9 @@ def nth_ask(
         )
         db.commit()
 
-        _console("❓", channel, f"{member['name']} asked {tgt['name']}: {question}", 35)
+        summary = (qlist[0]["question"] if len(qlist) == 1
+                   else f"{len(qlist)} questions")
+        _console("❓", channel, f"{member['name']} asked {tgt['name']}: {summary}", 35)
 
         return json.dumps({
             "ok": True,
@@ -1297,9 +1347,8 @@ def nth_ask(
             "message_id": msg_id,
             "target": tgt["name"],
             "target_id": tgt["id"],
-            "mode": mode,
-            "options": clean_opts,
-            "note": "Answer will arrive as a normal reply message from the human.",
+            "questions": len(qlist),
+            "note": "Answer will arrive as a single reply message from the human.",
         })
     finally:
         db.close()

@@ -1256,10 +1256,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "content too long (max 4000 chars)")
             return
 
-        # reply_to + selection: set when this send is an answer to a trio_ask
-        # multiple-choice question. reply_to links the answer to the question;
-        # selection records which options the human picked (and any custom
-        # text) so the dashboard can show the resolved question. Both optional.
+        # reply_to + selection: set when this send answers a trio_ask. reply_to
+        # links the answer to the ask; selection carries one entry per question
+        # ({picked: [int], custom: [str]}) so the dashboard can show the resolved
+        # answers. Both optional. Per-question in-range / target / not-already-
+        # answered checks need the ask's `choices`, so they run in the txn below.
         reply_to = body.get("reply_to")
         if reply_to is not None and not (type(reply_to) is int and reply_to > 0):
             self._error(400, "invalid reply_to")
@@ -1267,8 +1268,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         raw_sel = body.get("selection")
         selection_json = None
         has_selection = raw_sel is not None
-        picked: list = []
-        custom = ""
+        answers: list = []
         if has_selection:
             if reply_to is None:
                 self._error(400, "selection requires reply_to")
@@ -1276,18 +1276,32 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not isinstance(raw_sel, dict):
                 self._error(400, "invalid selection")
                 return
-            picked = raw_sel.get("picked", [])
-            custom = raw_sel.get("custom", "")
-            if not isinstance(picked, list) or not all(type(p) is int and p >= 0 for p in picked):
-                self._error(400, "invalid selection.picked")
+            raw_answers = raw_sel.get("answers")
+            if not isinstance(raw_answers, list) or not raw_answers:
+                self._error(400, "invalid selection.answers")
                 return
-            if not isinstance(custom, str) or len(custom) > 4000:
-                self._error(400, "invalid selection.custom")
+            if len(raw_answers) > 20:
+                self._error(400, "too many answers")
                 return
-            # Dedupe indices, preserving order — the remaining shape checks
-            # (in-range, target, not-already-answered) need the question's
-            # `choices`, so they run inside the transaction below.
-            picked = list(dict.fromkeys(picked))
+            for a in raw_answers:
+                if not isinstance(a, dict):
+                    self._error(400, "invalid selection.answers")
+                    return
+                p = a.get("picked", [])
+                c = a.get("custom", [])
+                if not isinstance(p, list) or not all(type(x) is int and x >= 0 for x in p):
+                    self._error(400, "invalid selection.picked")
+                    return
+                if not isinstance(c, list) or not all(isinstance(x, str) for x in c):
+                    self._error(400, "invalid selection.custom")
+                    return
+                if sum(len(x) for x in c) > 8000:
+                    self._error(400, "selection.custom too long")
+                    return
+                answers.append({
+                    "picked": list(dict.fromkeys(p)),
+                    "custom": [s.strip() for s in c if s.strip()],
+                })
 
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
@@ -1324,30 +1338,48 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         return
 
                     # Answer-path invariants: a `selection` claims this message
-                    # answers a trio_ask question. The picker enforces "only the
-                    # target answers" in the client only — re-check server-side
-                    # since a raw POST bypasses the UI. Guards:
-                    #   (a) the reply_to message must actually be a question,
-                    #   (b) the poster must be that question's declared target,
-                    #   (c) every picked index must be in range for its options,
-                    #   (d) the question must not already be answered.
+                    # answers a trio_ask. The picker enforces "only the target
+                    # answers" in the client only — re-check server-side since a
+                    # raw POST bypasses the UI. Guards:
+                    #   (a) the reply_to message must actually be an ask,
+                    #   (b) the poster must be its declared target,
+                    #   (c) one answer per question, each picked index in range,
+                    #   (d) the ask must not already be answered.
                     if has_selection:
                         q_choices = parse_obj_json(
                             tgt["choices"] if "choices" in tgt.keys() else "")
-                        if not isinstance(q_choices, dict) \
-                                or not isinstance(q_choices.get("options"), list):
+                        # Tolerate the legacy single-question shape
+                        # ({options,...}) as a one-question ask.
+                        q_qs = None
+                        q_target = None
+                        if isinstance(q_choices, dict):
+                            q_target = q_choices.get("target")
+                            if isinstance(q_choices.get("questions"), list):
+                                q_qs = q_choices["questions"]
+                            elif isinstance(q_choices.get("options"), list):
+                                q_qs = [{"options": q_choices["options"]}]
+                        if not q_qs:
                             db.execute("ROLLBACK")
                             self._error(400, "reply_to is not a question")
                             return
-                        q_opts = q_choices["options"]
-                        if q_choices.get("target") != op_id:
+                        if q_target != op_id:
                             db.execute("ROLLBACK")
                             self._error(403, "this question is not addressed to you")
                             return
-                        if any(p >= len(q_opts) for p in picked):
+                        if len(answers) != len(q_qs):
                             db.execute("ROLLBACK")
-                            self._error(400, "selection.picked out of range")
+                            self._error(400, "answer count does not match question count")
                             return
+                        for qi, ans in enumerate(answers):
+                            opts = q_qs[qi].get("options") if isinstance(q_qs[qi], dict) else None
+                            if not isinstance(opts, list):
+                                db.execute("ROLLBACK")
+                                self._error(400, "malformed question")
+                                return
+                            if any(p >= len(opts) for p in ans["picked"]):
+                                db.execute("ROLLBACK")
+                                self._error(400, "selection.picked out of range")
+                                return
                         already = db.execute(
                             "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
                             "AND selection IS NOT NULL AND selection != '' LIMIT 1",
@@ -1357,7 +1389,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             db.execute("ROLLBACK")
                             self._error(409, "this question has already been answered")
                             return
-                        selection_json = json.dumps({"picked": picked, "custom": custom})
+                        selection_json = json.dumps({"answers": answers})
 
                 # Validate attachments up front: every requested id must be
                 # this operator's own, unlinked, in-channel row — else abort,
@@ -1882,7 +1914,25 @@ INDEX_HTML = r"""<!doctype html>
     background: rgba(var(--ov),0.04);
   }
   .ask-wrap.answered { opacity: 0.92; }
+  .ask-qblock { margin-bottom: 12px; }
+  .ask-qblock:last-child { margin-bottom: 0; }
+  .ask-qnum {
+    font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--dim); margin-bottom: 3px;
+  }
   .ask-q { font-weight: 600; margin-bottom: 8px; white-space: pre-wrap; }
+  .ask-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-top: 10px;
+  }
+  .ask-nav-btn {
+    padding: 4px 12px; cursor: pointer; font: inherit;
+    border: 1px solid rgba(var(--ov),0.2); border-radius: 6px;
+    background: rgba(var(--ov),0.03); color: inherit;
+  }
+  .ask-nav-btn:hover:not(:disabled) { border-color: var(--accent2); }
+  .ask-nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .ask-progress { font-size: 0.85em; color: var(--dim); }
   .ask-options { display: flex; flex-direction: column; gap: 4px; }
   .ask-opt {
     padding: 6px 10px; border: 1px solid rgba(var(--ov),0.14);
@@ -1932,10 +1982,11 @@ INDEX_HTML = r"""<!doctype html>
   }
   .ask-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
   .ask-hint, .ask-status { font-size: 0.86em; color: var(--dim); }
+  .ask-hint { margin-top: 6px; }
   .ask-status { margin-top: 7px; }
   .ask-preview:not(:empty) {
     margin-top: 7px; font-size: 0.9em; color: var(--dim);
-    border-left: 2px solid var(--accent2); padding-left: 8px;
+    border-left: 2px solid var(--accent2); padding-left: 8px; white-space: pre-wrap;
   }
   body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
 
@@ -3039,60 +3090,90 @@ INDEX_HTML = r"""<!doctype html>
     return bar;
   }
 
-  // ── Selectable answers (trio_ask picker) ──
-  // Compose the human-readable answer text posted back to the channel from the
-  // picked option indices + any typed custom text. This is what the asking
-  // agent actually reads; the structured selection rides alongside for the UI.
-  function buildAnswerText(choices, picked, customList) {
+  // ── Selectable answers (trio_ask picker / questionnaire) ──
+  // Normalize a choices payload to a list of question objects, tolerating both
+  // the batched shape ({target, questions:[…]}) and the legacy single shape
+  // ({target, question, options, mode}).
+  function askQuestions(choices) {
+    if (choices && Array.isArray(choices.questions)) return choices.questions;
+    if (choices && Array.isArray(choices.options)) {
+      return [{ question: choices.question, options: choices.options, mode: choices.mode }];
+    }
+    return [];
+  }
+  // Normalize a stored selection to a per-question answer list, tolerating the
+  // legacy single-answer shape ({picked, custom:string}).
+  function askAnswers(sel) {
+    if (sel && Array.isArray(sel.answers)) return sel.answers;
+    if (sel && (Array.isArray(sel.picked) || typeof sel.custom === 'string')) {
+      return [{ picked: sel.picked || [],
+                custom: sel.custom ? [sel.custom] : [] }];
+    }
+    return [];
+  }
+  // One question's answer string: selected option texts + typed answers, all
+  // comma-joined. This is what the asking agent reads.
+  function answerStringFor(q, picked, customList) {
     const parts = [];
-    for (const i of picked) {
-      if (choices.options[i] !== undefined) parts.push(choices.options[i]);
-    }
-    // Each custom answer is appended as its own comma item, consistent with how
-    // selected options are joined (no special hyphen separator).
-    for (const c of (customList || [])) {
-      const t = (c || '').trim();
-      if (t) parts.push(t);
-    }
+    const opts = Array.isArray(q.options) ? q.options : [];
+    for (const i of picked) { if (opts[i] !== undefined) parts.push(opts[i]); }
+    for (const c of (customList || [])) { const t = (c || '').trim(); if (t) parts.push(t); }
     return parts.join(', ');
   }
+  function askHeader(q, qi) {
+    const h = document.createElement('div');
+    h.className = 'ask-qnum';
+    h.textContent = (q.header && q.header.trim()) ? q.header.trim() : ('Question ' + (qi + 1));
+    return h;
+  }
+  function askQText(q) {
+    const qh = document.createElement('div');
+    qh.className = 'ask-q';
+    qh.textContent = q.question || '';
+    return qh;
+  }
 
-  // (Re)render a question's picker into `wrap`, reflecting current answer state.
+  // (Re)render a question / questionnaire into `wrap`, reflecting answer state.
   // Called on first append and again when the answer arrives so it locks.
   function renderAskInto(wrap, msg) {
     const choices = msg.choices;
-    if (!choices || !Array.isArray(choices.options)) return;
+    const questions = askQuestions(choices);
+    if (!questions.length) return;
     wrap.innerHTML = '';
     const isTarget = choices.target === state.operator.id;
-    const many = choices.mode === 'many';
+    const multi = questions.length > 1;
     const ans = state.answers.get(msg.id) || null;
-
-    const qh = document.createElement('div');
-    qh.className = 'ask-q';
-    qh.textContent = choices.question || '';
-    wrap.appendChild(qh);
 
     // Answered → locked view for everyone (chosen options highlighted).
     if (ans) {
       wrap.classList.add('answered');
-      const sel = ans.selection || {};
-      const picked = Array.isArray(sel.picked) ? sel.picked : [];
-      const list = document.createElement('div');
-      list.className = 'ask-options locked';
-      choices.options.forEach((opt, i) => {
-        const row = document.createElement('div');
-        row.className = 'ask-opt' + (picked.includes(i) ? ' chosen' : '');
-        row.textContent = opt;
-        list.appendChild(row);
+      const sels = askAnswers(ans.selection || {});
+      questions.forEach((q, qi) => {
+        const box = document.createElement('div');
+        box.className = 'ask-qblock';
+        if (multi) box.appendChild(askHeader(q, qi));
+        box.appendChild(askQText(q));
+        const sel = sels[qi] || {};
+        const picked = Array.isArray(sel.picked) ? sel.picked : [];
+        const list = document.createElement('div');
+        list.className = 'ask-options locked';
+        (q.options || []).forEach((opt, i) => {
+          const row = document.createElement('div');
+          row.className = 'ask-opt' + (picked.includes(i) ? ' chosen' : '');
+          row.textContent = opt;
+          list.appendChild(row);
+        });
+        box.appendChild(list);
+        const customs = Array.isArray(sel.custom) ? sel.custom : (sel.custom ? [sel.custom] : []);
+        const ctext = customs.map(s => (s || '').trim()).filter(Boolean).join(', ');
+        if (ctext) {
+          const cu = document.createElement('div');
+          cu.className = 'ask-custom-answer';
+          cu.textContent = 'Typed: ' + ctext;
+          box.appendChild(cu);
+        }
+        wrap.appendChild(box);
       });
-      wrap.appendChild(list);
-      const custom = ((sel.custom || '')).trim();
-      if (custom) {
-        const cu = document.createElement('div');
-        cu.className = 'ask-custom-answer';
-        cu.textContent = 'Typed: ' + custom;
-        wrap.appendChild(cu);
-      }
       const badge = document.createElement('div');
       badge.className = 'ask-status';
       const who = state.members.get(ans.member_id);
@@ -3101,17 +3182,24 @@ INDEX_HTML = r"""<!doctype html>
       return;
     }
 
-    // Not the target → read-only preview of the pending question.
+    // Not the target → read-only preview of the pending question(s).
     if (!isTarget) {
-      const list = document.createElement('div');
-      list.className = 'ask-options readonly';
-      choices.options.forEach((opt) => {
-        const row = document.createElement('div');
-        row.className = 'ask-opt';
-        row.textContent = opt;
-        list.appendChild(row);
+      questions.forEach((q, qi) => {
+        const box = document.createElement('div');
+        box.className = 'ask-qblock';
+        if (multi) box.appendChild(askHeader(q, qi));
+        box.appendChild(askQText(q));
+        const list = document.createElement('div');
+        list.className = 'ask-options readonly';
+        (q.options || []).forEach((opt) => {
+          const row = document.createElement('div');
+          row.className = 'ask-opt';
+          row.textContent = opt;
+          list.appendChild(row);
+        });
+        box.appendChild(list);
+        wrap.appendChild(box);
       });
-      wrap.appendChild(list);
       const tgt = state.members.get(choices.target);
       const note = document.createElement('div');
       note.className = 'ask-status';
@@ -3120,167 +3208,229 @@ INDEX_HTML = r"""<!doctype html>
       return;
     }
 
-    // Interactive picker for the target human. There are NO native radio /
-    // checkbox widgets — each option is a clickable pill that outlines when
-    // selected. Selection state is a plain JS Set of option indices, so
-    // nothing in the DOM can render as a form control.
-    let sending = false;          // latches during an in-flight POST
-    const selected = new Set();   // selected option indices
-    const rows = [];
-    const customInputs = [];      // one or more free-text answer boxes
+    // Interactive: the target answers. One panel per question (only the current
+    // one is visible), Back/Next to page through a batch, and a single Submit
+    // that posts every answer at once. No native form widgets — options are
+    // clickable pills whose selection lives in per-question JS Sets.
+    let sending = false;
+    let cur = 0;
+    const qstate = questions.map(() => ({ selected: new Set(), customInputs: [] }));
+    const panels = [];
 
-    function syncSelected() {
-      rows.forEach((row, i) => {
-        const on = selected.has(i);
-        row.classList.toggle('selected', on);
-        row.setAttribute('aria-checked', on ? 'true' : 'false');
-      });
+    function isAnswered(qi) {
+      const st = qstate[qi];
+      return st.selected.size > 0 || st.customInputs.some(i => i.value.trim());
     }
-    function currentPicked() {
-      return [...selected].sort((a, b) => a - b);
+    function allAnswered() {
+      return questions.every((_, qi) => isAnswered(qi));
     }
-    function currentCustom() {
-      return customInputs.map(inp => inp.value.trim()).filter(Boolean);
+    function answeredCount() {
+      return questions.reduce((n, _, qi) => n + (isAnswered(qi) ? 1 : 0), 0);
     }
-    function clearCustom() {
-      customInputs.forEach(inp => { inp.value = ''; });
+    function composedAnswer() {
+      return questions.map((q, qi) => {
+        const st = qstate[qi];
+        const picked = [...st.selected].sort((a, b) => a - b);
+        const customs = st.customInputs.map(i => i.value.trim()).filter(Boolean);
+        const a = answerStringFor(q, picked, customs);
+        return multi ? ((q.question || ('Q' + (qi + 1))) + ' → ' + a) : a;
+      }).join(multi ? '\n' : '');
+    }
+    function selectionPayload() {
+      return { answers: questions.map((q, qi) => {
+        const st = qstate[qi];
+        return { picked: [...st.selected].sort((a, b) => a - b),
+                 custom: st.customInputs.map(i => i.value.trim()).filter(Boolean) };
+      }) };
     }
     function refresh() {
-      const composed = buildAnswerText(choices, currentPicked(), currentCustom());
-      confirmBtn.disabled = sending || !composed;
-      preview.textContent = composed ? ('Will send: ' + composed) : '';
+      panels.forEach((p, i) => { p.style.display = (i === cur) ? '' : 'none'; });
+      if (backBtn) backBtn.disabled = (cur === 0);
+      if (nextBtn) nextBtn.disabled = (cur === questions.length - 1);
+      if (progress) {
+        progress.textContent = (cur + 1) + ' of ' + questions.length +
+          ' · ' + answeredCount() + '/' + questions.length + ' answered';
+      }
+      submitBtn.disabled = sending || !allAnswered();
+      preview.textContent = allAnswered()
+        ? ('Will send:' + (multi ? '\n' : ' ') + composedAnswer()) : '';
     }
 
-    const form = document.createElement('div');
-    form.className = 'ask-options interactive';
-    choices.options.forEach((opt, i) => {
-      const row = document.createElement('div');
-      row.className = 'ask-opt selectable';
-      row.setAttribute('role', many ? 'checkbox' : 'radio');
-      row.setAttribute('aria-checked', 'false');
-      row.tabIndex = 0;
-      const span = document.createElement('span');
-      span.textContent = opt;
-      row.appendChild(span);
-      function toggle() {
-        if (many) {
-          // Multi-select: additive — toggle this option, leave custom boxes be.
-          if (selected.has(i)) selected.delete(i); else selected.add(i);
-        } else {
-          // Single-select: options and custom text are mutually exclusive.
-          const had = selected.has(i);
-          selected.clear();
-          if (!had) selected.add(i);   // click the selected one again to clear
-          if (selected.size) clearCustom();
-        }
-        syncSelected();
-        refresh();
+    function buildPanel(q, qi) {
+      const st = qstate[qi];
+      const many = q.mode === 'many';
+      const panel = document.createElement('div');
+      panel.className = 'ask-panel';
+      if (multi) panel.appendChild(askHeader(q, qi));
+      panel.appendChild(askQText(q));
+
+      const rows = [];
+      function syncSelected() {
+        rows.forEach((row, i) => {
+          const on = st.selected.has(i);
+          row.classList.toggle('selected', on);
+          row.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
       }
-      row.addEventListener('click', toggle);
-      row.addEventListener('keydown', (e) => {
-        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
-      });
-      form.appendChild(row);
-      rows.push(row);
-    });
-    wrap.appendChild(form);
+      function clearCustom() { st.customInputs.forEach(i => { i.value = ''; }); }
 
-    // Free-text answers. Single-select gets one box (an alternative to picking).
-    // Multi-select gets one box plus a "+" to add more, each its own answer.
-    const customWrap = document.createElement('div');
-    customWrap.className = 'ask-custom';
-    wrap.appendChild(customWrap);
-
-    function addCustomBox(removable) {
-      const rowc = document.createElement('div');
-      rowc.className = 'ask-custom-row';
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.className = 'ask-custom-input';
-      inp.placeholder = many ? 'type your own answer…' : 'or type your own answer…';
-      inp.maxLength = 4000;
-      inp.addEventListener('input', () => {
-        // Single-select: typing clears any picked option (mutually exclusive).
-        if (!many && inp.value.trim()) { selected.clear(); syncSelected(); }
-        refresh();
+      const form = document.createElement('div');
+      form.className = 'ask-options interactive';
+      (q.options || []).forEach((opt, i) => {
+        const row = document.createElement('div');
+        row.className = 'ask-opt selectable';
+        row.setAttribute('role', many ? 'checkbox' : 'radio');
+        row.setAttribute('aria-checked', 'false');
+        row.tabIndex = 0;
+        const span = document.createElement('span');
+        span.textContent = opt;
+        row.appendChild(span);
+        function toggle() {
+          if (many) {
+            if (st.selected.has(i)) st.selected.delete(i); else st.selected.add(i);
+          } else {
+            const had = st.selected.has(i);
+            st.selected.clear();
+            if (!had) st.selected.add(i);   // click the selected one again to clear
+            if (st.selected.size) clearCustom();
+          }
+          syncSelected();
+          refresh();
+        }
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', (e) => {
+          if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
+        });
+        form.appendChild(row);
+        rows.push(row);
       });
-      rowc.appendChild(inp);
-      if (removable) {
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'ask-custom-del';
-        del.textContent = '×';
-        del.title = 'remove this answer';
-        del.addEventListener('click', () => {
-          const idx = customInputs.indexOf(inp);
-          if (idx >= 0) customInputs.splice(idx, 1);
-          rowc.remove();
+      panel.appendChild(form);
+
+      const customWrap = document.createElement('div');
+      customWrap.className = 'ask-custom';
+      panel.appendChild(customWrap);
+      function addCustomBox(removable) {
+        const rowc = document.createElement('div');
+        rowc.className = 'ask-custom-row';
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.className = 'ask-custom-input';
+        inp.placeholder = many ? 'type your own answer…' : 'or type your own answer…';
+        inp.maxLength = 4000;
+        inp.addEventListener('input', () => {
+          if (!many && inp.value.trim()) { st.selected.clear(); syncSelected(); }
           refresh();
         });
-        rowc.appendChild(del);
+        rowc.appendChild(inp);
+        if (removable) {
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'ask-custom-del';
+          del.textContent = '×';
+          del.title = 'remove this answer';
+          del.addEventListener('click', () => {
+            const idx = st.customInputs.indexOf(inp);
+            if (idx >= 0) st.customInputs.splice(idx, 1);
+            rowc.remove();
+            refresh();
+          });
+          rowc.appendChild(del);
+        }
+        customWrap.appendChild(rowc);
+        st.customInputs.push(inp);
+        return inp;
       }
-      customWrap.appendChild(rowc);
-      customInputs.push(inp);
-      return inp;
+      addCustomBox(false);
+      if (many) {
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'ask-add';
+        addBtn.textContent = '+ add another answer';
+        addBtn.addEventListener('click', () => { addCustomBox(true).focus(); });
+        panel.appendChild(addBtn);
+      }
+
+      const hint = document.createElement('div');
+      hint.className = 'ask-hint';
+      hint.textContent = many ? 'select any that apply' : 'select one (click again to clear)';
+      panel.appendChild(hint);
+      return panel;
     }
-    addCustomBox(false);
-    if (many) {
-      const addBtn = document.createElement('button');
-      addBtn.type = 'button';
-      addBtn.className = 'ask-add';
-      addBtn.textContent = '+ add another answer';
-      addBtn.addEventListener('click', () => { addCustomBox(true).focus(); });
-      wrap.appendChild(addBtn);
+
+    questions.forEach((q, qi) => {
+      const p = buildPanel(q, qi);
+      panels.push(p);
+      wrap.appendChild(p);
+    });
+
+    // Back / progress / Next — only for a multi-question batch.
+    let backBtn = null, nextBtn = null, progress = null;
+    if (multi) {
+      const nav = document.createElement('div');
+      nav.className = 'ask-nav';
+      backBtn = document.createElement('button');
+      backBtn.type = 'button';
+      backBtn.className = 'ask-nav-btn';
+      backBtn.textContent = '‹ Back';
+      backBtn.addEventListener('click', () => { if (cur > 0) { cur--; refresh(); } });
+      progress = document.createElement('span');
+      progress.className = 'ask-progress';
+      nextBtn = document.createElement('button');
+      nextBtn.type = 'button';
+      nextBtn.className = 'ask-nav-btn';
+      nextBtn.textContent = 'Next ›';
+      nextBtn.addEventListener('click', () => {
+        if (cur < questions.length - 1) { cur++; refresh(); }
+      });
+      nav.appendChild(backBtn);
+      nav.appendChild(progress);
+      nav.appendChild(nextBtn);
+      wrap.appendChild(nav);
     }
 
     const actions = document.createElement('div');
     actions.className = 'ask-actions';
-    const confirmBtn = document.createElement('button');
-    confirmBtn.className = 'ask-confirm';
-    confirmBtn.textContent = 'Confirm';
-    confirmBtn.disabled = true;
-    actions.appendChild(confirmBtn);
-    const hint = document.createElement('span');
-    hint.className = 'ask-hint';
-    hint.textContent = many ? 'select any that apply' : 'select one (click again to clear)';
-    actions.appendChild(hint);
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'ask-confirm';
+    submitBtn.textContent = multi ? 'Submit all' : 'Confirm';
+    submitBtn.disabled = true;
+    actions.appendChild(submitBtn);
     wrap.appendChild(actions);
 
-    // Live preview of exactly what will be posted.
     const preview = document.createElement('div');
     preview.className = 'ask-preview';
     wrap.appendChild(preview);
 
-    confirmBtn.addEventListener('click', async () => {
-      if (sending) return;
-      const picked = currentPicked();
-      const customList = currentCustom();
-      const answerText = buildAnswerText(choices, picked, customList);
-      if (!answerText) return;
+    submitBtn.addEventListener('click', async () => {
+      if (sending || !allAnswered()) return;
+      const answerText = composedAnswer();
+      if (!answerText.trim()) return;
       sending = true;
-      confirmBtn.disabled = true;
-      confirmBtn.textContent = 'Sending…';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Sending…';
       try {
         const r = await fetch('/api/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: answerText, reply_to: msg.id,
-                                 selection: { picked, custom: customList.join(', ') } }),
+                                 selection: selectionPayload() }),
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({ error: 'unknown' }));
           alert('answer failed: ' + (err.error || r.status));
-          sending = false; confirmBtn.textContent = 'Confirm'; refresh();
+          sending = false; submitBtn.textContent = multi ? 'Submit all' : 'Confirm'; refresh();
           return;
         }
         // The SSE echo of our reply flips this to the locked view; keep the
         // button latched (sending stays true) so nothing can re-post meanwhile.
-        confirmBtn.textContent = 'Sent ✓';
+        submitBtn.textContent = 'Sent ✓';
       } catch (e) {
         alert('answer failed: ' + e.message);
-        sending = false; confirmBtn.textContent = 'Confirm'; refresh();
+        sending = false; submitBtn.textContent = multi ? 'Submit all' : 'Confirm'; refresh();
       }
     });
+
+    refresh();
   }
 
   // ── Message rendering ──
