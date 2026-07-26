@@ -2157,9 +2157,11 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
-  .member .rm-btn { font-size: 13px; line-height: 1; padding: 1px 5px; border-radius: 3px;
+  .member .member-actions { display: none; padding: 6px 0 2px 16px; }
+  .member.expanded .member-actions { display: flex; }
+  .member .rm-btn { font-size: 11px; line-height: 1.2; padding: 4px 10px; border-radius: 4px;
                     background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
-                    cursor: pointer; flex-shrink: 0; user-select: none; }
+                    cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
   .member .rm-btn:hover { background: var(--mention); color: var(--bg);
                           border-color: var(--mention); }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
@@ -4148,17 +4150,6 @@ INDEX_HTML = r"""<!doctype html>
       });
       topRow.appendChild(dmBtn);
     }
-    // Remove (×) — cull this member from the channel. Not shown for yourself.
-    // Handy for clearing out stale/dead agents left in the roster after a
-    // session closed, or trimming participants when starting new work.
-    if (!DM_MODE && m.id !== state.operator.id) {
-      const rm = document.createElement('span');
-      rm.className = 'rm-btn';
-      rm.textContent = '×';
-      rm.title = `Remove ${m.name} from the channel`;
-      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name); });
-      topRow.appendChild(rm);
-    }
     const caret = document.createElement('span');
     caret.className = 'caret';
     caret.textContent = '▶';
@@ -4176,6 +4167,22 @@ INDEX_HTML = r"""<!doctype html>
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Remove control — only revealed when the row is expanded (its details are
+    // open), so it can't be mis-clicked from the collapsed roster. Not for
+    // yourself. Releases their tasks + posts [culled]; see cullMember().
+    if (!DM_MODE && m.id !== state.operator.id) {
+      const actions = document.createElement('div');
+      actions.className = 'member-actions';
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rm-btn';
+      rm.textContent = 'Remove from channel';
+      rm.title = `Remove ${m.name} from the channel`;
+      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name); });
+      actions.appendChild(rm);
+      row.appendChild(actions);
+    }
 
     row.addEventListener('click', (e) => {
       // Clicking the name on a mention-capable row? On shift-click → filter.
