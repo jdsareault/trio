@@ -1945,7 +1945,9 @@ INDEX_HTML = r"""<!doctype html>
   }
   .ask-nav-btn:hover:not(:disabled) { border-color: var(--accent2); }
   .ask-nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  .ask-progress { font-size: 0.85em; color: var(--dim); }
+  .ask-progress { font-size: 0.85em; color: var(--dim); cursor: pointer; }
+  .ask-progress:hover { color: var(--accent2); }
+  .ask-submit-hint.jump { cursor: pointer; color: var(--accent2); }
   .ask-options { display: flex; flex-direction: column; gap: 4px; }
   .ask-opt {
     padding: 6px 10px; border: 1px solid rgba(var(--ov),0.14);
@@ -3227,6 +3229,7 @@ INDEX_HTML = r"""<!doctype html>
     // clickable pills whose selection lives in per-question JS Sets.
     let sending = false;
     let cur = 0;
+    let submitHint = null;   // assigned when the actions row is built
     const qstate = questions.map(() => ({ selected: new Set(), customInputs: [] }));
     const panels = [];
     // Questions answered at least once — auto-advance fires only the FIRST time
@@ -3243,6 +3246,21 @@ INDEX_HTML = r"""<!doctype html>
     }
     function answeredCount() {
       return questions.reduce((n, _, qi) => n + (isAnswered(qi) ? 1 : 0), 0);
+    }
+    function firstUnanswered() {
+      for (let qi = 0; qi < questions.length; qi++) if (!isAnswered(qi)) return qi;
+      return -1;
+    }
+    function goToQuestion(idx) {
+      if (idx >= 0 && idx < questions.length) { cur = idx; refresh(); focusPanel(); }
+    }
+    function focusPanel() {
+      // Move keyboard focus into the now-visible panel so a keyboard user (and
+      // screen readers) don't get stranded on a hidden element after paging.
+      const p = panels[cur];
+      if (!p) return;
+      const first = p.querySelector('.ask-opt.selectable, .ask-custom-input');
+      if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
     }
     function composedAnswer() {
       return questions.map((q, qi) => {
@@ -3268,9 +3286,25 @@ INDEX_HTML = r"""<!doctype html>
         progress.textContent = (cur + 1) + ' of ' + questions.length +
           ' · ' + answeredCount() + '/' + questions.length + ' answered';
       }
-      submitBtn.disabled = sending || !allAnswered();
-      preview.textContent = allAnswered()
+      const done = allAnswered();
+      submitBtn.disabled = sending || !done;
+      preview.textContent = done
         ? ('Will send:' + (multi ? '\n' : ' ') + composedAnswer()) : '';
+      // When Submit is disabled, say why — and (for a batch) offer a jump to
+      // the next unanswered question rather than making the user page around.
+      if (submitHint) {
+        if (done) {
+          submitHint.textContent = '';
+          submitHint.classList.remove('jump');
+        } else if (multi) {
+          const rem = questions.length - answeredCount();
+          submitHint.textContent = rem + ' unanswered — jump to next ›';
+          submitHint.classList.add('jump');
+        } else {
+          submitHint.textContent = 'select an option or type an answer';
+          submitHint.classList.remove('jump');
+        }
+      }
     }
 
     function buildPanel(q, qi) {
@@ -3388,7 +3422,11 @@ INDEX_HTML = r"""<!doctype html>
 
       const hint = document.createElement('div');
       hint.className = 'ask-hint';
-      hint.textContent = many ? 'select any that apply' : 'select one (click again to clear)';
+      let hintText = many ? 'select any that apply' : 'select one (click again to clear)';
+      // Multi-select doesn't auto-advance — tell the user to page on manually so
+      // the change in rhythm (vs. auto-advancing single-selects) isn't confusing.
+      if (many && multi && qi < questions.length - 1) hintText += ' — then Next ›';
+      hint.textContent = hintText;
       panel.appendChild(hint);
       return panel;
     }
@@ -3411,6 +3449,11 @@ INDEX_HTML = r"""<!doctype html>
       backBtn.addEventListener('click', () => { if (cur > 0) { cur--; refresh(); } });
       progress = document.createElement('span');
       progress.className = 'ask-progress';
+      progress.title = 'jump to the next unanswered question';
+      progress.addEventListener('click', () => {
+        const u = firstUnanswered();
+        if (u >= 0) goToQuestion(u);
+      });
       nextBtn = document.createElement('button');
       nextBtn.type = 'button';
       nextBtn.className = 'ask-nav-btn';
@@ -3431,6 +3474,15 @@ INDEX_HTML = r"""<!doctype html>
     submitBtn.textContent = multi ? 'Submit all' : 'Confirm';
     submitBtn.disabled = true;
     actions.appendChild(submitBtn);
+    // Why Submit is disabled + (for a batch) a click-to-jump to the gap.
+    submitHint = document.createElement('span');
+    submitHint.className = 'ask-hint ask-submit-hint';
+    submitHint.addEventListener('click', () => {
+      if (!submitHint.classList.contains('jump')) return;
+      const u = firstUnanswered();
+      if (u >= 0) goToQuestion(u);
+    });
+    actions.appendChild(submitHint);
     wrap.appendChild(actions);
 
     const preview = document.createElement('div');
