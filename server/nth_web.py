@@ -540,6 +540,49 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     return ident.member_id, ident.display_name
 
 
+def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
+                caller_name: str, target_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Remove a member from a channel — mirrors nth_server.nth_cull so the web
+    dashboard can offer it directly. Deletes the target's row, releases their
+    claimed tasks back to open, drops their locks, and posts a [culled] system
+    message. Returns (result, error) with exactly one non-None. Must run inside
+    the caller's transaction."""
+    target = db.execute(
+        "SELECT id, name FROM members WHERE id = ? AND channel = ?",
+        (target_id, channel),
+    ).fetchone()
+    if not target:
+        return None, "member not found in this channel"
+    if target_id == caller_id:
+        return None, "you can't remove yourself"
+    now = now_iso()
+    target_name = target["name"]
+
+    released = db.execute(
+        "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (channel, target_id),
+    ).fetchall()
+    db.execute(
+        "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+        "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (now, channel, target_id),
+    )
+    db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
+    db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
+
+    released_ids = [r["id"] for r in released]
+    msg = f"[culled] {target_name} ({target_id}) removed from channel"
+    if released_ids:
+        msg += " — released tasks: " + ", ".join(f"#{t}" for t in released_ids)
+    db.execute(
+        "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel, caller_id, caller_name, msg, now),
+    )
+    return {"culled": target_name, "culled_id": target_id,
+            "released_tasks": released_ids}, None
+
+
 def ensure_ask_columns(db: sqlite3.Connection) -> None:
     """Add the selectable-answers columns if the DB predates them. These are
     normally created by nth_server.py's get_db() migration, but the web
@@ -1126,6 +1169,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_upload()
         elif parsed.path == "/api/stt/transcribe":
             self._handle_transcribe()
+        elif parsed.path == "/api/cull":
+            self._handle_cull()
         else:
             self._error(404, "not found")
 
@@ -1497,6 +1542,52 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
 
         self._json({"ok": True, "id": msg_id})
+
+    def _handle_cull(self) -> None:
+        """Remove a member from the channel at the operator's request — the
+        dashboard's roster remove (×) button. Mirrors trio_cull: releases the
+        target's tasks/locks and posts a [culled] system message."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        target_id = (body.get("target_member_id") or "").strip()
+        if not target_id:
+            self._error(400, "target_member_id required")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                result, err = cull_member(db, self.channel, op_id, op_name, target_id)
+                if err:
+                    db.execute("ROLLBACK")
+                    self._error(400, err)
+                    return
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, **(result or {})})
 
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
@@ -2066,6 +2157,11 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .member .rm-btn { font-size: 13px; line-height: 1; padding: 1px 5px; border-radius: 3px;
+                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
+                    cursor: pointer; flex-shrink: 0; user-select: none; }
+  .member .rm-btn:hover { background: var(--mention); color: var(--bg);
+                          border-color: var(--mention); }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -3979,6 +4075,29 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Remove a member from the channel (roster × button). Confirms first — it
+  // releases their claimed tasks + locks and posts a [culled] message. The SSE
+  // roster refresh drops them from the sidebar; it does not stop a live agent's
+  // process (it would just start erroring and could reconnect).
+  async function cullMember(id, name) {
+    if (!confirm('Remove ' + name + ' from the channel?\\n\\n'
+        + 'Their claimed tasks are released. This does not stop a running agent '
+        + 'process — it just removes them from the roster.')) return;
+    try {
+      const r = await fetch('/api/cull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_member_id: id }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('remove failed: ' + (err.error || r.status));
+      }
+    } catch (e) {
+      alert('remove failed: ' + e.message);
+    }
+  }
+
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
@@ -4028,6 +4147,17 @@ INDEX_HTML = r"""<!doctype html>
         window.open('/?dm=' + encodeURIComponent(m.id), '_blank');
       });
       topRow.appendChild(dmBtn);
+    }
+    // Remove (×) — cull this member from the channel. Not shown for yourself.
+    // Handy for clearing out stale/dead agents left in the roster after a
+    // session closed, or trimming participants when starting new work.
+    if (!DM_MODE && m.id !== state.operator.id) {
+      const rm = document.createElement('span');
+      rm.className = 'rm-btn';
+      rm.textContent = '×';
+      rm.title = `Remove ${m.name} from the channel`;
+      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name); });
+      topRow.appendChild(rm);
     }
     const caret = document.createElement('span');
     caret.className = 'caret';
