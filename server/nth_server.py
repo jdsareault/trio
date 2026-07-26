@@ -1102,6 +1102,7 @@ MAX_ASK_OPTIONS = 12
 MAX_ASK_OPTION_LEN = 300
 MAX_ASK_QUESTIONS = 20          # a single trio_ask can bundle up to this many
 MAX_ASK_HEADER_LEN = 60
+MAX_ASK_PAYLOAD = 16000         # cap combined transcript + choices JSON per ask
 
 
 def _normalize_ask_question(item):
@@ -1308,6 +1309,15 @@ def nth_ask(
             "target": tgt["id"],
             "questions": qlist,
         })
+        # Cap the total stored payload. The per-field caps still allow a 20×12×300
+        # batch to build a ~200KB row that gets broadcast over SSE to every
+        # client; bound the combined transcript + choices blob so one ask can't
+        # blow up the channel. Ask the caller to split instead.
+        if len(content) + len(choices_json) > MAX_ASK_PAYLOAD:
+            return json.dumps({"error": (
+                "questions payload too large — split into fewer/shorter questions "
+                f"(max {MAX_ASK_PAYLOAD} chars of combined text)."
+            )})
         # Ping the target directly by id (guaranteed, independent of how the
         # display name would parse) so they wake and see the → bar.
         mentions_json = json.dumps([tgt["id"]])

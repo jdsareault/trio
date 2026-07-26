@@ -1298,10 +1298,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 if sum(len(x) for x in c) > 8000:
                     self._error(400, "selection.custom too long")
                     return
-                answers.append({
-                    "picked": list(dict.fromkeys(p)),
-                    "custom": [s.strip() for s in c if s.strip()],
-                })
+                clean_custom = [s.strip() for s in c if s.strip()]
+                clean_picked = list(dict.fromkeys(p))
+                # Every question must actually be answered — a blank entry
+                # (no pick, no text) would otherwise consume the one-shot
+                # answer slot and lock the ask with nothing in it.
+                if not clean_picked and not clean_custom:
+                    self._error(400, "each answer needs a selection or typed text")
+                    return
+                answers.append({"picked": clean_picked, "custom": clean_custom})
 
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
@@ -1357,7 +1362,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             if isinstance(q_choices.get("questions"), list):
                                 q_qs = q_choices["questions"]
                             elif isinstance(q_choices.get("options"), list):
-                                q_qs = [{"options": q_choices["options"]}]
+                                # Legacy single-question shape carries mode at top level.
+                                q_qs = [{"options": q_choices["options"],
+                                         "mode": q_choices.get("mode")}]
                         if not q_qs:
                             db.execute("ROLLBACK")
                             self._error(400, "reply_to is not a question")
@@ -1371,7 +1378,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             self._error(400, "answer count does not match question count")
                             return
                         for qi, ans in enumerate(answers):
-                            opts = q_qs[qi].get("options") if isinstance(q_qs[qi], dict) else None
+                            q = q_qs[qi] if isinstance(q_qs[qi], dict) else {}
+                            opts = q.get("options")
                             if not isinstance(opts, list):
                                 db.execute("ROLLBACK")
                                 self._error(400, "malformed question")
@@ -1379,6 +1387,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             if any(p >= len(opts) for p in ans["picked"]):
                                 db.execute("ROLLBACK")
                                 self._error(400, "selection.picked out of range")
+                                return
+                            # A "pick one" question accepts at most one option.
+                            if q.get("mode") == "one" and len(ans["picked"]) > 1:
+                                db.execute("ROLLBACK")
+                                self._error(400, "single-select question accepts one option")
                                 return
                         already = db.execute(
                             "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
