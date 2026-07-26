@@ -1903,13 +1903,26 @@ INDEX_HTML = r"""<!doctype html>
     background: rgba(var(--mention-rgb),0.12); font-weight: 600;
   }
   .ask-options.locked .ask-opt.chosen::before { content: "✓ "; color: var(--accent2); }
-  .ask-custom { margin-top: 8px; }
+  .ask-custom { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .ask-custom-row { display: flex; align-items: center; gap: 6px; }
   .ask-custom-input {
-    width: 100%; box-sizing: border-box; padding: 6px 9px;
+    flex: 1; min-width: 0; box-sizing: border-box; padding: 6px 9px;
     border: 1px solid rgba(var(--ov),0.18); border-radius: 6px;
     background: rgba(var(--ov),0.03); color: inherit; font: inherit;
   }
   .ask-custom-input:focus { outline: none; border-color: var(--accent2); }
+  .ask-custom-del {
+    flex: none; width: 26px; height: 26px; line-height: 1; cursor: pointer;
+    border: 1px solid rgba(var(--ov),0.18); border-radius: 6px;
+    background: rgba(var(--ov),0.03); color: var(--dim); font: inherit; font-size: 1.1em;
+  }
+  .ask-custom-del:hover { border-color: var(--mention); color: var(--mention); }
+  .ask-add {
+    align-self: flex-start; margin-top: 6px; padding: 4px 10px; cursor: pointer;
+    border: 1px dashed rgba(var(--ov),0.3); border-radius: 6px;
+    background: none; color: var(--dim); font: inherit; font-size: 0.9em;
+  }
+  .ask-add:hover { border-color: var(--accent2); color: var(--accent2); }
   .ask-custom-answer { margin-top: 6px; font-size: 0.92em; color: var(--dim); }
   .ask-actions { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
   .ask-confirm {
@@ -3030,15 +3043,17 @@ INDEX_HTML = r"""<!doctype html>
   // Compose the human-readable answer text posted back to the channel from the
   // picked option indices + any typed custom text. This is what the asking
   // agent actually reads; the structured selection rides alongside for the UI.
-  function buildAnswerText(choices, picked, custom) {
+  function buildAnswerText(choices, picked, customList) {
     const parts = [];
     for (const i of picked) {
       if (choices.options[i] !== undefined) parts.push(choices.options[i]);
     }
-    // Custom text is appended as another comma item, consistent with how the
+    // Each custom answer is appended as its own comma item, consistent with how
     // selected options are joined (no special hyphen separator).
-    const c = (custom || '').trim();
-    if (c) parts.push(c);
+    for (const c of (customList || [])) {
+      const t = (c || '').trim();
+      if (t) parts.push(t);
+    }
     return parts.join(', ');
   }
 
@@ -3105,47 +3120,58 @@ INDEX_HTML = r"""<!doctype html>
       return;
     }
 
-    // Interactive picker for the target human. No visible radio/checkbox
-    // widgets — each option is a clickable pill that simply outlines when
-    // selected. A hidden input per option holds the checked state (keeps
-    // currentPicked() and keyboard/ARIA semantics simple).
-    const form = document.createElement('div');
-    form.className = 'ask-options interactive';
-    const inputs = [];
+    // Interactive picker for the target human. There are NO native radio /
+    // checkbox widgets — each option is a clickable pill that outlines when
+    // selected. Selection state is a plain JS Set of option indices, so
+    // nothing in the DOM can render as a form control.
+    let sending = false;          // latches during an in-flight POST
+    const selected = new Set();   // selected option indices
     const rows = [];
+    const customInputs = [];      // one or more free-text answer boxes
+
     function syncSelected() {
       rows.forEach((row, i) => {
-        const on = inputs[i].checked;
+        const on = selected.has(i);
         row.classList.toggle('selected', on);
         row.setAttribute('aria-checked', on ? 'true' : 'false');
       });
     }
+    function currentPicked() {
+      return [...selected].sort((a, b) => a - b);
+    }
+    function currentCustom() {
+      return customInputs.map(inp => inp.value.trim()).filter(Boolean);
+    }
+    function clearCustom() {
+      customInputs.forEach(inp => { inp.value = ''; });
+    }
+    function refresh() {
+      const composed = buildAnswerText(choices, currentPicked(), currentCustom());
+      confirmBtn.disabled = sending || !composed;
+      preview.textContent = composed ? ('Will send: ' + composed) : '';
+    }
+
+    const form = document.createElement('div');
+    form.className = 'ask-options interactive';
     choices.options.forEach((opt, i) => {
       const row = document.createElement('div');
       row.className = 'ask-opt selectable';
       row.setAttribute('role', many ? 'checkbox' : 'radio');
       row.setAttribute('aria-checked', 'false');
       row.tabIndex = 0;
-      const inp = document.createElement('input');   // hidden state holder
-      inp.type = many ? 'checkbox' : 'radio';
-      inp.value = String(i);
-      inp.style.display = 'none';
       const span = document.createElement('span');
       span.textContent = opt;
-      row.appendChild(inp);
       row.appendChild(span);
       function toggle() {
         if (many) {
-          // Multi-select: options and typed text are ADDITIVE — a pick never
-          // clears the custom box; both combine into the comma-joined answer.
-          inp.checked = !inp.checked;
+          // Multi-select: additive — toggle this option, leave custom boxes be.
+          if (selected.has(i)) selected.delete(i); else selected.add(i);
         } else {
-          // Single-select: options and custom text are mutually exclusive —
-          // picking clears the custom box (and typing clears the pick, below).
-          const wasChecked = inp.checked;
-          inputs.forEach(x => { x.checked = false; });
-          inp.checked = !wasChecked;   // click the selected one again to clear
-          if (inp.checked) customInput.value = '';
+          // Single-select: options and custom text are mutually exclusive.
+          const had = selected.has(i);
+          selected.clear();
+          if (!had) selected.add(i);   // click the selected one again to clear
+          if (selected.size) clearCustom();
         }
         syncSelected();
         refresh();
@@ -3155,22 +3181,57 @@ INDEX_HTML = r"""<!doctype html>
         if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
       });
       form.appendChild(row);
-      inputs.push(inp);
       rows.push(row);
     });
     wrap.appendChild(form);
 
+    // Free-text answers. Single-select gets one box (an alternative to picking).
+    // Multi-select gets one box plus a "+" to add more, each its own answer.
     const customWrap = document.createElement('div');
     customWrap.className = 'ask-custom';
-    const customInput = document.createElement('input');
-    customInput.type = 'text';
-    customInput.className = 'ask-custom-input';
-    customInput.placeholder = many
-      ? 'add your own — comma-separate multiple…'
-      : 'or type your own answer…';
-    customInput.maxLength = 4000;
-    customWrap.appendChild(customInput);
     wrap.appendChild(customWrap);
+
+    function addCustomBox(removable) {
+      const rowc = document.createElement('div');
+      rowc.className = 'ask-custom-row';
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'ask-custom-input';
+      inp.placeholder = many ? 'type your own answer…' : 'or type your own answer…';
+      inp.maxLength = 4000;
+      inp.addEventListener('input', () => {
+        // Single-select: typing clears any picked option (mutually exclusive).
+        if (!many && inp.value.trim()) { selected.clear(); syncSelected(); }
+        refresh();
+      });
+      rowc.appendChild(inp);
+      if (removable) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'ask-custom-del';
+        del.textContent = '×';
+        del.title = 'remove this answer';
+        del.addEventListener('click', () => {
+          const idx = customInputs.indexOf(inp);
+          if (idx >= 0) customInputs.splice(idx, 1);
+          rowc.remove();
+          refresh();
+        });
+        rowc.appendChild(del);
+      }
+      customWrap.appendChild(rowc);
+      customInputs.push(inp);
+      return inp;
+    }
+    addCustomBox(false);
+    if (many) {
+      const addBtn = document.createElement('button');
+      addBtn.type = 'button';
+      addBtn.className = 'ask-add';
+      addBtn.textContent = '+ add another answer';
+      addBtn.addEventListener('click', () => { addCustomBox(true).focus(); });
+      wrap.appendChild(addBtn);
+    }
 
     const actions = document.createElement('div');
     actions.className = 'ask-actions';
@@ -3190,34 +3251,11 @@ INDEX_HTML = r"""<!doctype html>
     preview.className = 'ask-preview';
     wrap.appendChild(preview);
 
-    // `sending` latches for the whole in-flight POST. Without it, toggling any
-    // option while the request is pending re-fires refresh() and re-enables the
-    // button, letting a second Confirm double-post the answer (LOTC Uruk-Hai).
-    let sending = false;
-    function currentPicked() {
-      return inputs.filter(c => c.checked).map(c => parseInt(c.value, 10));
-    }
-    function refresh() {
-      const composed = buildAnswerText(choices, currentPicked(), customInput.value.trim());
-      confirmBtn.disabled = sending || !composed;
-      preview.textContent = composed ? ('Will send: ' + composed) : '';
-    }
-    // Single-select: typing a custom answer de-selects any picked option (they
-    // are mutually exclusive). Multi-select: typing is additive, so leave the
-    // picked options intact.
-    customInput.addEventListener('input', () => {
-      if (!many && customInput.value.trim()) {
-        inputs.forEach(x => { x.checked = false; });
-        syncSelected();
-      }
-      refresh();
-    });
-
     confirmBtn.addEventListener('click', async () => {
       if (sending) return;
-      const picked = inputs.filter(c => c.checked).map(c => parseInt(c.value, 10));
-      const customText = customInput.value.trim();
-      const answerText = buildAnswerText(choices, picked, customText);
+      const picked = currentPicked();
+      const customList = currentCustom();
+      const answerText = buildAnswerText(choices, picked, customList);
       if (!answerText) return;
       sending = true;
       confirmBtn.disabled = true;
@@ -3227,7 +3265,7 @@ INDEX_HTML = r"""<!doctype html>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: answerText, reply_to: msg.id,
-                                 selection: { picked, custom: customText } }),
+                                 selection: { picked, custom: customList.join(', ') } }),
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({ error: 'unknown' }));
