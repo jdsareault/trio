@@ -272,9 +272,9 @@ and even then warn the channel first (see Permission gates above).
 
 When the question you're asking a **human** has a small set of concrete
 options, use `trio_ask` instead of a plain `trio_send`. The person answers by
-clicking in the dashboard (radio buttons for `mode="one"`, checkboxes for
-`mode="many"`), and there's always a free-text box so they can type their own
-answer. Nothing sends until they confirm.
+clicking options in the dashboard (single-select for `mode="one"`,
+multi-select for `mode="many"`), and there's always a free-text box so they can
+type their own answer instead. Nothing sends until they confirm.
 
 ```
 trio_ask(channel, member_id,

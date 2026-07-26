@@ -1893,7 +1893,10 @@ INDEX_HTML = r"""<!doctype html>
     user-select: none; transition: background 0.1s, border-color 0.1s;
   }
   .ask-opt.selectable:hover { background: rgba(var(--ov),0.08); border-color: rgba(var(--ov),0.3); }
-  .ask-opt.selectable input { margin: 0; accent-color: var(--accent2); flex: none; }
+  .ask-opt.selectable:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
+  .ask-opt.selectable.selected {
+    border-color: var(--accent2); background: rgba(var(--mention-rgb),0.14); font-weight: 600;
+  }
   .ask-options.locked .ask-opt, .ask-options.readonly .ask-opt { opacity: 0.6; }
   .ask-options.locked .ask-opt.chosen {
     opacity: 1; border-color: var(--accent2);
@@ -3032,10 +3035,11 @@ INDEX_HTML = r"""<!doctype html>
     for (const i of picked) {
       if (choices.options[i] !== undefined) parts.push(choices.options[i]);
     }
-    let s = parts.join(', ');
+    // Custom text is appended as another comma item, consistent with how the
+    // selected options are joined (no special hyphen separator).
     const c = (custom || '').trim();
-    if (c) s = s ? (s + ' — ' + c) : c;
-    return s;
+    if (c) parts.push(c);
+    return parts.join(', ');
   }
 
   // (Re)render a question's picker into `wrap`, reflecting current answer state.
@@ -3101,24 +3105,58 @@ INDEX_HTML = r"""<!doctype html>
       return;
     }
 
-    // Interactive picker for the target human.
+    // Interactive picker for the target human. No visible radio/checkbox
+    // widgets — each option is a clickable pill that simply outlines when
+    // selected. A hidden input per option holds the checked state (keeps
+    // currentPicked() and keyboard/ARIA semantics simple).
     const form = document.createElement('div');
     form.className = 'ask-options interactive';
-    const groupName = 'ask-' + msg.id;
     const inputs = [];
+    const rows = [];
+    function syncSelected() {
+      rows.forEach((row, i) => {
+        const on = inputs[i].checked;
+        row.classList.toggle('selected', on);
+        row.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+    }
     choices.options.forEach((opt, i) => {
-      const label = document.createElement('label');
-      label.className = 'ask-opt selectable';
-      const inp = document.createElement('input');
+      const row = document.createElement('div');
+      row.className = 'ask-opt selectable';
+      row.setAttribute('role', many ? 'checkbox' : 'radio');
+      row.setAttribute('aria-checked', 'false');
+      row.tabIndex = 0;
+      const inp = document.createElement('input');   // hidden state holder
       inp.type = many ? 'checkbox' : 'radio';
-      inp.name = groupName;
       inp.value = String(i);
+      inp.style.display = 'none';
       const span = document.createElement('span');
       span.textContent = opt;
-      label.appendChild(inp);
-      label.appendChild(span);
-      form.appendChild(label);
+      row.appendChild(inp);
+      row.appendChild(span);
+      function toggle() {
+        if (many) {
+          // Multi-select: options and typed text are ADDITIVE — a pick never
+          // clears the custom box; both combine into the comma-joined answer.
+          inp.checked = !inp.checked;
+        } else {
+          // Single-select: options and custom text are mutually exclusive —
+          // picking clears the custom box (and typing clears the pick, below).
+          const wasChecked = inp.checked;
+          inputs.forEach(x => { x.checked = false; });
+          inp.checked = !wasChecked;   // click the selected one again to clear
+          if (inp.checked) customInput.value = '';
+        }
+        syncSelected();
+        refresh();
+      }
+      row.addEventListener('click', toggle);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
+      });
+      form.appendChild(row);
       inputs.push(inp);
+      rows.push(row);
     });
     wrap.appendChild(form);
 
@@ -3127,7 +3165,9 @@ INDEX_HTML = r"""<!doctype html>
     const customInput = document.createElement('input');
     customInput.type = 'text';
     customInput.className = 'ask-custom-input';
-    customInput.placeholder = 'or type your own answer…';
+    customInput.placeholder = many
+      ? 'add your own — comma-separate multiple…'
+      : 'or type your own answer…';
     customInput.maxLength = 4000;
     customWrap.appendChild(customInput);
     wrap.appendChild(customWrap);
@@ -3145,15 +3185,13 @@ INDEX_HTML = r"""<!doctype html>
     actions.appendChild(hint);
     wrap.appendChild(actions);
 
-    // Live preview of exactly what will be posted — options and custom text are
-    // COMBINED (not either/or), so show the composed string to remove surprise
-    // (LOTC Frodo).
+    // Live preview of exactly what will be posted.
     const preview = document.createElement('div');
     preview.className = 'ask-preview';
     wrap.appendChild(preview);
 
     // `sending` latches for the whole in-flight POST. Without it, toggling any
-    // input while the request is pending re-fires refresh() and re-enables the
+    // option while the request is pending re-fires refresh() and re-enables the
     // button, letting a second Confirm double-post the answer (LOTC Uruk-Hai).
     let sending = false;
     function currentPicked() {
@@ -3164,19 +3202,16 @@ INDEX_HTML = r"""<!doctype html>
       confirmBtn.disabled = sending || !composed;
       preview.textContent = composed ? ('Will send: ' + composed) : '';
     }
-    inputs.forEach(c => c.addEventListener('change', refresh));
-    customInput.addEventListener('input', refresh);
-
-    // Radios can't be natively deselected — clicking the already-selected one
-    // clears it, so a mis-click isn't a permanent stuck choice (LOTC Frodo).
-    if (!many) {
-      let lastRadio = null;
-      inputs.forEach(inp => inp.addEventListener('click', () => {
-        if (lastRadio === inp) { inp.checked = false; lastRadio = null; }
-        else { lastRadio = inp; }
-        refresh();
-      }));
-    }
+    // Single-select: typing a custom answer de-selects any picked option (they
+    // are mutually exclusive). Multi-select: typing is additive, so leave the
+    // picked options intact.
+    customInput.addEventListener('input', () => {
+      if (!many && customInput.value.trim()) {
+        inputs.forEach(x => { x.checked = false; });
+        syncSelected();
+      }
+      refresh();
+    });
 
     confirmBtn.addEventListener('click', async () => {
       if (sending) return;
