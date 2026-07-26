@@ -288,11 +288,25 @@ def get_db() -> sqlite3.Connection:
         # abusive — the filter system exists precisely so agents can tune
         # attention; bangs bypass that by design for genuine emergencies.
         ("bangs", "messages", "TEXT NOT NULL DEFAULT ''"),
+        # selectable-answers: a message can carry a structured multiple-choice
+        # question posed BY an agent TO a human. `choices` holds the question,
+        # option list, select mode and target on the question message; the
+        # human's reply carries `selection` (which options they picked) and
+        # reply_to = the question's id. Empty on all ordinary messages.
+        ("choices", "messages", "TEXT NOT NULL DEFAULT ''"),
+        ("selection", "messages", "TEXT NOT NULL DEFAULT ''"),
         # v7.2: declared listening mode per member. The monitor writes this
         # on heartbeat (all/about/at); peers use it to decide whether an
         # ambient message will actually be heard before spending the tokens
         # to post it. Not security — agents can lie. Etiquette signal only.
         ("filter_mode", "members", "TEXT NOT NULL DEFAULT 'all'"),
+        # selectable-answers: distinguishes humans (joined via the web
+        # dashboard) from agents (joined via MCP trio_connect). trio_ask
+        # refuses to target a non-human, so multiple-choice pickers only ever
+        # go to a person. Defaults to 'agent' — the common case and the safe
+        # one (an existing row wrongly treated as human is worse than the
+        # reverse). Web operators are marked 'human' in ensure_operator_row.
+        ("kind", "members", "TEXT NOT NULL DEFAULT 'agent'"),
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),

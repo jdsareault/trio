@@ -507,16 +507,20 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     refresh the summary so trust source is fresh if a guest later upgrades
     to a Tailscale identity (or vice versa)."""
     now = now_iso()
+    # kind='human' marks this row as a person, so trio_ask will accept it as a
+    # multiple-choice target (agents are rejected). Set on both insert and the
+    # refresh update, so a row that predates the `kind` column (defaulted to
+    # 'agent' by the migration) is corrected the next time the operator acts.
     db.execute(
         "INSERT OR IGNORE INTO members "
         "(id, channel, name, summary, skills, last_seen, last_read, joined_at, "
-        " active, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat) "
+        " active, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat, kind) "
         "VALUES (?, ?, ?, ?, '', ?, 0, ?, 1, "
-        " 'operator — watching via web', ?, '', '')",
+        " 'operator — watching via web', ?, '', '', 'human')",
         (ident.member_id, channel, ident.display_name, ident.summary, now, now, now),
     )
     db.execute(
-        "UPDATE members SET name = ?, summary = ? "
+        "UPDATE members SET name = ?, summary = ?, kind = 'human' "
         "WHERE channel = ? AND id = ?",
         (ident.display_name, ident.summary, channel, ident.member_id),
     )
