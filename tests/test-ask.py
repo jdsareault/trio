@@ -134,6 +134,43 @@ r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=
 check("ask: bad question in batch rejected (indexed)",
       "error" in r and "question 2" in r["error"].lower())
 
+# non-dict batch item → indexed error
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=[
+    {"question": "ok?", "options": ["a", "b"]}, "not-a-dict",
+]))
+check("ask: non-dict batch item rejected (indexed)",
+      "error" in r and "question 2" in r["error"].lower())
+
+# at-cap: exactly MAX_ASK_QUESTIONS accepted
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human,
+                           questions=[{"question": f"q{i}?", "options": ["a", "b"]}
+                                      for i in range(srv.MAX_ASK_QUESTIONS)]))
+check("ask: exactly MAX_ASK_QUESTIONS accepted", r.get("ok") is True)
+
+# header truncated to the cap, not rejected
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=[
+    {"question": "q?", "options": ["a", "b"], "header": "H" * (srv.MAX_ASK_HEADER_LEN + 20)},
+]))
+chh = json.loads(msg_row(CH, r["message_id"])["choices"])
+check("ask: over-long header truncated to cap",
+      len(chh["questions"][0]["header"]) == srv.MAX_ASK_HEADER_LEN)
+
+# questions wins when both singular args and questions are supplied
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human,
+                           question="IGNORED", options=["x", "y"], questions=[
+                               {"question": "kept1?", "options": ["a", "b"]},
+                               {"question": "kept2?", "options": ["c", "d"]},
+                           ]))
+chw = json.loads(msg_row(CH, r["message_id"])["choices"])
+check("ask: questions wins over singular args",
+      len(chw["questions"]) == 2 and chw["questions"][0]["question"] == "kept1?")
+
+# payload cap: a maxed-out batch is rejected rather than storing a ~200KB row
+big = [{"question": "Q" * 2000, "options": ["O" * srv.MAX_ASK_OPTION_LEN] * 2
+        + [f"x{i}" for i in range(10)]} for _ in range(srv.MAX_ASK_QUESTIONS)]
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, target=human, questions=big))
+check("ask: oversized payload rejected", "error" in r and "too large" in r["error"].lower())
+
 # agent target rejected
 r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
                            options=["x", "y"], target=asker))
@@ -403,6 +440,62 @@ try:
                      {"content": "x", "reply_to": rb2["message_id"],
                       "selection": {"answers": [{"picked": [0], "custom": []}]}})
         check("live: batch answer-count mismatch -> 400", st == 400)
+
+        # per-question bounds: Q1 valid, Q2 index out of range → 400 (rb2 still
+        # unanswered after the rejected mismatch above).
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": rb2["message_id"],
+                      "selection": {"answers": [{"picked": [0], "custom": []},
+                                                {"picked": [9], "custom": []}]}})
+        check("live: batch per-question bounds (Q2 OOR) -> 400", st == 400)
+
+        # already-answered on a BATCH → 409 (qidb answered above).
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": qidb,
+                      "selection": {"answers": [{"picked": [0], "custom": []},
+                                                {"picked": [0], "custom": []}]}})
+        check("live: second answer to a batch -> 409", st == 409)
+
+        # single-select cardinality: a mode="one" question rejects >1 pick.
+        rc = json.loads(srv.nth_ask(channel=CH3, member_id=asker3, target=human3,
+                                    question="One?", options=["a", "b", "c"], mode="one"))
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": rc["message_id"],
+                      "selection": {"answers": [{"picked": [0, 1], "custom": []}]}})
+        check("live: single-select >1 pick -> 400", st == 400)
+
+        # empty sub-answer (no pick, no text) → 400.
+        rd = json.loads(srv.nth_ask(channel=CH3, member_id=asker3, target=human3,
+                                    question="E?", options=["a", "b"]))
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": rd["message_id"],
+                      "selection": {"answers": [{"picked": [], "custom": []}]}})
+        check("live: empty sub-answer -> 400", st == 400)
+
+        # oversized answers list (>20) → 400.
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": rd["message_id"],
+                      "selection": {"answers": [{"picked": [0], "custom": []}] * 21}})
+        check("live: >20 answers -> 400", st == 400)
+
+        # non-string custom entry → 400.
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": rd["message_id"],
+                      "selection": {"answers": [{"picked": [], "custom": [123]}]}})
+        check("live: non-string custom -> 400", st == 400)
+
+        # legacy single-answer selection shape (no 'answers' key) is refused.
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "a", "reply_to": rd["message_id"],
+                      "selection": {"picked": [0], "custom": ""}})
+        check("live: legacy {picked} selection shape -> 400", st == 400)
+
+        # reply_to type/range guards.
+        for bad in (0, -1, 1.5, "3"):
+            st, _ = http(port, "/api/send", "POST",
+                         {"content": "x", "reply_to": bad,
+                          "selection": {"answers": [{"picked": [0], "custom": []}]}})
+            check(f"live: reply_to={bad!r} -> 400", st == 400)
 
         # Answer-path invariants (the LOTC hardening).
         # (a) already-answered → 409 (qid3 was answered above).
