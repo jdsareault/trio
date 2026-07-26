@@ -3313,7 +3313,10 @@ INDEX_HTML = r"""<!doctype html>
       const panel = document.createElement('div');
       panel.className = 'ask-panel';
       if (multi) panel.appendChild(askHeader(q, qi));
-      panel.appendChild(askQText(q));
+      const qtext = askQText(q);
+      const qLabelId = 'askq_' + msg.id + '_' + qi;
+      qtext.id = qLabelId;
+      panel.appendChild(qtext);
 
       const rows = [];
       function syncSelected() {
@@ -3327,6 +3330,9 @@ INDEX_HTML = r"""<!doctype html>
 
       const form = document.createElement('div');
       form.className = 'ask-options interactive';
+      // Tie the options group to the question text for screen readers.
+      form.setAttribute('role', many ? 'group' : 'radiogroup');
+      form.setAttribute('aria-labelledby', qLabelId);
       (q.options || []).forEach((opt, i) => {
         const row = document.createElement('div');
         row.className = 'ask-opt selectable';
@@ -3362,7 +3368,7 @@ INDEX_HTML = r"""<!doctype html>
             // deselect within the window doesn't strand the user on the next.
             const from = qi;
             setTimeout(() => {
-              if (cur === from && isAnswered(from)) { cur = from + 1; refresh(); }
+              if (cur === from && isAnswered(from)) { cur = from + 1; refresh(); focusPanel(); }
             }, 180);
           }
         }
@@ -3446,7 +3452,7 @@ INDEX_HTML = r"""<!doctype html>
       backBtn.type = 'button';
       backBtn.className = 'ask-nav-btn';
       backBtn.textContent = '‹ Back';
-      backBtn.addEventListener('click', () => { if (cur > 0) { cur--; refresh(); } });
+      backBtn.addEventListener('click', () => { if (cur > 0) { cur--; refresh(); focusPanel(); } });
       progress = document.createElement('span');
       progress.className = 'ask-progress';
       progress.title = 'jump to the next unanswered question';
@@ -3459,7 +3465,7 @@ INDEX_HTML = r"""<!doctype html>
       nextBtn.className = 'ask-nav-btn';
       nextBtn.textContent = 'Next ›';
       nextBtn.addEventListener('click', () => {
-        if (cur < questions.length - 1) { cur++; refresh(); }
+        if (cur < questions.length - 1) { cur++; refresh(); focusPanel(); }
       });
       nav.appendChild(backBtn);
       nav.appendChild(progress);
