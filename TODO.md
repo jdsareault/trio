@@ -2,6 +2,36 @@
 
 ## Open
 
+### Selectable-answers follow-ups (deferred from LOTC review)
+**Severity:** Low | **Since:** selectable-answers feature (jdsareault fork)
+
+Note-level items from the LOTC reviews of `trio_ask`, deferred after fixing the
+substantive findings. Round 2 (batched questionnaires) deferred:
+- **Full client-JS DOM test harness** (Ents). The pure helpers are now unit-
+  tested (`tests/test-ask-client.js`), but the DOM-stateful pieces (renderAskInto
+  states, buildPanel click/keyboard, auto-advance, paging) still have no
+  jsdom/Playwright coverage. Add one if the picker keeps evolving.
+- **content vs selection divergence** (Aragorn). The answer's free-text `content`
+  (what agents read) is client-composed independently of the structured
+  `selection` the dashboard renders; a hand-crafted POST could make them disagree.
+  Defense-in-depth fix: derive `content` server-side from `selection` + choices.
+- **Auto-advance polish** (Frodo notes): a "moving to Q2…" cue and/or a running
+  answers-so-far preview during a long batch.
+
+Round 1 (single-question) deferred:
+- **Question text starting with `[`** is classed as a system message and renders
+  as plain text with no picker (Sauron). Fix: gate `isSystem` on absence of
+  `choices` client-side, or guard a leading `[` in `nth_ask`.
+- **Lost SSE echo leaves the picker stuck at "Sent ✓"** until reload (Sauron).
+  Send-failure paths already recover; only a dropped stream after a successful
+  POST is affected.
+- **Accessibility:** options aren't a `fieldset`/`radiogroup` with the question as
+  label — screen readers hear an unlabeled group (Frodo). Mouse/keyboard work.
+- **No distinct "unanswered question" indicator** — a question looks like ordinary
+  targeted chatter; easy to miss with notifications off by default (Frodo).
+- **No edit/undo after Confirm** — a "this is final" cue on the button would help
+  (Frodo).
+
 ### STT hardening follow-ups (deferred from LOTC review)
 **Severity:** Low | **Since:** STT feature (jdsareault fork)
 

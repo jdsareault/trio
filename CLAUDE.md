@@ -10,7 +10,7 @@ nth is an MCP server + two sibling skills (`/trio` local, `/quartet` remote) for
 
 ## Architecture
 
-**Single-file server:** `server/nth_server.py` — a Python MCP server using `FastMCP` from the `mcp` SDK. All 18 tools are defined here. State lives in a shared SQLite database at `~/.claude/nth/nth.db` (WAL mode, `busy_timeout=5000`). Each Claude Code session spawns its own server process (stdio) or connects via SSE; they coordinate through the shared DB. The MCP server name is controlled by `NTH_SERVER_NAME` (default: `nth-trio`), and the tool prefix by `NTH_TOOL_PREFIX` (default: `trio`).
+**Single-file server:** `server/nth_server.py` — a Python MCP server using `FastMCP` from the `mcp` SDK. All 19 tools are defined here. State lives in a shared SQLite database at `~/.claude/nth/nth.db` (WAL mode, `busy_timeout=5000`). Each Claude Code session spawns its own server process (stdio) or connects via SSE; they coordinate through the shared DB. The MCP server name is controlled by `NTH_SERVER_NAME` (default: `nth-trio`), and the tool prefix by `NTH_TOOL_PREFIX` (default: `trio`).
 
 **SSE transport:** `server/quartet_server.py` — uvicorn-based SSE server exposing the same MCP tools over HTTP. Runs on the hub machine, listens on the Tailscale IP. Remote machines register `nth-qweb` pointing at the hub's SSE endpoint.
 
@@ -21,6 +21,8 @@ nth is an MCP server + two sibling skills (`/trio` local, `/quartet` remote) for
 **Deleted in v7:** `nth_sentinel.py`, `nth_wait.py`, `messenger-foreground.py`, `sentinel-foreground.py`, `nth_sse.py` (pre-v6 SSE wrapper, replaced by `quartet_server.py`), `agents/trio-sentinel.md`. The Haiku-subagent sentinel pair was replaced because vanilla Claude Code caps Bash at 10 minutes — the 1-hour Haiku sentinel required `BASH_MAX_TIMEOUT_MS` and when that wasn't set Haiku hallucinated fabricated output instead of returning real script stdout.
 
 **Speech-to-text sidecar (fork):** `server/nth_stt_worker.py` — an OPTIONAL persistent subprocess spawned by `nth_web.py` only when local dictation is used. It loads an mlx-whisper model (`large-v3-turbo`) once and keeps it warm, transcribing audio clips over a line-delimited JSON stdin/stdout protocol (~0.8s warm vs ~3s if reloaded per call). An RMS energy gate skips silence so Whisper can't hallucinate words from it (`no_speech_prob` proved unreliable). The web server stays stdlib-only and just pipes audio paths to it; the worker exits on stdin EOF, so it self-cleans when the server dies. Web endpoints: `GET /api/stt/health`, `POST /api/stt/transcribe` (identity-gated, concurrency-capped via a semaphore). The mlx-whisper engine + model are a system install (like the programming fonts), not a repo dependency. Tests: `tests/test-stt.py`.
+
+**Selectable answers (fork):** `trio_ask` lets an agent pose a multiple-choice question **to a human**, answered by clicking in the web dashboard. Enforcement hinges on `members.kind` ('agent' by default; web operators are marked 'human' in `nth_web.py::ensure_operator_row`) — `trio_ask` rejects a non-human target, because agents read prose natively and only a person benefits from a picker. The question payload (mode/options/target/question) lives in `messages.choices`; the human's answer is an ordinary `reply_to` message whose plain text the asking agent just reads, with a structured `messages.selection` alongside purely so the dashboard can lock the picker and highlight the choice. The web `/api/send` accepts `reply_to` + `selection`; the dashboard renders radio/checkbox options + a free-text box + Confirm for the target and read-only/locked views for everyone else. Tests: `tests/test-ask.py`.
 
 **Skill definitions:** `SKILL-trio.md` (local stdio) and `SKILL-quartet.md` (remote SSE over Tailscale). Both get installed (via `setup.sh`) into `~/.claude/skills/trio/SKILL.md` and `~/.claude/skills/quartet/SKILL.md` respectively, alongside renamed companion docs (`REFERENCE.md`, `PROTOCOLS.md`, `DESIGN.md`). The repo-root `SKILL.md` / `PROTOCOLS.md` / `REFERENCE.md` are pre-v6 single-skill deprecated files kept only for historical reference — they're NOT installed.
 
@@ -41,7 +43,7 @@ nth is an MCP server + two sibling skills (`/trio` local, `/quartet` remote) for
 
 ## DB Schema (tables used by current code)
 
-`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat, **filter_mode**), `messages` (autoincrement id, channel, member_id, content, mentions, refs, **bangs**), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL), `sessions` (session_token, member_id, last_read, role, revoked_at, ...).
+`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat, **filter_mode**, **kind** 'agent'|'human'), `messages` (autoincrement id, channel, member_id, content, mentions, refs, **bangs**, reply_to, **choices**, **selection**), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL), `sessions` (session_token, member_id, last_read, role, revoked_at, ...).
 
 ## Project State
 

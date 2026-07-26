@@ -345,6 +345,19 @@ def parse_mentions_json(raw: Optional[str]) -> List[str]:
         return []
 
 
+def parse_obj_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse a stored JSON object column (messages.choices / .selection) to a
+    dict, or None if empty/malformed. Used to ship the multiple-choice
+    question payload and the human's selection to the dashboard client."""
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
 def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
     """Match the dashboard's status classification."""
     if not last_seen_iso:
@@ -507,20 +520,44 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     refresh the summary so trust source is fresh if a guest later upgrades
     to a Tailscale identity (or vice versa)."""
     now = now_iso()
+    # kind='human' marks this row as a person, so trio_ask will accept it as a
+    # multiple-choice target (agents are rejected). Set on both insert and the
+    # refresh update, so a row that predates the `kind` column (defaulted to
+    # 'agent' by the migration) is corrected the next time the operator acts.
     db.execute(
         "INSERT OR IGNORE INTO members "
         "(id, channel, name, summary, skills, last_seen, last_read, joined_at, "
-        " active, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat) "
+        " active, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat, kind) "
         "VALUES (?, ?, ?, ?, '', ?, 0, ?, 1, "
-        " 'operator — watching via web', ?, '', '')",
+        " 'operator — watching via web', ?, '', '', 'human')",
         (ident.member_id, channel, ident.display_name, ident.summary, now, now, now),
     )
     db.execute(
-        "UPDATE members SET name = ?, summary = ? "
+        "UPDATE members SET name = ?, summary = ?, kind = 'human' "
         "WHERE channel = ? AND id = ?",
         (ident.display_name, ident.summary, channel, ident.member_id),
     )
     return ident.member_id, ident.display_name
+
+
+def ensure_ask_columns(db: sqlite3.Connection) -> None:
+    """Add the selectable-answers columns if the DB predates them. These are
+    normally created by nth_server.py's get_db() migration, but the web
+    dashboard can be launched against a DB the MCP server hasn't migrated yet
+    (server not restarted since the feature landed) — without this, the SSE
+    poll SELECT of `choices` crash-loops with 'no such column'. Mirrors
+    ensure_attachments_table: the web side owns its own forward-compat. Each
+    ALTER is idempotent (fails harmlessly if the column already exists)."""
+    for table, col, defn in (
+        ("members",  "kind",      "TEXT NOT NULL DEFAULT 'agent'"),
+        ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "reply_to",  "INTEGER"),
+    ):
+        try:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def sniff_image_mime(data: bytes) -> Optional[str]:
@@ -573,6 +610,29 @@ def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[st
             for r in rows]
 
 
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+    """Build the SSE 'message' payload from a messages row. Shared by the
+    history prime and the live tick so both ship identical shapes, including
+    the selectable-answers fields (choices/selection/reply_to). Tolerant of
+    older rows where a column may be absent."""
+    keys = r.keys()
+    return {
+        "type": "message",
+        "id": r["id"],
+        "member_id": r["member_id"],
+        "member_name": r["member_name"] or r["member_id"],
+        "content": r["content"] or "",
+        "mentions": parse_mentions_json(r["mentions"]),
+        "refs": parse_mentions_json(r["refs"] if "refs" in keys else ""),
+        "bangs": parse_mentions_json(r["bangs"] if "bangs" in keys else ""),
+        "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
+        "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
+        "reply_to": (r["reply_to"] if "reply_to" in keys else None),
+        "created_at": r["created_at"],
+        "attachments": attachments_for_message(db, r["id"]),
+    }
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -616,23 +676,13 @@ class EventHub:
             members = self._fetch_roster(db)
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                "choices, selection, reply_to, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                q.put_nowait(json.dumps({
-                    "type": "message",
-                    "id": r["id"],
-                    "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
-                    "content": r["content"] or "",
-                    "mentions": parse_mentions_json(r["mentions"]),
-                    "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                    "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                    "created_at": r["created_at"],
-                    "attachments": attachments_for_message(db, r["id"]),
-                }))
+                q.put_nowait(json.dumps(_message_event(db, r)))
         except (sqlite3.Error, queue.Full):
             pass
         finally:
@@ -760,23 +810,13 @@ class EventHub:
             while not self._stop.is_set():
                 try:
                     rows = db.execute(
-                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                        "choices, selection, reply_to, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast({
-                            "type": "message",
-                            "id": r["id"],
-                            "member_id": r["member_id"],
-                            "member_name": r["member_name"] or r["member_id"],
-                            "content": r["content"] or "",
-                            "mentions": parse_mentions_json(r["mentions"]),
-                            "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                            "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                            "created_at": r["created_at"],
-                            "attachments": attachments_for_message(db, r["id"]),
-                        })
+                        self._broadcast(_message_event(db, r))
                         self.last_msg_id = r["id"]
 
                     members = self._fetch_roster(db)
@@ -1216,6 +1256,58 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "content too long (max 4000 chars)")
             return
 
+        # reply_to + selection: set when this send answers a trio_ask. reply_to
+        # links the answer to the ask; selection carries one entry per question
+        # ({picked: [int], custom: [str]}) so the dashboard can show the resolved
+        # answers. Both optional. Per-question in-range / target / not-already-
+        # answered checks need the ask's `choices`, so they run in the txn below.
+        reply_to = body.get("reply_to")
+        if reply_to is not None and not (type(reply_to) is int and reply_to > 0):
+            self._error(400, "invalid reply_to")
+            return
+        raw_sel = body.get("selection")
+        selection_json = None
+        has_selection = raw_sel is not None
+        answers: list = []
+        if has_selection:
+            if reply_to is None:
+                self._error(400, "selection requires reply_to")
+                return
+            if not isinstance(raw_sel, dict):
+                self._error(400, "invalid selection")
+                return
+            raw_answers = raw_sel.get("answers")
+            if not isinstance(raw_answers, list) or not raw_answers:
+                self._error(400, "invalid selection.answers")
+                return
+            if len(raw_answers) > 20:
+                self._error(400, "too many answers")
+                return
+            for a in raw_answers:
+                if not isinstance(a, dict):
+                    self._error(400, "invalid selection.answers")
+                    return
+                p = a.get("picked", [])
+                c = a.get("custom", [])
+                if not isinstance(p, list) or not all(type(x) is int and x >= 0 for x in p):
+                    self._error(400, "invalid selection.picked")
+                    return
+                if not isinstance(c, list) or not all(isinstance(x, str) for x in c):
+                    self._error(400, "invalid selection.custom")
+                    return
+                if sum(len(x) for x in c) > 8000:
+                    self._error(400, "selection.custom too long")
+                    return
+                clean_custom = [s.strip() for s in c if s.strip()]
+                clean_picked = list(dict.fromkeys(p))
+                # Every question must actually be answered — a blank entry
+                # (no pick, no text) would otherwise consume the one-shot
+                # answer slot and lock the ask with nothing in it.
+                if not clean_picked and not clean_custom:
+                    self._error(400, "each answer needs a selection or typed text")
+                    return
+                answers.append({"picked": clean_picked, "custom": clean_custom})
+
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
@@ -1238,6 +1330,79 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, self.channel, ident)
                 now = now_iso()
+
+                # Validate reply_to references a real message in this channel.
+                if reply_to is not None:
+                    tgt = db.execute(
+                        "SELECT id, choices FROM messages WHERE id = ? AND channel = ?",
+                        (reply_to, self.channel),
+                    ).fetchone()
+                    if not tgt:
+                        db.execute("ROLLBACK")
+                        self._error(400, "reply_to target not found")
+                        return
+
+                    # Answer-path invariants: a `selection` claims this message
+                    # answers a trio_ask. The picker enforces "only the target
+                    # answers" in the client only — re-check server-side since a
+                    # raw POST bypasses the UI. Guards:
+                    #   (a) the reply_to message must actually be an ask,
+                    #   (b) the poster must be its declared target,
+                    #   (c) one answer per question, each picked index in range,
+                    #   (d) the ask must not already be answered.
+                    if has_selection:
+                        q_choices = parse_obj_json(
+                            tgt["choices"] if "choices" in tgt.keys() else "")
+                        # Tolerate the legacy single-question shape
+                        # ({options,...}) as a one-question ask.
+                        q_qs = None
+                        q_target = None
+                        if isinstance(q_choices, dict):
+                            q_target = q_choices.get("target")
+                            if isinstance(q_choices.get("questions"), list):
+                                q_qs = q_choices["questions"]
+                            elif isinstance(q_choices.get("options"), list):
+                                # Legacy single-question shape carries mode at top level.
+                                q_qs = [{"options": q_choices["options"],
+                                         "mode": q_choices.get("mode")}]
+                        if not q_qs:
+                            db.execute("ROLLBACK")
+                            self._error(400, "reply_to is not a question")
+                            return
+                        if q_target != op_id:
+                            db.execute("ROLLBACK")
+                            self._error(403, "this question is not addressed to you")
+                            return
+                        if len(answers) != len(q_qs):
+                            db.execute("ROLLBACK")
+                            self._error(400, "answer count does not match question count")
+                            return
+                        for qi, ans in enumerate(answers):
+                            q = q_qs[qi] if isinstance(q_qs[qi], dict) else {}
+                            opts = q.get("options")
+                            if not isinstance(opts, list):
+                                db.execute("ROLLBACK")
+                                self._error(400, "malformed question")
+                                return
+                            if any(p >= len(opts) for p in ans["picked"]):
+                                db.execute("ROLLBACK")
+                                self._error(400, "selection.picked out of range")
+                                return
+                            # A "pick one" question accepts at most one option.
+                            if q.get("mode") == "one" and len(ans["picked"]) > 1:
+                                db.execute("ROLLBACK")
+                                self._error(400, "single-select question accepts one option")
+                                return
+                        already = db.execute(
+                            "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
+                            "AND selection IS NOT NULL AND selection != '' LIMIT 1",
+                            (self.channel, reply_to),
+                        ).fetchone()
+                        if already:
+                            db.execute("ROLLBACK")
+                            self._error(409, "this question has already been answered")
+                            return
+                        selection_json = json.dumps({"answers": answers})
 
                 # Validate attachments up front: every requested id must be
                 # this operator's own, unlinked, in-channel row — else abort,
@@ -1292,12 +1457,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, reply_to, selection) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
-                     json.dumps(bang_ids)    if bang_ids    else ""),
+                     json.dumps(bang_ids)    if bang_ids    else "",
+                     reply_to,
+                     selection_json if selection_json else ""),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
@@ -1752,6 +1919,90 @@ INDEX_HTML = r"""<!doctype html>
   .msg.targeted { background: rgba(var(--mention-rgb), 0.09); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
   .msg.dm-hidden { display: none; }
+
+  /* ── Selectable answers (trio_ask multiple-choice picker) ── */
+  .ask-wrap {
+    margin-top: 6px; padding: 10px 12px;
+    border: 1px solid rgba(var(--ov),0.16); border-radius: 8px;
+    background: rgba(var(--ov),0.04);
+  }
+  .ask-wrap.answered { opacity: 0.92; }
+  .ask-qblock { margin-bottom: 12px; }
+  .ask-qblock:last-child { margin-bottom: 0; }
+  .ask-qnum {
+    font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--dim); margin-bottom: 3px;
+  }
+  .ask-q { font-weight: 600; margin-bottom: 8px; white-space: pre-wrap; }
+  .ask-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-top: 10px;
+  }
+  .ask-nav-btn {
+    padding: 4px 12px; cursor: pointer; font: inherit;
+    border: 1px solid rgba(var(--ov),0.2); border-radius: 6px;
+    background: rgba(var(--ov),0.03); color: inherit;
+  }
+  .ask-nav-btn:hover:not(:disabled) { border-color: var(--accent2); }
+  .ask-nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .ask-progress { font-size: 0.85em; color: var(--dim); cursor: pointer; }
+  .ask-progress:hover { color: var(--accent2); }
+  .ask-submit-hint.jump { cursor: pointer; color: var(--accent2); }
+  .ask-options { display: flex; flex-direction: column; gap: 4px; }
+  .ask-opt {
+    padding: 6px 10px; border: 1px solid rgba(var(--ov),0.14);
+    border-radius: 6px; background: rgba(var(--ov),0.03);
+  }
+  .ask-opt.selectable {
+    display: flex; align-items: center; gap: 9px; cursor: pointer;
+    user-select: none; transition: background 0.1s, border-color 0.1s;
+  }
+  .ask-opt.selectable:hover { background: rgba(var(--ov),0.08); border-color: rgba(var(--ov),0.3); }
+  .ask-opt.selectable:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
+  .ask-opt.selectable.selected {
+    border-color: var(--accent2); background: rgba(var(--mention-rgb),0.14); font-weight: 600;
+  }
+  .ask-options.locked .ask-opt, .ask-options.readonly .ask-opt { opacity: 0.6; }
+  .ask-options.locked .ask-opt.chosen {
+    opacity: 1; border-color: var(--accent2);
+    background: rgba(var(--mention-rgb),0.12); font-weight: 600;
+  }
+  .ask-options.locked .ask-opt.chosen::before { content: "✓ "; color: var(--accent2); }
+  .ask-custom { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .ask-custom-row { display: flex; align-items: center; gap: 6px; }
+  .ask-custom-input {
+    flex: 1; min-width: 0; box-sizing: border-box; padding: 6px 9px;
+    border: 1px solid rgba(var(--ov),0.18); border-radius: 6px;
+    background: rgba(var(--ov),0.03); color: inherit; font: inherit;
+  }
+  .ask-custom-input:focus { outline: none; border-color: var(--accent2); }
+  .ask-custom-del {
+    flex: none; width: 26px; height: 26px; line-height: 1; cursor: pointer;
+    border: 1px solid rgba(var(--ov),0.18); border-radius: 6px;
+    background: rgba(var(--ov),0.03); color: var(--dim); font: inherit; font-size: 1.1em;
+  }
+  .ask-custom-del:hover { border-color: var(--mention); color: var(--mention); }
+  .ask-add {
+    align-self: flex-start; margin-top: 6px; padding: 4px 10px; cursor: pointer;
+    border: 1px dashed rgba(var(--ov),0.3); border-radius: 6px;
+    background: none; color: var(--dim); font: inherit; font-size: 0.9em;
+  }
+  .ask-add:hover { border-color: var(--accent2); color: var(--accent2); }
+  .ask-custom-answer { margin-top: 6px; font-size: 0.92em; color: var(--dim); }
+  .ask-actions { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+  .ask-confirm {
+    padding: 6px 16px; border: 1px solid var(--accent2); border-radius: 6px;
+    background: var(--accent2); color: #06202a; font: inherit; font-weight: 600;
+    cursor: pointer;
+  }
+  .ask-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ask-hint, .ask-status { font-size: 0.86em; color: var(--dim); }
+  .ask-hint { margin-top: 6px; }
+  .ask-status { margin-top: 7px; }
+  .ask-preview:not(:empty) {
+    margin-top: 7px; font-size: 0.9em; color: var(--dim);
+    border-left: 2px solid var(--accent2); padding-left: 8px; white-space: pre-wrap;
+  }
   body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
 
   /* Ack badges — one per member. Emoji is the identity; colored ring
@@ -2228,6 +2479,8 @@ INDEX_HTML = r"""<!doctype html>
     messages: new Map(),            // id → message
     messageDomById: new Map(),      // id → DOM node (for ack badge updates)
     seenMsgIds: new Set(),
+    askDomById: new Map(),          // question id → {wrap, msg} for re-rendering the picker
+    answers: new Map(),             // question id → answer message (reply w/ selection)
     completion: { visible: false, index: 0, items: [], atPos: -1, sigil: '@' },
     agentStats: new Map(),          // id → {sent, sent_times[], lengths[], lastSnippet,
                                     //        read_latencies[], queue_depth,
@@ -2852,6 +3105,399 @@ INDEX_HTML = r"""<!doctype html>
     return bar;
   }
 
+  // ── Selectable answers (trio_ask picker / questionnaire) ──
+  // Pure, DOM-free helpers (askQuestions / isAskChoices / askAnswers /
+  // answerStringFor / composeAnswer) are injected here from
+  // server/nth_ask_client.js so they can be unit-tested under Node. See that
+  // file — do NOT redefine them inline.
+  /*__ASK_HELPERS__*/
+  function askHeader(q, qi) {
+    const h = document.createElement('div');
+    h.className = 'ask-qnum';
+    h.textContent = (q.header && q.header.trim()) ? q.header.trim() : ('Question ' + (qi + 1));
+    return h;
+  }
+  function askQText(q) {
+    const qh = document.createElement('div');
+    qh.className = 'ask-q';
+    qh.textContent = q.question || '';
+    return qh;
+  }
+
+  // (Re)render a question / questionnaire into `wrap`, reflecting answer state.
+  // Called on first append and again when the answer arrives so it locks.
+  function renderAskInto(wrap, msg) {
+    const choices = msg.choices;
+    const questions = askQuestions(choices);
+    if (!questions.length) return;
+    wrap.innerHTML = '';
+    const isTarget = choices.target === state.operator.id;
+    const multi = questions.length > 1;
+    const ans = state.answers.get(msg.id) || null;
+
+    // Answered → locked view for everyone (chosen options highlighted).
+    if (ans) {
+      wrap.classList.add('answered');
+      const sels = askAnswers(ans.selection || {});
+      questions.forEach((q, qi) => {
+        const box = document.createElement('div');
+        box.className = 'ask-qblock';
+        if (multi) box.appendChild(askHeader(q, qi));
+        box.appendChild(askQText(q));
+        const sel = sels[qi] || {};
+        const picked = Array.isArray(sel.picked) ? sel.picked : [];
+        const list = document.createElement('div');
+        list.className = 'ask-options locked';
+        (q.options || []).forEach((opt, i) => {
+          const row = document.createElement('div');
+          row.className = 'ask-opt' + (picked.includes(i) ? ' chosen' : '');
+          row.textContent = opt;
+          list.appendChild(row);
+        });
+        box.appendChild(list);
+        const customs = Array.isArray(sel.custom) ? sel.custom : (sel.custom ? [sel.custom] : []);
+        const ctext = customs.map(s => (s || '').trim()).filter(Boolean).join(', ');
+        if (ctext) {
+          const cu = document.createElement('div');
+          cu.className = 'ask-custom-answer';
+          cu.textContent = 'Typed: ' + ctext;
+          box.appendChild(cu);
+        }
+        wrap.appendChild(box);
+      });
+      const badge = document.createElement('div');
+      badge.className = 'ask-status';
+      const who = state.members.get(ans.member_id);
+      badge.textContent = '✓ answered' + (who ? ' by ' + who.name : '');
+      wrap.appendChild(badge);
+      return;
+    }
+
+    // Not the target → read-only preview of the pending question(s).
+    if (!isTarget) {
+      questions.forEach((q, qi) => {
+        const box = document.createElement('div');
+        box.className = 'ask-qblock';
+        if (multi) box.appendChild(askHeader(q, qi));
+        box.appendChild(askQText(q));
+        const list = document.createElement('div');
+        list.className = 'ask-options readonly';
+        (q.options || []).forEach((opt) => {
+          const row = document.createElement('div');
+          row.className = 'ask-opt';
+          row.textContent = opt;
+          list.appendChild(row);
+        });
+        box.appendChild(list);
+        wrap.appendChild(box);
+      });
+      const tgt = state.members.get(choices.target);
+      const note = document.createElement('div');
+      note.className = 'ask-status';
+      note.textContent = 'awaiting ' + (tgt ? tgt.name : 'the recipient') + '…';
+      wrap.appendChild(note);
+      return;
+    }
+
+    // Interactive: the target answers. One panel per question (only the current
+    // one is visible), Back/Next to page through a batch, and a single Submit
+    // that posts every answer at once. No native form widgets — options are
+    // clickable pills whose selection lives in per-question JS Sets.
+    let sending = false;
+    let cur = 0;
+    let submitHint = null;   // assigned when the actions row is built
+    const qstate = questions.map(() => ({ selected: new Set(), customInputs: [] }));
+    const panels = [];
+    // Questions answered at least once — auto-advance fires only the FIRST time
+    // a question is answered, so paging Back to correct an earlier answer
+    // doesn't fling you forward again.
+    const everAnswered = new Set();
+
+    function isAnswered(qi) {
+      const st = qstate[qi];
+      return st.selected.size > 0 || st.customInputs.some(i => i.value.trim());
+    }
+    function allAnswered() {
+      return questions.every((_, qi) => isAnswered(qi));
+    }
+    function answeredCount() {
+      return questions.reduce((n, _, qi) => n + (isAnswered(qi) ? 1 : 0), 0);
+    }
+    function firstUnanswered() {
+      for (let qi = 0; qi < questions.length; qi++) if (!isAnswered(qi)) return qi;
+      return -1;
+    }
+    function goToQuestion(idx) {
+      if (idx >= 0 && idx < questions.length) { cur = idx; refresh(); focusPanel(); }
+    }
+    function focusPanel() {
+      // Move keyboard focus into the now-visible panel so a keyboard user (and
+      // screen readers) don't get stranded on a hidden element after paging.
+      const p = panels[cur];
+      if (!p) return;
+      const first = p.querySelector('.ask-opt.selectable, .ask-custom-input');
+      if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
+    }
+    function composedAnswer() {
+      // Delegate the (pure, unit-tested) text composition to composeAnswer.
+      return composeAnswer(questions, selectionPayload().answers, multi);
+    }
+    function selectionPayload() {
+      return { answers: questions.map((q, qi) => {
+        const st = qstate[qi];
+        return { picked: [...st.selected].sort((a, b) => a - b),
+                 custom: st.customInputs.map(i => i.value.trim()).filter(Boolean) };
+      }) };
+    }
+    function refresh() {
+      panels.forEach((p, i) => { p.style.display = (i === cur) ? '' : 'none'; });
+      if (backBtn) backBtn.disabled = (cur === 0);
+      if (nextBtn) nextBtn.disabled = (cur === questions.length - 1);
+      if (progress) {
+        progress.textContent = (cur + 1) + ' of ' + questions.length +
+          ' · ' + answeredCount() + '/' + questions.length + ' answered';
+      }
+      const done = allAnswered();
+      submitBtn.disabled = sending || !done;
+      preview.textContent = done
+        ? ('Will send:' + (multi ? '\n' : ' ') + composedAnswer()) : '';
+      // When Submit is disabled, say why — and (for a batch) offer a jump to
+      // the next unanswered question rather than making the user page around.
+      if (submitHint) {
+        if (done) {
+          submitHint.textContent = '';
+          submitHint.classList.remove('jump');
+        } else if (multi) {
+          const rem = questions.length - answeredCount();
+          submitHint.textContent = rem + ' unanswered — jump to next ›';
+          submitHint.classList.add('jump');
+        } else {
+          submitHint.textContent = 'select an option or type an answer';
+          submitHint.classList.remove('jump');
+        }
+      }
+    }
+
+    function buildPanel(q, qi) {
+      const st = qstate[qi];
+      const many = q.mode === 'many';
+      const panel = document.createElement('div');
+      panel.className = 'ask-panel';
+      if (multi) panel.appendChild(askHeader(q, qi));
+      const qtext = askQText(q);
+      const qLabelId = 'askq_' + msg.id + '_' + qi;
+      qtext.id = qLabelId;
+      panel.appendChild(qtext);
+
+      const rows = [];
+      function syncSelected() {
+        rows.forEach((row, i) => {
+          const on = st.selected.has(i);
+          row.classList.toggle('selected', on);
+          row.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
+      }
+      function clearCustom() { st.customInputs.forEach(i => { i.value = ''; }); }
+
+      const form = document.createElement('div');
+      form.className = 'ask-options interactive';
+      // Tie the options group to the question text for screen readers.
+      form.setAttribute('role', many ? 'group' : 'radiogroup');
+      form.setAttribute('aria-labelledby', qLabelId);
+      (q.options || []).forEach((opt, i) => {
+        const row = document.createElement('div');
+        row.className = 'ask-opt selectable';
+        row.setAttribute('role', many ? 'checkbox' : 'radio');
+        row.setAttribute('aria-checked', 'false');
+        row.tabIndex = 0;
+        const span = document.createElement('span');
+        span.textContent = opt;
+        row.appendChild(span);
+        function toggle() {
+          let advance = false;
+          const wasEver = everAnswered.has(qi);
+          if (many) {
+            // Multi-select never auto-advances — the user may pick several
+            // and/or type, so they move on with Next/Submit themselves.
+            if (st.selected.has(i)) st.selected.delete(i); else st.selected.add(i);
+          } else {
+            const had = st.selected.has(i);
+            st.selected.clear();
+            if (!had) st.selected.add(i);   // click the selected one again to clear
+            if (st.selected.size) clearCustom();
+            // A fresh single-select pick auto-advances — but only the FIRST
+            // time this question is answered (not when correcting via Back),
+            // not on deselect, not on the last question, not for a lone one.
+            if (!had && !wasEver && multi && qi < questions.length - 1) advance = true;
+          }
+          if (isAnswered(qi)) everAnswered.add(qi);   // sticky
+          syncSelected();
+          refresh();
+          if (advance) {
+            // Brief beat so the outline registers before paging. Re-check the
+            // page hasn't moved AND the question is still answered, so a
+            // deselect within the window doesn't strand the user on the next.
+            const from = qi;
+            setTimeout(() => {
+              if (cur === from && isAnswered(from)) { cur = from + 1; refresh(); focusPanel(); }
+            }, 180);
+          }
+        }
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', (e) => {
+          if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
+        });
+        form.appendChild(row);
+        rows.push(row);
+      });
+      panel.appendChild(form);
+
+      const customWrap = document.createElement('div');
+      customWrap.className = 'ask-custom';
+      panel.appendChild(customWrap);
+      function addCustomBox(removable) {
+        const rowc = document.createElement('div');
+        rowc.className = 'ask-custom-row';
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.className = 'ask-custom-input';
+        inp.placeholder = many ? 'type your own answer…' : 'or type your own answer…';
+        inp.maxLength = 4000;
+        inp.addEventListener('input', () => {
+          if (!many && inp.value.trim()) { st.selected.clear(); syncSelected(); }
+          if (isAnswered(qi)) everAnswered.add(qi);   // typing counts as answered
+          refresh();
+        });
+        rowc.appendChild(inp);
+        if (removable) {
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'ask-custom-del';
+          del.textContent = '×';
+          del.title = 'remove this answer';
+          del.addEventListener('click', () => {
+            const idx = st.customInputs.indexOf(inp);
+            if (idx >= 0) st.customInputs.splice(idx, 1);
+            rowc.remove();
+            refresh();
+          });
+          rowc.appendChild(del);
+        }
+        customWrap.appendChild(rowc);
+        st.customInputs.push(inp);
+        return inp;
+      }
+      addCustomBox(false);
+      if (many) {
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'ask-add';
+        addBtn.textContent = '+ add another answer';
+        addBtn.addEventListener('click', () => { addCustomBox(true).focus(); });
+        panel.appendChild(addBtn);
+      }
+
+      const hint = document.createElement('div');
+      hint.className = 'ask-hint';
+      let hintText = many ? 'select any that apply' : 'select one (click again to clear)';
+      // Multi-select doesn't auto-advance — tell the user to page on manually so
+      // the change in rhythm (vs. auto-advancing single-selects) isn't confusing.
+      if (many && multi && qi < questions.length - 1) hintText += ' — then Next ›';
+      hint.textContent = hintText;
+      panel.appendChild(hint);
+      return panel;
+    }
+
+    questions.forEach((q, qi) => {
+      const p = buildPanel(q, qi);
+      panels.push(p);
+      wrap.appendChild(p);
+    });
+
+    // Back / progress / Next — only for a multi-question batch.
+    let backBtn = null, nextBtn = null, progress = null;
+    if (multi) {
+      const nav = document.createElement('div');
+      nav.className = 'ask-nav';
+      backBtn = document.createElement('button');
+      backBtn.type = 'button';
+      backBtn.className = 'ask-nav-btn';
+      backBtn.textContent = '‹ Back';
+      backBtn.addEventListener('click', () => { if (cur > 0) { cur--; refresh(); focusPanel(); } });
+      progress = document.createElement('span');
+      progress.className = 'ask-progress';
+      progress.title = 'jump to the next unanswered question';
+      progress.addEventListener('click', () => {
+        const u = firstUnanswered();
+        if (u >= 0) goToQuestion(u);
+      });
+      nextBtn = document.createElement('button');
+      nextBtn.type = 'button';
+      nextBtn.className = 'ask-nav-btn';
+      nextBtn.textContent = 'Next ›';
+      nextBtn.addEventListener('click', () => {
+        if (cur < questions.length - 1) { cur++; refresh(); focusPanel(); }
+      });
+      nav.appendChild(backBtn);
+      nav.appendChild(progress);
+      nav.appendChild(nextBtn);
+      wrap.appendChild(nav);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'ask-actions';
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'ask-confirm';
+    submitBtn.textContent = multi ? 'Submit all' : 'Confirm';
+    submitBtn.disabled = true;
+    actions.appendChild(submitBtn);
+    // Why Submit is disabled + (for a batch) a click-to-jump to the gap.
+    submitHint = document.createElement('span');
+    submitHint.className = 'ask-hint ask-submit-hint';
+    submitHint.addEventListener('click', () => {
+      if (!submitHint.classList.contains('jump')) return;
+      const u = firstUnanswered();
+      if (u >= 0) goToQuestion(u);
+    });
+    actions.appendChild(submitHint);
+    wrap.appendChild(actions);
+
+    const preview = document.createElement('div');
+    preview.className = 'ask-preview';
+    wrap.appendChild(preview);
+
+    submitBtn.addEventListener('click', async () => {
+      if (sending || !allAnswered()) return;
+      const answerText = composedAnswer();
+      if (!answerText.trim()) return;
+      sending = true;
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Sending…';
+      try {
+        const r = await fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: answerText, reply_to: msg.id,
+                                 selection: selectionPayload() }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({ error: 'unknown' }));
+          alert('answer failed: ' + (err.error || r.status));
+          sending = false; submitBtn.textContent = multi ? 'Submit all' : 'Confirm'; refresh();
+          return;
+        }
+        // The SSE echo of our reply flips this to the locked view; keep the
+        // button latched (sending stays true) so nothing can re-post meanwhile.
+        submitBtn.textContent = 'Sent ✓';
+      } catch (e) {
+        alert('answer failed: ' + e.message);
+        sending = false; submitBtn.textContent = multi ? 'Submit all' : 'Confirm'; refresh();
+      }
+    });
+
+    refresh();
+  }
+
   // ── Message rendering ──
   function applyCompactClass(node, id) {
     const override = state.expandedMsgs.has(id);
@@ -2878,8 +3524,16 @@ INDEX_HTML = r"""<!doctype html>
     state.messages.set(m.id, m);
     ingestMessageForStats(m);
 
+    // A reply carrying a structured selection is an answer to a trio_ask
+    // question — record it (keyed by the question id) so the question's picker
+    // can lock and highlight the chosen options.
+    if (m.reply_to != null && m.selection) {
+      state.answers.set(m.reply_to, m);
+    }
+
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
+    const isAsk = !isSystem && isAskChoices(m.choices);
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
@@ -2922,16 +3576,28 @@ INDEX_HTML = r"""<!doctype html>
       div.appendChild(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
     }
 
-    const body = document.createElement('div');
-    body.className = 'body';
-    if (isSystem) {
-      body.classList.add('plain');
-      body.textContent = humanizeIdSigils(m.content || '');
+    if (isAsk) {
+      // trio_ask multiple-choice question: render the interactive picker
+      // instead of the plain body (the body text is only a transcript for
+      // non-web readers). Stop clicks from toggling compact/expand on the msg.
+      const askWrap = document.createElement('div');
+      askWrap.className = 'ask-wrap';
+      askWrap.addEventListener('click', (e) => e.stopPropagation());
+      div.appendChild(askWrap);
+      state.askDomById.set(m.id, { wrap: askWrap, msg: m });
+      renderAskInto(askWrap, m);
     } else {
-      body.innerHTML = renderMarkdown(m.content || '');
-      decorateInlineMentions(body, m.mentions || []);
+      const body = document.createElement('div');
+      body.className = 'body';
+      if (isSystem) {
+        body.classList.add('plain');
+        body.textContent = humanizeIdSigils(m.content || '');
+      } else {
+        body.innerHTML = renderMarkdown(m.content || '');
+        decorateInlineMentions(body, m.mentions || []);
+      }
+      div.appendChild(body);
     }
-    div.appendChild(body);
 
     // Image attachments — inline thumbnails, click opens full size in a new tab.
     if (m.attachments && m.attachments.length) {
@@ -2980,6 +3646,13 @@ INDEX_HTML = r"""<!doctype html>
     updateAckBadges(m.id);
     renderWatermarkPins();
     scheduleHereUpdate();
+
+    // If this message answered a question we've already rendered, re-render
+    // that question's picker so it locks and shows the chosen options.
+    if (m.reply_to != null && m.selection) {
+      const q = state.askDomById.get(m.reply_to);
+      if (q) renderAskInto(q.wrap, q.msg);
+    }
 
     if (state.initialLoad) {
       // Fresh page load: keep pinned to the newest message through the whole
@@ -3032,6 +3705,17 @@ INDEX_HTML = r"""<!doctype html>
       if (author && !isSystemContent(m.content || '')) {
         author.textContent = m.member_name;
         author.style.color = colorFor(m.member_id);
+      }
+      // Ask pickers show member names (awaiting X / answered by X) — re-render
+      // so a rename or a late-joining target resolves to the current name.
+      // But never rebuild the LIVE interactive picker (this operator's own,
+      // still unanswered): a roster tick mid-deliberation would wipe their
+      // in-progress checkboxes and typed text.
+      const ask = state.askDomById.get(id);
+      if (ask) {
+        const ch = ask.msg.choices;
+        const liveForMe = ch && ch.target === state.operator.id && !state.answers.get(id);
+        if (!liveForMe) renderAskInto(ask.wrap, ask.msg);
       }
       // Re-humanize id-sigils in the body: a rename changes the display
       // form, and any unknown ids that have since joined the roster
@@ -4777,12 +5461,27 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
+# Pure ask helpers live in nth_ask_client.js so they can be unit-tested under
+# Node; inject them into the page here. .resolve() follows the symlinked
+# install back to the repo dir where the sibling .js lives. Drop the trailing
+# CommonJS export guard for the inline copy.
+def _load_ask_helpers() -> str:
+    try:
+        js = Path(__file__).resolve().with_name("nth_ask_client.js").read_text()
+    except OSError as e:
+        sys.stderr.write(f"[nth_web] could not load nth_ask_client.js: {e}\n")
+        return "/* ask helpers unavailable */"
+    return js.split("if (typeof module")[0].rstrip()
+
+
 # One-shot substitution at import time — inject the emoji list into the JS
-# so server-side animal_for() and client-side animalFor() stay in sync.
+# so server-side animal_for() and client-side animalFor() stay in sync, plus
+# the pure ask helpers.
 INDEX_HTML = (
     INDEX_HTML
     .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
     .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
+    .replace("/*__ASK_HELPERS__*/", _load_ask_helpers())
 )
 
 
@@ -4823,6 +5522,18 @@ def main() -> int:
     host = args.host
     if host is None:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
+
+    # Forward-compat: ensure the selectable-answers columns exist before we
+    # serve, so the dashboard works against a DB the MCP server hasn't migrated
+    # yet (e.g. server not restarted since the feature landed).
+    _mig = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        ensure_ask_columns(_mig)
+        _mig.commit()
+    except sqlite3.Error as e:
+        sys.stderr.write(f"[nth_web] ask-column migration skipped: {e}\n")
+    finally:
+        _mig.close()
 
     # Spin up the event hub before serving.
     hub = EventHub(db_path, args.channel)

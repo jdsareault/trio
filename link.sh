@@ -26,7 +26,8 @@ link() {  # link <repo-target> <install-link-path>
 }
 
 echo "Linking server modules -> $SERVER_DIR"
-for f in "$REPO_DIR"/server/*.py; do
+for f in "$REPO_DIR"/server/*.py "$REPO_DIR"/server/*.js; do
+  [ -e "$f" ] || continue
   link "$f" "$SERVER_DIR/$(basename "$f")"
 done
 
