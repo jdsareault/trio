@@ -1812,6 +1812,49 @@ INDEX_HTML = r"""<!doctype html>
   .msg.targeted { background: rgba(var(--mention-rgb), 0.09); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
   .msg.dm-hidden { display: none; }
+
+  /* ── Selectable answers (trio_ask multiple-choice picker) ── */
+  .ask-wrap {
+    margin-top: 6px; padding: 10px 12px;
+    border: 1px solid rgba(var(--ov),0.16); border-radius: 8px;
+    background: rgba(var(--ov),0.04);
+  }
+  .ask-wrap.answered { opacity: 0.92; }
+  .ask-q { font-weight: 600; margin-bottom: 8px; white-space: pre-wrap; }
+  .ask-options { display: flex; flex-direction: column; gap: 4px; }
+  .ask-opt {
+    padding: 6px 10px; border: 1px solid rgba(var(--ov),0.14);
+    border-radius: 6px; background: rgba(var(--ov),0.03);
+  }
+  .ask-opt.selectable {
+    display: flex; align-items: center; gap: 9px; cursor: pointer;
+    user-select: none; transition: background 0.1s, border-color 0.1s;
+  }
+  .ask-opt.selectable:hover { background: rgba(var(--ov),0.08); border-color: rgba(var(--ov),0.3); }
+  .ask-opt.selectable input { margin: 0; accent-color: var(--accent2); flex: none; }
+  .ask-options.locked .ask-opt, .ask-options.readonly .ask-opt { opacity: 0.6; }
+  .ask-options.locked .ask-opt.chosen {
+    opacity: 1; border-color: var(--accent2);
+    background: rgba(var(--mention-rgb),0.12); font-weight: 600;
+  }
+  .ask-options.locked .ask-opt.chosen::before { content: "✓ "; color: var(--accent2); }
+  .ask-custom { margin-top: 8px; }
+  .ask-custom-input {
+    width: 100%; box-sizing: border-box; padding: 6px 9px;
+    border: 1px solid rgba(var(--ov),0.18); border-radius: 6px;
+    background: rgba(var(--ov),0.03); color: inherit; font: inherit;
+  }
+  .ask-custom-input:focus { outline: none; border-color: var(--accent2); }
+  .ask-custom-answer { margin-top: 6px; font-size: 0.92em; color: var(--dim); }
+  .ask-actions { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+  .ask-confirm {
+    padding: 6px 16px; border: 1px solid var(--accent2); border-radius: 6px;
+    background: var(--accent2); color: #06202a; font: inherit; font-weight: 600;
+    cursor: pointer;
+  }
+  .ask-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ask-hint, .ask-status { font-size: 0.86em; color: var(--dim); }
+  .ask-status { margin-top: 7px; }
   body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
 
   /* Ack badges — one per member. Emoji is the identity; colored ring
@@ -2288,6 +2331,8 @@ INDEX_HTML = r"""<!doctype html>
     messages: new Map(),            // id → message
     messageDomById: new Map(),      // id → DOM node (for ack badge updates)
     seenMsgIds: new Set(),
+    askDomById: new Map(),          // question id → {wrap, msg} for re-rendering the picker
+    answers: new Map(),             // question id → answer message (reply w/ selection)
     completion: { visible: false, index: 0, items: [], atPos: -1, sigil: '@' },
     agentStats: new Map(),          // id → {sent, sent_times[], lengths[], lastSnippet,
                                     //        read_latencies[], queue_depth,
@@ -2912,6 +2957,165 @@ INDEX_HTML = r"""<!doctype html>
     return bar;
   }
 
+  // ── Selectable answers (trio_ask picker) ──
+  // Compose the human-readable answer text posted back to the channel from the
+  // picked option indices + any typed custom text. This is what the asking
+  // agent actually reads; the structured selection rides alongside for the UI.
+  function buildAnswerText(choices, picked, custom) {
+    const parts = [];
+    for (const i of picked) {
+      if (choices.options[i] !== undefined) parts.push(choices.options[i]);
+    }
+    let s = parts.join(', ');
+    const c = (custom || '').trim();
+    if (c) s = s ? (s + ' — ' + c) : c;
+    return s;
+  }
+
+  // (Re)render a question's picker into `wrap`, reflecting current answer state.
+  // Called on first append and again when the answer arrives so it locks.
+  function renderAskInto(wrap, msg) {
+    const choices = msg.choices;
+    if (!choices || !Array.isArray(choices.options)) return;
+    wrap.innerHTML = '';
+    const isTarget = choices.target === state.operator.id;
+    const many = choices.mode === 'many';
+    const ans = state.answers.get(msg.id) || null;
+
+    const qh = document.createElement('div');
+    qh.className = 'ask-q';
+    qh.textContent = choices.question || '';
+    wrap.appendChild(qh);
+
+    // Answered → locked view for everyone (chosen options highlighted).
+    if (ans) {
+      wrap.classList.add('answered');
+      const sel = ans.selection || {};
+      const picked = Array.isArray(sel.picked) ? sel.picked : [];
+      const list = document.createElement('div');
+      list.className = 'ask-options locked';
+      choices.options.forEach((opt, i) => {
+        const row = document.createElement('div');
+        row.className = 'ask-opt' + (picked.includes(i) ? ' chosen' : '');
+        row.textContent = opt;
+        list.appendChild(row);
+      });
+      wrap.appendChild(list);
+      const custom = ((sel.custom || '')).trim();
+      if (custom) {
+        const cu = document.createElement('div');
+        cu.className = 'ask-custom-answer';
+        cu.textContent = 'Typed: ' + custom;
+        wrap.appendChild(cu);
+      }
+      const badge = document.createElement('div');
+      badge.className = 'ask-status';
+      const who = state.members.get(ans.member_id);
+      badge.textContent = '✓ answered' + (who ? ' by ' + who.name : '');
+      wrap.appendChild(badge);
+      return;
+    }
+
+    // Not the target → read-only preview of the pending question.
+    if (!isTarget) {
+      const list = document.createElement('div');
+      list.className = 'ask-options readonly';
+      choices.options.forEach((opt) => {
+        const row = document.createElement('div');
+        row.className = 'ask-opt';
+        row.textContent = opt;
+        list.appendChild(row);
+      });
+      wrap.appendChild(list);
+      const tgt = state.members.get(choices.target);
+      const note = document.createElement('div');
+      note.className = 'ask-status';
+      note.textContent = 'awaiting ' + (tgt ? tgt.name : 'the recipient') + '…';
+      wrap.appendChild(note);
+      return;
+    }
+
+    // Interactive picker for the target human.
+    const form = document.createElement('div');
+    form.className = 'ask-options interactive';
+    const groupName = 'ask-' + msg.id;
+    const inputs = [];
+    choices.options.forEach((opt, i) => {
+      const label = document.createElement('label');
+      label.className = 'ask-opt selectable';
+      const inp = document.createElement('input');
+      inp.type = many ? 'checkbox' : 'radio';
+      inp.name = groupName;
+      inp.value = String(i);
+      const span = document.createElement('span');
+      span.textContent = opt;
+      label.appendChild(inp);
+      label.appendChild(span);
+      form.appendChild(label);
+      inputs.push(inp);
+    });
+    wrap.appendChild(form);
+
+    const customWrap = document.createElement('div');
+    customWrap.className = 'ask-custom';
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.className = 'ask-custom-input';
+    customInput.placeholder = 'or type your own answer…';
+    customInput.maxLength = 4000;
+    customWrap.appendChild(customInput);
+    wrap.appendChild(customWrap);
+
+    const actions = document.createElement('div');
+    actions.className = 'ask-actions';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'ask-confirm';
+    confirmBtn.textContent = 'Confirm';
+    confirmBtn.disabled = true;
+    actions.appendChild(confirmBtn);
+    const hint = document.createElement('span');
+    hint.className = 'ask-hint';
+    hint.textContent = many ? 'select any that apply' : 'select one';
+    actions.appendChild(hint);
+    wrap.appendChild(actions);
+
+    function refresh() {
+      const any = inputs.some(c => c.checked) || customInput.value.trim().length > 0;
+      confirmBtn.disabled = !any;
+    }
+    inputs.forEach(c => c.addEventListener('change', refresh));
+    customInput.addEventListener('input', refresh);
+
+    confirmBtn.addEventListener('click', async () => {
+      const picked = inputs.filter(c => c.checked).map(c => parseInt(c.value, 10));
+      const customText = customInput.value.trim();
+      const answerText = buildAnswerText(choices, picked, customText);
+      if (!answerText) return;
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Sending…';
+      try {
+        const r = await fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: answerText, reply_to: msg.id,
+                                 selection: { picked, custom: customText } }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({ error: 'unknown' }));
+          alert('answer failed: ' + (err.error || r.status));
+          confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm';
+          return;
+        }
+        // The SSE echo of our reply flips this to the locked view; set a
+        // holding label meanwhile so a double-click can't double-post.
+        confirmBtn.textContent = 'Sent ✓';
+      } catch (e) {
+        alert('answer failed: ' + e.message);
+        confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm';
+      }
+    });
+  }
+
   // ── Message rendering ──
   function applyCompactClass(node, id) {
     const override = state.expandedMsgs.has(id);
@@ -2938,8 +3142,16 @@ INDEX_HTML = r"""<!doctype html>
     state.messages.set(m.id, m);
     ingestMessageForStats(m);
 
+    // A reply carrying a structured selection is an answer to a trio_ask
+    // question — record it (keyed by the question id) so the question's picker
+    // can lock and highlight the chosen options.
+    if (m.reply_to != null && m.selection) {
+      state.answers.set(m.reply_to, m);
+    }
+
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
+    const isAsk = !isSystem && m.choices && Array.isArray(m.choices.options);
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
@@ -2982,16 +3194,28 @@ INDEX_HTML = r"""<!doctype html>
       div.appendChild(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
     }
 
-    const body = document.createElement('div');
-    body.className = 'body';
-    if (isSystem) {
-      body.classList.add('plain');
-      body.textContent = humanizeIdSigils(m.content || '');
+    if (isAsk) {
+      // trio_ask multiple-choice question: render the interactive picker
+      // instead of the plain body (the body text is only a transcript for
+      // non-web readers). Stop clicks from toggling compact/expand on the msg.
+      const askWrap = document.createElement('div');
+      askWrap.className = 'ask-wrap';
+      askWrap.addEventListener('click', (e) => e.stopPropagation());
+      div.appendChild(askWrap);
+      state.askDomById.set(m.id, { wrap: askWrap, msg: m });
+      renderAskInto(askWrap, m);
     } else {
-      body.innerHTML = renderMarkdown(m.content || '');
-      decorateInlineMentions(body, m.mentions || []);
+      const body = document.createElement('div');
+      body.className = 'body';
+      if (isSystem) {
+        body.classList.add('plain');
+        body.textContent = humanizeIdSigils(m.content || '');
+      } else {
+        body.innerHTML = renderMarkdown(m.content || '');
+        decorateInlineMentions(body, m.mentions || []);
+      }
+      div.appendChild(body);
     }
-    div.appendChild(body);
 
     // Image attachments — inline thumbnails, click opens full size in a new tab.
     if (m.attachments && m.attachments.length) {
@@ -3040,6 +3264,13 @@ INDEX_HTML = r"""<!doctype html>
     updateAckBadges(m.id);
     renderWatermarkPins();
     scheduleHereUpdate();
+
+    // If this message answered a question we've already rendered, re-render
+    // that question's picker so it locks and shows the chosen options.
+    if (m.reply_to != null && m.selection) {
+      const q = state.askDomById.get(m.reply_to);
+      if (q) renderAskInto(q.wrap, q.msg);
+    }
 
     if (state.initialLoad) {
       // Fresh page load: keep pinned to the newest message through the whole
@@ -3092,6 +3323,17 @@ INDEX_HTML = r"""<!doctype html>
       if (author && !isSystemContent(m.content || '')) {
         author.textContent = m.member_name;
         author.style.color = colorFor(m.member_id);
+      }
+      // Ask pickers show member names (awaiting X / answered by X) — re-render
+      // so a rename or a late-joining target resolves to the current name.
+      // But never rebuild the LIVE interactive picker (this operator's own,
+      // still unanswered): a roster tick mid-deliberation would wipe their
+      // in-progress checkboxes and typed text.
+      const ask = state.askDomById.get(id);
+      if (ask) {
+        const ch = ask.msg.choices;
+        const liveForMe = ch && ch.target === state.operator.id && !state.answers.get(id);
+        if (!liveForMe) renderAskInto(ask.wrap, ask.msg);
       }
       // Re-humanize id-sigils in the body: a rename changes the display
       // form, and any unknown ids that have since joined the roster
