@@ -1246,7 +1246,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         raw_sel = body.get("selection")
         selection_json = None
-        if raw_sel is not None:
+        has_selection = raw_sel is not None
+        picked: list = []
+        custom = ""
+        if has_selection:
             if reply_to is None:
                 self._error(400, "selection requires reply_to")
                 return
@@ -1261,7 +1264,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not isinstance(custom, str) or len(custom) > 4000:
                 self._error(400, "invalid selection.custom")
                 return
-            selection_json = json.dumps({"picked": picked, "custom": custom})
+            # Dedupe indices, preserving order — the remaining shape checks
+            # (in-range, target, not-already-answered) need the question's
+            # `choices`, so they run inside the transaction below.
+            picked = list(dict.fromkeys(picked))
 
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
@@ -1289,13 +1295,49 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # Validate reply_to references a real message in this channel.
                 if reply_to is not None:
                     tgt = db.execute(
-                        "SELECT id FROM messages WHERE id = ? AND channel = ?",
+                        "SELECT id, choices FROM messages WHERE id = ? AND channel = ?",
                         (reply_to, self.channel),
                     ).fetchone()
                     if not tgt:
                         db.execute("ROLLBACK")
                         self._error(400, "reply_to target not found")
                         return
+
+                    # Answer-path invariants: a `selection` claims this message
+                    # answers a trio_ask question. The picker enforces "only the
+                    # target answers" in the client only — re-check server-side
+                    # since a raw POST bypasses the UI. Guards:
+                    #   (a) the reply_to message must actually be a question,
+                    #   (b) the poster must be that question's declared target,
+                    #   (c) every picked index must be in range for its options,
+                    #   (d) the question must not already be answered.
+                    if has_selection:
+                        q_choices = parse_obj_json(
+                            tgt["choices"] if "choices" in tgt.keys() else "")
+                        if not isinstance(q_choices, dict) \
+                                or not isinstance(q_choices.get("options"), list):
+                            db.execute("ROLLBACK")
+                            self._error(400, "reply_to is not a question")
+                            return
+                        q_opts = q_choices["options"]
+                        if q_choices.get("target") != op_id:
+                            db.execute("ROLLBACK")
+                            self._error(403, "this question is not addressed to you")
+                            return
+                        if any(p >= len(q_opts) for p in picked):
+                            db.execute("ROLLBACK")
+                            self._error(400, "selection.picked out of range")
+                            return
+                        already = db.execute(
+                            "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
+                            "AND selection IS NOT NULL AND selection != '' LIMIT 1",
+                            (self.channel, reply_to),
+                        ).fetchone()
+                        if already:
+                            db.execute("ROLLBACK")
+                            self._error(409, "this question has already been answered")
+                            return
+                        selection_json = json.dumps({"picked": picked, "custom": custom})
 
                 # Validate attachments up front: every requested id must be
                 # this operator's own, unlinked, in-channel row — else abort,
