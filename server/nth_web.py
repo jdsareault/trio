@@ -3468,7 +3468,7 @@ INDEX_HTML = r"""<!doctype html>
 
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
-    const isAsk = !isSystem && m.choices && Array.isArray(m.choices.options);
+    const isAsk = !isSystem && askQuestions(m.choices).length > 0;
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
