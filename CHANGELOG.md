@@ -1,5 +1,9 @@
 # nth Changelog
 
+## fork — remove participant from dashboard (jdsareault fork)
+
+Adds a roster **remove (×)** button in the web dashboard + `POST /api/cull` so the operator can drop a member directly — mainly for clearing stale/dead agents left in the roster after a session closed, or trimming participants when starting new work. Mirrors the existing agent-only `trio_cull` tool: deletes the member row, releases their claimed tasks back to open, drops their locks, posts a `[culled]` system message. Restricted to trusted operators (loopback/tailscale — a self-declared guest can't cull, which matters under `--tailnet`); rejects self-removal, unknown/cross-channel and malformed targets; removes them from the roster but does not stop a running agent's process. LOTC-reviewed (authz, input-crash guards, client ghost-member pruning). Tests: `tests/test-cull.py`.
+
 ## fork — selectable answers (jdsareault fork)
 
 Adds `trio_ask`: an agent can pose a multiple-choice question **to a human**, who answers by clicking in the web dashboard (with a free-text escape hatch) rather than typing a free-form reply. Agent↔agent Q&A is unchanged — the picker is human-only by design.

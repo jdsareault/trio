@@ -97,6 +97,9 @@ IDENTITY_SOURCE_TAILSCALE = "tailscale"
 IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
 IDENTITY_SOURCE_PENDING = "pending"
+# Identity tiers allowed to perform destructive, roster-wide actions (cull).
+# A self-declared guest is deliberately excluded — see _handle_cull.
+CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 # Agents reading the roster can check the member's summary field:
 #   "human — tailnet: knelsonb"       → identity-traceable via Tailscale
 #   "human — local (user: repro)"     → connected via loopback; trust level is
@@ -538,6 +541,49 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
         (ident.display_name, ident.summary, channel, ident.member_id),
     )
     return ident.member_id, ident.display_name
+
+
+def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
+                caller_name: str, target_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Remove a member from a channel — mirrors nth_server.nth_cull so the web
+    dashboard can offer it directly. Deletes the target's row, releases their
+    claimed tasks back to open, drops their locks, and posts a [culled] system
+    message. Returns (result, error) with exactly one non-None. Must run inside
+    the caller's transaction."""
+    target = db.execute(
+        "SELECT id, name FROM members WHERE id = ? AND channel = ?",
+        (target_id, channel),
+    ).fetchone()
+    if not target:
+        return None, "member not found in this channel"
+    if target_id == caller_id:
+        return None, "you can't remove yourself"
+    now = now_iso()
+    target_name = target["name"]
+
+    released = db.execute(
+        "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (channel, target_id),
+    ).fetchall()
+    db.execute(
+        "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+        "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (now, channel, target_id),
+    )
+    db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
+    db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
+
+    released_ids = [r["id"] for r in released]
+    msg = f"[culled] {target_name} ({target_id}) removed from channel"
+    if released_ids:
+        msg += " — released tasks: " + ", ".join(f"#{t}" for t in released_ids)
+    db.execute(
+        "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel, caller_id, caller_name, msg, now),
+    )
+    return {"culled": target_name, "culled_id": target_id,
+            "released_tasks": released_ids}, None
 
 
 def ensure_ask_columns(db: sqlite3.Connection) -> None:
@@ -1126,6 +1172,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_upload()
         elif parsed.path == "/api/stt/transcribe":
             self._handle_transcribe()
+        elif parsed.path == "/api/cull":
+            self._handle_cull()
         else:
             self._error(404, "not found")
 
@@ -1497,6 +1545,66 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
 
         self._json({"ok": True, "id": msg_id})
+
+    def _handle_cull(self) -> None:
+        """Remove a member from the channel at the operator's request — the
+        dashboard's roster remove (×) button. Mirrors trio_cull: releases the
+        target's tasks/locks and posts a [culled] system message."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        # _read_json_body only guarantees valid JSON, not a dict of strings —
+        # guard both before .get()/.strip() so bad input is a clean 400, not an
+        # AttributeError that drops the connection.
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        target_id = body.get("target_member_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            self._error(400, "target_member_id required")
+            return
+        target_id = target_id.strip()
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Removing a member is destructive and roster-wide — restrict it to
+        # trusted identities (a local shell or a Tailscale-verified peer). A
+        # self-declared guest, the weakest tier, must not be able to rip out
+        # agents or other participants (esp. under --tailnet's 0.0.0.0 bind).
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can remove members")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                result, err = cull_member(db, self.channel, op_id, op_name, target_id)
+                if err:
+                    db.execute("ROLLBACK")
+                    self._error(400, err)
+                    return
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, **(result or {})})
 
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
@@ -2066,6 +2174,13 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .member .member-actions { display: none; padding: 6px 0 2px 16px; }
+  .member.expanded .member-actions { display: flex; }
+  .member .rm-btn { font-size: 11px; line-height: 1.2; padding: 4px 10px; border-radius: 4px;
+                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
+                    cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
+  .member .rm-btn:hover { background: var(--mention); color: var(--bg);
+                          border-color: var(--mention); }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -2825,7 +2940,7 @@ INDEX_HTML = r"""<!doctype html>
   const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
                            '[retracted ', '[joined ', '[left ', '[ended ',
                            '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed '];
+                           '[renamed ', '[culled] '];
   function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
@@ -3895,6 +4010,14 @@ INDEX_HTML = r"""<!doctype html>
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
     }
+    // The roster event is a full snapshot — prune anyone no longer in it (e.g.
+    // culled). Without this, state.members is set-not-cleared, so a removed
+    // member ghosts in ack badges, watermark pins, and @-mention autocomplete
+    // until the page reloads.
+    const liveIds = new Set(members.map(m => m.id));
+    for (const id of [...state.members.keys()]) {
+      if (!liveIds.has(id)) state.members.delete(id);
+    }
 
     if (rename_from.size > 0) {
       // Patch cached message records so author label follows the current alias.
@@ -3979,6 +4102,29 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Remove a member from the channel (roster × button). Confirms first — it
+  // releases their claimed tasks + locks and posts a [culled] message. The SSE
+  // roster refresh drops them from the sidebar; it does not stop a live agent's
+  // process (it would just start erroring and could reconnect).
+  async function cullMember(id, name) {
+    if (!confirm('Remove ' + name + ' from the channel?\\n\\n'
+        + 'Their claimed tasks are released. This does not stop a running agent '
+        + 'process — it just removes them from the roster.')) return;
+    try {
+      const r = await fetch('/api/cull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_member_id: id }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('remove failed: ' + (err.error || r.status));
+      }
+    } catch (e) {
+      alert('remove failed: ' + e.message);
+    }
+  }
+
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
@@ -4046,6 +4192,22 @@ INDEX_HTML = r"""<!doctype html>
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Remove control — only revealed when the row is expanded (its details are
+    // open), so it can't be mis-clicked from the collapsed roster. Not for
+    // yourself. Releases their tasks + posts [culled]; see cullMember().
+    if (!DM_MODE && m.id !== state.operator.id) {
+      const actions = document.createElement('div');
+      actions.className = 'member-actions';
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rm-btn';
+      rm.textContent = 'Remove from channel';
+      rm.title = `Remove ${m.name} from the channel`;
+      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name); });
+      actions.appendChild(rm);
+      row.appendChild(actions);
+    }
 
     row.addEventListener('click', (e) => {
       // Clicking the name on a mention-capable row? On shift-click → filter.

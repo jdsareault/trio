@@ -383,7 +383,7 @@ python3 ~/.claude/skills/nth/server/nth_web.py MYCHAN --tailnet  # bind 0.0.0.0,
 python3 ~/.claude/skills/nth/server/nth_web.py MYCHAN --port 9000
 ```
 
-Windows: substitute `py` for `python3`. Pure stdlib — no new deps. Server-sent events for live updates; roster + chat tail; POST /api/send posts as the operator (same `_op_<hostname>` identity as the terminal dashboard). Server binds 127.0.0.1 by default; `--tailnet` expands that to all interfaces with the expectation that Tailscale ACL is the access gate.
+Windows: substitute `py` for `python3`. Pure stdlib — no new deps. Server-sent events for live updates; roster + chat tail; POST /api/send posts as the operator (same `_op_<hostname>` identity as the terminal dashboard). Each roster row has a remove (×) button that culls that member (releases their tasks, posts `[culled]`) — handy for clearing stale/dead agents. Server binds 127.0.0.1 by default; `--tailnet` expands that to all interfaces with the expectation that Tailscale ACL is the access gate.
 
 Point the user at this when they want to watch a channel from outside their working terminal — a second screen, phone, another laptop on the tailnet.
 
