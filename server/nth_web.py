@@ -345,6 +345,19 @@ def parse_mentions_json(raw: Optional[str]) -> List[str]:
         return []
 
 
+def parse_obj_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse a stored JSON object column (messages.choices / .selection) to a
+    dict, or None if empty/malformed. Used to ship the multiple-choice
+    question payload and the human's selection to the dashboard client."""
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
 def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
     """Match the dashboard's status classification."""
     if not last_seen_iso:
@@ -577,6 +590,29 @@ def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[st
             for r in rows]
 
 
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+    """Build the SSE 'message' payload from a messages row. Shared by the
+    history prime and the live tick so both ship identical shapes, including
+    the selectable-answers fields (choices/selection/reply_to). Tolerant of
+    older rows where a column may be absent."""
+    keys = r.keys()
+    return {
+        "type": "message",
+        "id": r["id"],
+        "member_id": r["member_id"],
+        "member_name": r["member_name"] or r["member_id"],
+        "content": r["content"] or "",
+        "mentions": parse_mentions_json(r["mentions"]),
+        "refs": parse_mentions_json(r["refs"] if "refs" in keys else ""),
+        "bangs": parse_mentions_json(r["bangs"] if "bangs" in keys else ""),
+        "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
+        "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
+        "reply_to": (r["reply_to"] if "reply_to" in keys else None),
+        "created_at": r["created_at"],
+        "attachments": attachments_for_message(db, r["id"]),
+    }
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -620,23 +656,13 @@ class EventHub:
             members = self._fetch_roster(db)
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                "choices, selection, reply_to, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                q.put_nowait(json.dumps({
-                    "type": "message",
-                    "id": r["id"],
-                    "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
-                    "content": r["content"] or "",
-                    "mentions": parse_mentions_json(r["mentions"]),
-                    "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                    "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                    "created_at": r["created_at"],
-                    "attachments": attachments_for_message(db, r["id"]),
-                }))
+                q.put_nowait(json.dumps(_message_event(db, r)))
         except (sqlite3.Error, queue.Full):
             pass
         finally:
@@ -764,23 +790,13 @@ class EventHub:
             while not self._stop.is_set():
                 try:
                     rows = db.execute(
-                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                        "choices, selection, reply_to, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast({
-                            "type": "message",
-                            "id": r["id"],
-                            "member_id": r["member_id"],
-                            "member_name": r["member_name"] or r["member_id"],
-                            "content": r["content"] or "",
-                            "mentions": parse_mentions_json(r["mentions"]),
-                            "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                            "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                            "created_at": r["created_at"],
-                            "attachments": attachments_for_message(db, r["id"]),
-                        })
+                        self._broadcast(_message_event(db, r))
                         self.last_msg_id = r["id"]
 
                     members = self._fetch_roster(db)
@@ -1220,6 +1236,33 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "content too long (max 4000 chars)")
             return
 
+        # reply_to + selection: set when this send is an answer to a trio_ask
+        # multiple-choice question. reply_to links the answer to the question;
+        # selection records which options the human picked (and any custom
+        # text) so the dashboard can show the resolved question. Both optional.
+        reply_to = body.get("reply_to")
+        if reply_to is not None and not (type(reply_to) is int and reply_to > 0):
+            self._error(400, "invalid reply_to")
+            return
+        raw_sel = body.get("selection")
+        selection_json = None
+        if raw_sel is not None:
+            if reply_to is None:
+                self._error(400, "selection requires reply_to")
+                return
+            if not isinstance(raw_sel, dict):
+                self._error(400, "invalid selection")
+                return
+            picked = raw_sel.get("picked", [])
+            custom = raw_sel.get("custom", "")
+            if not isinstance(picked, list) or not all(type(p) is int and p >= 0 for p in picked):
+                self._error(400, "invalid selection.picked")
+                return
+            if not isinstance(custom, str) or len(custom) > 4000:
+                self._error(400, "invalid selection.custom")
+                return
+            selection_json = json.dumps({"picked": picked, "custom": custom})
+
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
@@ -1242,6 +1285,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, self.channel, ident)
                 now = now_iso()
+
+                # Validate reply_to references a real message in this channel.
+                if reply_to is not None:
+                    tgt = db.execute(
+                        "SELECT id FROM messages WHERE id = ? AND channel = ?",
+                        (reply_to, self.channel),
+                    ).fetchone()
+                    if not tgt:
+                        db.execute("ROLLBACK")
+                        self._error(400, "reply_to target not found")
+                        return
 
                 # Validate attachments up front: every requested id must be
                 # this operator's own, unlinked, in-channel row — else abort,
@@ -1296,12 +1350,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, reply_to, selection) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
-                     json.dumps(bang_ids)    if bang_ids    else ""),
+                     json.dumps(bang_ids)    if bang_ids    else "",
+                     reply_to,
+                     selection_json if selection_json else ""),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
