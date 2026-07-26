@@ -164,12 +164,80 @@ r = json.loads(srv.nth_ask(channel=CH2, member_id=asker2, question="q?",
                            options=["a", "b"], target="gabe"))
 check("ask: guest stem resolves target", r.get("ok") is True)
 
+# ambiguous target (two humans share a name) → error, not a guess
+CH_AMB, asker_amb = connect("AskerAmb", channel="asktestamb")
+make_human(CH_AMB, "Dup")
+make_human(CH_AMB, "Dup")
+r = json.loads(srv.nth_ask(channel=CH_AMB, member_id=asker_amb, question="q?",
+                           options=["a", "b"], target="Dup"))
+check("ask: ambiguous name rejected", "error" in r and "ambiguous" in r["error"].lower())
+
+# empty target → error
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
+                           options=["a", "b"], target="   "))
+check("ask: empty target rejected", "error" in r and "required" in r["error"].lower())
+
+# channel not found
+r = json.loads(srv.nth_ask(channel="nosuchchan", member_id=asker, question="q?",
+                           options=["a", "b"], target=human))
+check("ask: channel not found rejected", "error" in r and "not found" in r["error"].lower())
+
+# options type validation
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
+                           options="not a list", target=human))
+check("ask: non-list options rejected", "error" in r and "list" in r["error"].lower())
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
+                           options=["ok", 5], target=human))
+check("ask: non-string option rejected", "error" in r and "string" in r["error"].lower())
+
+# at-the-cap boundaries (acceptance, not just over-cap rejection)
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
+                           options=[f"o{i}" for i in range(srv.MAX_ASK_OPTIONS)], target=human))
+check("ask: exactly MAX_ASK_OPTIONS accepted", r.get("ok") is True)
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="q?",
+                           options=["ok", "x" * srv.MAX_ASK_OPTION_LEN], target=human))
+check("ask: option exactly at length cap accepted", r.get("ok") is True)
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="x" * 2000,
+                           options=["a", "b"], target=human))
+check("ask: question exactly 2000 accepted", r.get("ok") is True)
+r = json.loads(srv.nth_ask(channel=CH, member_id=asker, question="x" * 2001,
+                           options=["a", "b"], target=human))
+check("ask: question 2001 rejected", "error" in r and "too long" in r["error"].lower())
+
+# session_token capability paths (mirror nth_send)
+CH_TOK, asker_tok = connect("AskerTok", channel="asktesttok")
+_conn = json.loads(srv.nth_connect(summary="tok", name="AskerTok2", channel=CH_TOK))
+asker_tok2, tok2 = _conn["member_id"], _conn["session_token"]
+# a fresh connect for the token owner so we have its primary token
+_c = json.loads(srv.nth_connect(summary="owner", name="Owner", channel=CH_TOK))
+owner, owner_tok = _c["member_id"], _c["session_token"]
+htok = make_human(CH_TOK, "HumanTok")
+r = json.loads(srv.nth_ask(channel=CH_TOK, member_id=owner, question="q?",
+                           options=["a", "b"], target=htok, session_token=owner_tok))
+check("ask: valid primary token accepted", r.get("ok") is True)
+r = json.loads(srv.nth_ask(channel=CH_TOK, member_id=owner, question="q?",
+                           options=["a", "b"], target=htok, session_token="bogustoken"))
+check("ask: invalid token rejected", "error" in r and "invalid" in r["error"].lower())
+r = json.loads(srv.nth_ask(channel=CH_TOK, member_id=owner, question="q?",
+                           options=["a", "b"], target=htok, session_token=tok2))
+check("ask: token/member mismatch rejected", "error" in r and "match" in r["error"].lower())
+db = srv.get_db()
+try:
+    ro_tok = srv._mint_session_token(db, owner, CH_TOK, role="read_only")
+    db.commit()
+finally:
+    db.close()
+r = json.loads(srv.nth_ask(channel=CH_TOK, member_id=owner, question="q?",
+                           options=["a", "b"], target=htok, session_token=ro_tok))
+check("ask: read_only token rejected", "error" in r and "primary" in r["error"].lower())
+
 
 # ── 2. nth_web serialization helpers ─────────────────────────────────────────
 check("parse_obj_json: valid dict", web.parse_obj_json('{"a":1}') == {"a": 1})
 check("parse_obj_json: list -> None", web.parse_obj_json('[1,2]') is None)
 check("parse_obj_json: garbage -> None", web.parse_obj_json("not json") is None)
 check("parse_obj_json: empty -> None", web.parse_obj_json("") is None)
+check("parse_obj_json: scalar -> None", web.parse_obj_json("5") is None)
 
 mem = sqlite3.connect(":memory:")
 mem.row_factory = sqlite3.Row
@@ -193,6 +261,14 @@ check("event: question carries choices dict", isinstance(q_ev["choices"], dict)
 check("event: question has no selection", q_ev["selection"] is None)
 check("event: answer carries selection dict", a_ev["selection"] == {"picked": [0], "custom": ""})
 check("event: answer carries reply_to", a_ev["reply_to"] == 1)
+# Older-row path: a SELECT lacking the new columns must not raise KeyError —
+# choices/selection/reply_to fall back to None.
+old_row = mem.execute(
+    "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+    "FROM messages WHERE id=1").fetchone()
+old_ev = web._message_event(mem, old_row)
+check("event: older row (no new columns) -> None fields, no crash",
+      old_ev["choices"] is None and old_ev["selection"] is None and old_ev["reply_to"] is None)
 mem.close()
 
 
@@ -228,7 +304,8 @@ try:
     time.sleep(0.2)
 
     # First send from loopback creates the trusted human operator row.
-    st, _ = http(port, "/api/send", "POST", {"content": "hello from the human"})
+    st, hello_resp = http(port, "/api/send", "POST", {"content": "hello from the human"})
+    hello_id = hello_resp.get("id")
     if st != 200:
         skip("live round-trip", f"loopback send not accepted (status {st})")
     else:
@@ -259,7 +336,45 @@ try:
         sel = json.loads(arow["selection"]) if arow and arow["selection"] else {}
         check("live: answer row stores selection", sel.get("picked") == [0])
 
-        # Negative validation.
+        # Answer-path invariants (the LOTC hardening).
+        # (a) already-answered → 409 (qid3 was just answered above).
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "No", "reply_to": qid3,
+                      "selection": {"picked": [1], "custom": ""}})
+        check("live: second answer to same question -> 409", st == 409)
+
+        # (b) selection on a non-question message → 400.
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "x", "reply_to": hello_id,
+                      "selection": {"picked": [0], "custom": ""}})
+        check("live: selection on non-ask message -> 400", st == 400)
+
+        # (c) answering a question addressed to someone else → 403.
+        db = srv.get_db()
+        try:
+            db.execute("INSERT INTO members (id, channel, name, kind, joined_at) "
+                       "VALUES ('other-human-xyz', ?, 'Other', 'human', ?)",
+                       (CH3, srv.now_iso()))
+            db.commit()
+        finally:
+            db.close()
+        r = json.loads(srv.nth_ask(channel=CH3, member_id=asker3, question="For Other?",
+                                   options=["A", "B"], target="other-human-xyz"))
+        qid_other = r["message_id"]
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "A", "reply_to": qid_other,
+                      "selection": {"picked": [0], "custom": ""}})
+        check("live: answering someone else's question -> 403", st == 403)
+
+        # (d) picked index out of range → 400.
+        r = json.loads(srv.nth_ask(channel=CH3, member_id=asker3, question="Pick",
+                                   options=["A", "B"], target=human3))
+        st, _ = http(port, "/api/send", "POST",
+                     {"content": "?", "reply_to": r["message_id"],
+                      "selection": {"picked": [99], "custom": ""}})
+        check("live: selection.picked out of range -> 400", st == 400)
+
+        # Negative validation (request-shape).
         st, _ = http(port, "/api/send", "POST",
                      {"content": "x", "selection": {"picked": [0], "custom": ""}})
         check("live: selection without reply_to -> 400", st == 400)
