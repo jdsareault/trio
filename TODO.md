@@ -2,6 +2,25 @@
 
 ## Open
 
+### Selectable-answers follow-ups (deferred from LOTC review)
+**Severity:** Low | **Since:** selectable-answers feature (jdsareault fork)
+
+Note-level items from the LOTC review of `trio_ask`, deferred after fixing the
+substantive findings (answer-path server invariants, double-post race, radio
+deselect + answer preview):
+- **Question text starting with `[`** is classed as a system message and renders
+  as plain text with no picker (Sauron). Fix: gate `isSystem` on absence of
+  `choices` client-side, or guard a leading `[` in `nth_ask`.
+- **Lost SSE echo leaves the picker stuck at "Sent ✓"** until reload (Sauron).
+  Send-failure paths already recover; only a dropped stream after a successful
+  POST is affected.
+- **Accessibility:** options aren't a `fieldset`/`radiogroup` with the question as
+  label — screen readers hear an unlabeled group (Frodo). Mouse/keyboard work.
+- **No distinct "unanswered question" indicator** — a question looks like ordinary
+  targeted chatter; easy to miss with notifications off by default (Frodo).
+- **No edit/undo after Confirm** — a "this is final" cue on the button would help
+  (Frodo).
+
 ### STT hardening follow-ups (deferred from LOTC review)
 **Severity:** Low | **Since:** STT feature (jdsareault fork)
 
