@@ -3229,6 +3229,10 @@ INDEX_HTML = r"""<!doctype html>
     let cur = 0;
     const qstate = questions.map(() => ({ selected: new Set(), customInputs: [] }));
     const panels = [];
+    // Questions answered at least once — auto-advance fires only the FIRST time
+    // a question is answered, so paging Back to correct an earlier answer
+    // doesn't fling you forward again.
+    const everAnswered = new Set();
 
     function isAnswered(qi) {
       const st = qstate[qi];
@@ -3300,6 +3304,7 @@ INDEX_HTML = r"""<!doctype html>
         row.appendChild(span);
         function toggle() {
           let advance = false;
+          const wasEver = everAnswered.has(qi);
           if (many) {
             // Multi-select never auto-advances — the user may pick several
             // and/or type, so they move on with Next/Submit themselves.
@@ -3309,17 +3314,22 @@ INDEX_HTML = r"""<!doctype html>
             st.selected.clear();
             if (!had) st.selected.add(i);   // click the selected one again to clear
             if (st.selected.size) clearCustom();
-            // A fresh single-select pick in a multi-question batch advances to
-            // the next question (quiz-style). Not on deselect, not on the last
-            // question, not for a lone single question.
-            if (!had && multi && qi < questions.length - 1) advance = true;
+            // A fresh single-select pick auto-advances — but only the FIRST
+            // time this question is answered (not when correcting via Back),
+            // not on deselect, not on the last question, not for a lone one.
+            if (!had && !wasEver && multi && qi < questions.length - 1) advance = true;
           }
+          if (isAnswered(qi)) everAnswered.add(qi);   // sticky
           syncSelected();
           refresh();
           if (advance) {
-            // Brief beat so the selection outline registers before paging.
+            // Brief beat so the outline registers before paging. Re-check the
+            // page hasn't moved AND the question is still answered, so a
+            // deselect within the window doesn't strand the user on the next.
             const from = qi;
-            setTimeout(() => { if (cur === from) { cur = from + 1; refresh(); } }, 180);
+            setTimeout(() => {
+              if (cur === from && isAnswered(from)) { cur = from + 1; refresh(); }
+            }, 180);
           }
         }
         row.addEventListener('click', toggle);
@@ -3344,6 +3354,7 @@ INDEX_HTML = r"""<!doctype html>
         inp.maxLength = 4000;
         inp.addEventListener('input', () => {
           if (!many && inp.value.trim()) { st.selected.clear(); syncSelected(); }
+          if (isAnswered(qi)) everAnswered.add(qi);   // typing counts as answered
           refresh();
         });
         rowc.appendChild(inp);
