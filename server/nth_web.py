@@ -540,6 +540,26 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     return ident.member_id, ident.display_name
 
 
+def ensure_ask_columns(db: sqlite3.Connection) -> None:
+    """Add the selectable-answers columns if the DB predates them. These are
+    normally created by nth_server.py's get_db() migration, but the web
+    dashboard can be launched against a DB the MCP server hasn't migrated yet
+    (server not restarted since the feature landed) — without this, the SSE
+    poll SELECT of `choices` crash-loops with 'no such column'. Mirrors
+    ensure_attachments_table: the web side owns its own forward-compat. Each
+    ALTER is idempotent (fails harmlessly if the column already exists)."""
+    for table, col, defn in (
+        ("members",  "kind",      "TEXT NOT NULL DEFAULT 'agent'"),
+        ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "reply_to",  "INTEGER"),
+    ):
+        try:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
 def sniff_image_mime(data: bytes) -> Optional[str]:
     """Real image MIME from magic bytes, or None if not a supported image.
     We trust the sniffed type over the client-declared Content-Type."""
@@ -5199,6 +5219,18 @@ def main() -> int:
     host = args.host
     if host is None:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
+
+    # Forward-compat: ensure the selectable-answers columns exist before we
+    # serve, so the dashboard works against a DB the MCP server hasn't migrated
+    # yet (e.g. server not restarted since the feature landed).
+    _mig = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        ensure_ask_columns(_mig)
+        _mig.commit()
+    except sqlite3.Error as e:
+        sys.stderr.write(f"[nth_web] ask-column migration skipped: {e}\n")
+    finally:
+        _mig.close()
 
     # Spin up the event hub before serving.
     hub = EventHub(db_path, args.channel)

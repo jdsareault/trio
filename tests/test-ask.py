@@ -239,6 +239,21 @@ check("parse_obj_json: garbage -> None", web.parse_obj_json("not json") is None)
 check("parse_obj_json: empty -> None", web.parse_obj_json("") is None)
 check("parse_obj_json: scalar -> None", web.parse_obj_json("5") is None)
 
+# ensure_ask_columns: a DB predating the feature (no new columns) must be
+# migrated by the web side so the SSE poll doesn't crash-loop on 'no such
+# column: choices'. Idempotent.
+legacy = sqlite3.connect(":memory:")
+legacy.execute("CREATE TABLE members (id TEXT, channel TEXT, name TEXT)")
+legacy.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, channel TEXT, content TEXT)")
+web.ensure_ask_columns(legacy); legacy.commit()
+web.ensure_ask_columns(legacy); legacy.commit()  # idempotent, no raise
+_mcols = {r[1] for r in legacy.execute("PRAGMA table_info(messages)")}
+_kcols = {r[1] for r in legacy.execute("PRAGMA table_info(members)")}
+check("ensure_ask_columns: adds message columns",
+      {"choices", "selection", "reply_to"} <= _mcols)
+check("ensure_ask_columns: adds members.kind", "kind" in _kcols)
+legacy.close()
+
 mem = sqlite3.connect(":memory:")
 mem.row_factory = sqlite3.Row
 mem.execute(
