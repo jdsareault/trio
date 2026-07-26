@@ -3286,16 +3286,28 @@ INDEX_HTML = r"""<!doctype html>
         span.textContent = opt;
         row.appendChild(span);
         function toggle() {
+          let advance = false;
           if (many) {
+            // Multi-select never auto-advances — the user may pick several
+            // and/or type, so they move on with Next/Submit themselves.
             if (st.selected.has(i)) st.selected.delete(i); else st.selected.add(i);
           } else {
             const had = st.selected.has(i);
             st.selected.clear();
             if (!had) st.selected.add(i);   // click the selected one again to clear
             if (st.selected.size) clearCustom();
+            // A fresh single-select pick in a multi-question batch advances to
+            // the next question (quiz-style). Not on deselect, not on the last
+            // question, not for a lone single question.
+            if (!had && multi && qi < questions.length - 1) advance = true;
           }
           syncSelected();
           refresh();
+          if (advance) {
+            // Brief beat so the selection outline registers before paging.
+            const from = qi;
+            setTimeout(() => { if (cur === from) { cur = from + 1; refresh(); } }, 180);
+          }
         }
         row.addEventListener('click', toggle);
         row.addEventListener('keydown', (e) => {
