@@ -1897,6 +1897,10 @@ INDEX_HTML = r"""<!doctype html>
   .ask-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
   .ask-hint, .ask-status { font-size: 0.86em; color: var(--dim); }
   .ask-status { margin-top: 7px; }
+  .ask-preview:not(:empty) {
+    margin-top: 7px; font-size: 0.9em; color: var(--dim);
+    border-left: 2px solid var(--accent2); padding-left: 8px;
+  }
   body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
 
   /* Ack badges — one per member. Emoji is the identity; colored ring
@@ -3117,22 +3121,50 @@ INDEX_HTML = r"""<!doctype html>
     actions.appendChild(confirmBtn);
     const hint = document.createElement('span');
     hint.className = 'ask-hint';
-    hint.textContent = many ? 'select any that apply' : 'select one';
+    hint.textContent = many ? 'select any that apply' : 'select one (click again to clear)';
     actions.appendChild(hint);
     wrap.appendChild(actions);
 
+    // Live preview of exactly what will be posted — options and custom text are
+    // COMBINED (not either/or), so show the composed string to remove surprise
+    // (LOTC Frodo).
+    const preview = document.createElement('div');
+    preview.className = 'ask-preview';
+    wrap.appendChild(preview);
+
+    // `sending` latches for the whole in-flight POST. Without it, toggling any
+    // input while the request is pending re-fires refresh() and re-enables the
+    // button, letting a second Confirm double-post the answer (LOTC Uruk-Hai).
+    let sending = false;
+    function currentPicked() {
+      return inputs.filter(c => c.checked).map(c => parseInt(c.value, 10));
+    }
     function refresh() {
-      const any = inputs.some(c => c.checked) || customInput.value.trim().length > 0;
-      confirmBtn.disabled = !any;
+      const composed = buildAnswerText(choices, currentPicked(), customInput.value.trim());
+      confirmBtn.disabled = sending || !composed;
+      preview.textContent = composed ? ('Will send: ' + composed) : '';
     }
     inputs.forEach(c => c.addEventListener('change', refresh));
     customInput.addEventListener('input', refresh);
 
+    // Radios can't be natively deselected — clicking the already-selected one
+    // clears it, so a mis-click isn't a permanent stuck choice (LOTC Frodo).
+    if (!many) {
+      let lastRadio = null;
+      inputs.forEach(inp => inp.addEventListener('click', () => {
+        if (lastRadio === inp) { inp.checked = false; lastRadio = null; }
+        else { lastRadio = inp; }
+        refresh();
+      }));
+    }
+
     confirmBtn.addEventListener('click', async () => {
+      if (sending) return;
       const picked = inputs.filter(c => c.checked).map(c => parseInt(c.value, 10));
       const customText = customInput.value.trim();
       const answerText = buildAnswerText(choices, picked, customText);
       if (!answerText) return;
+      sending = true;
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Sending…';
       try {
@@ -3145,15 +3177,15 @@ INDEX_HTML = r"""<!doctype html>
         if (!r.ok) {
           const err = await r.json().catch(() => ({ error: 'unknown' }));
           alert('answer failed: ' + (err.error || r.status));
-          confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm';
+          sending = false; confirmBtn.textContent = 'Confirm'; refresh();
           return;
         }
-        // The SSE echo of our reply flips this to the locked view; set a
-        // holding label meanwhile so a double-click can't double-post.
+        // The SSE echo of our reply flips this to the locked view; keep the
+        // button latched (sending stays true) so nothing can re-post meanwhile.
         confirmBtn.textContent = 'Sent ✓';
       } catch (e) {
         alert('answer failed: ' + e.message);
-        confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm';
+        sending = false; confirmBtn.textContent = 'Confirm'; refresh();
       }
     });
   }
