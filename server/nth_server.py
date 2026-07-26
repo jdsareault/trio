@@ -1097,6 +1097,214 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         db.close()
 
 
+# ── Selectable answers: agent poses a multiple-choice question to a human ──
+MAX_ASK_OPTIONS = 12
+MAX_ASK_OPTION_LEN = 300
+
+
+def _resolve_human_target(db, channel: str, target: str):
+    """Resolve `target` (a member id, exact display name, or guest stem) to a
+    single member row in `channel`. Returns (row, error). Exactly one of the
+    two is non-None. Name/stem matching is case-insensitive; an ambiguous
+    match (two members share the name/stem) is an error rather than a guess."""
+    target = (target or "").strip()
+    if not target:
+        return None, "target is required — name the human you're asking."
+    rows = db.execute(
+        "SELECT * FROM members WHERE channel = ?", (channel,),
+    ).fetchall()
+    # 1. Exact member-id match (unambiguous, survives renames).
+    for r in rows:
+        if r["id"] == target:
+            return r, None
+    # 2. Exact display-name match (case-insensitive).
+    tl = target.lower()
+    by_name = [r for r in rows if (r["name"] or "").strip().lower() == tl]
+    if len(by_name) == 1:
+        return by_name[0], None
+    if len(by_name) > 1:
+        return None, f'"{target}" is ambiguous — {len(by_name)} members share that name. Use the member id.'
+    # 3. Guest-stem match (@gabe → gabe-guest), if unambiguous.
+    by_stem = [r for r in rows if (_guest_stem(r["name"] or "") or "").lower() == tl]
+    if len(by_stem) == 1:
+        return by_stem[0], None
+    if len(by_stem) > 1:
+        return None, f'"{target}" is ambiguous among guests — use the member id.'
+    return None, f'No member "{target}" in this channel.'
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_ask")
+def nth_ask(
+    channel: str,
+    member_id: str,
+    question: str,
+    options: list[str],
+    target: str,
+    mode: str = "one",
+    session_token: str = "",
+) -> str:
+    """Ask a HUMAN a multiple-choice question they answer by clicking in the
+    web dashboard. Use this ONLY for questions directed at a person — never at
+    another agent. Agents should just ask each other in plain prose with
+    nth_send; the clickable picker exists to save a human typing and to show
+    them the exact option set you have in mind.
+
+    The human sees your question with your options as buttons (radio for
+    mode="one", checkboxes for mode="many"), plus a free-text box so they can
+    always type their own answer instead. Nothing is sent until they confirm.
+    Their answer comes back to the channel as an ordinary reply message (a
+    reply_to this question) — you just read it like any other message. You do
+    NOT need to poll differently or parse a special format; read the words.
+
+    The target MUST be a human (someone who joined via the web dashboard).
+    Asking an agent is rejected — address agents directly with nth_send.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (from nth_connect)
+        question: The question to ask (max 2000 chars)
+        options: The choices to offer (2–12 items). The human can also type
+                 their own answer regardless of these.
+        target: Who to ask — a human member's name, guest stem, or member id.
+        mode: "one" for a single choice (radio), "many" to allow multiple
+              selections (checkboxes). Default "one".
+        session_token: Optional session capability token (from nth_connect).
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    question = (question or "").strip()
+    if not question:
+        return json.dumps({"error": "question cannot be empty."})
+    if len(question) > 2000:
+        return json.dumps({"error": f"question too long ({len(question)} > 2000)."})
+
+    mode = (mode or "one").strip().lower()
+    if mode not in ("one", "many"):
+        return json.dumps({"error": 'mode must be "one" or "many".'})
+
+    # Normalize options: strip, drop blanks, cap length and count, dedupe
+    # while preserving order (a duplicate option would render two identical
+    # buttons that map to the same answer — pointless and confusing).
+    if not isinstance(options, list):
+        return json.dumps({"error": "options must be a list of strings."})
+    seen_opt: set = set()
+    clean_opts: list[str] = []
+    for o in options:
+        if not isinstance(o, str):
+            return json.dumps({"error": "each option must be a string."})
+        o = o.strip()
+        if not o:
+            continue
+        if len(o) > MAX_ASK_OPTION_LEN:
+            return json.dumps({"error": f"option too long (max {MAX_ASK_OPTION_LEN} chars)."})
+        if o.lower() in seen_opt:
+            continue
+        seen_opt.add(o.lower())
+        clean_opts.append(o)
+    if len(clean_opts) < 2:
+        return json.dumps({"error": "provide at least 2 distinct options."})
+    if len(clean_opts) > MAX_ASK_OPTIONS:
+        return json.dumps({"error": f"too many options (max {MAX_ASK_OPTIONS})."})
+
+    db = get_db()
+    try:
+        ch = _get_channel(db, channel)
+        if not ch:
+            return json.dumps({"error": f'Channel "{channel}" not found.'})
+        if ch["status"] == "ended":
+            return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        # Session capability check — mirror nth_send: a supplied token must be
+        # valid, match the member, and be a primary (not read_only) token.
+        author_session = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            if sess["role"] != "primary":
+                return json.dumps({"error": f"session_token role '{sess['role']}' cannot send. Use a primary token."})
+            author_session = session_token
+
+        tgt, terr = _resolve_human_target(db, channel, target)
+        if terr or tgt is None:
+            return json.dumps({"error": terr or "target could not be resolved."})
+        tgt_kind = (tgt["kind"] if "kind" in tgt.keys() else "agent") or "agent"
+        if tgt_kind != "human":
+            return json.dumps({"error": (
+                f'"{tgt["name"]}" is an agent — trio_ask targets humans only. '
+                "Ask an agent directly with a plain nth_send message."
+            )})
+
+        # Human-readable transcript form so console tailers and other agents
+        # see the full question + options. The web dashboard renders the
+        # interactive picker from the `choices` payload instead of this text.
+        lines = [question, ""]
+        for i, o in enumerate(clean_opts, 1):
+            lines.append(f"  {i}. {o}")
+        lines.append("")
+        lines.append(f"_(select {'one' if mode == 'one' else 'one or more'} in the dashboard, "
+                     "or type your own answer)_")
+        content = "\n".join(lines)
+
+        choices_json = json.dumps({
+            "mode": mode,
+            "options": clean_opts,
+            "target": tgt["id"],
+            "question": question,
+        })
+        # Ping the target directly by id (guaranteed, independent of how the
+        # display name would parse) so they wake and see the → bar.
+        mentions_json = json.dumps([tgt["id"]])
+        now = now_iso()
+
+        cur = db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, "
+            "choices, author_session, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json,
+             choices_json, author_session, now),
+        )
+        msg_id = cur.lastrowid
+
+        if author_session:
+            db.execute(
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now, author_session),
+            )
+        db.execute(
+            "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+            (now, member_id, channel),
+        )
+        db.execute(
+            "UPDATE channels SET updated_at = ? WHERE code = ?",
+            (now, channel),
+        )
+        db.commit()
+
+        _console("❓", channel, f"{member['name']} asked {tgt['name']}: {question}", 35)
+
+        return json.dumps({
+            "ok": True,
+            "channel": channel,
+            "message_id": msg_id,
+            "target": tgt["name"],
+            "target_id": tgt["id"],
+            "mode": mode,
+            "options": clean_opts,
+            "note": "Answer will arrive as a normal reply message from the human.",
+        })
+    finally:
+        db.close()
+
+
 # ── Image attachment delivery (Phase 2): poll returns MCP image blocks ──
 POLL_IMAGE_FORMATS = {
     "image/png": "png", "image/jpeg": "jpeg",
