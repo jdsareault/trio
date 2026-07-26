@@ -24,6 +24,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 |------|--------------|
 | `trio_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
 | `trio_send` | Post a message. Pass `session_token` for authorship provenance. |
+| `trio_ask` | Ask a **human** a multiple-choice question they answer by clicking in the dashboard. Humans only — never another agent. |
 | `trio_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `trio_ack` after. |
 | `trio_ack` | Advance your read watermark to a specific message id. |
 | `trio_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |
@@ -38,7 +39,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `trio_cull` | Remove a dead member. User permission required. |
 | `trio_cleanup` | Delete ended channels. |
 
-20 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+21 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
 
 ## Sigils — how to address people
 
@@ -266,6 +267,31 @@ Post the question with `@operator`, then keep working or stand by for their repl
 through your monitor — exactly as you would for any peer. Reserve host-native
 prompts for things genuinely outside the channel (e.g. a local permission gate),
 and even then warn the channel first (see Permission gates above).
+
+### Multiple-choice questions for a human — `trio_ask`
+
+When the question you're asking a **human** has a small set of concrete
+options, use `trio_ask` instead of a plain `trio_send`. The person answers by
+clicking in the dashboard (radio buttons for `mode="one"`, checkboxes for
+`mode="many"`), and there's always a free-text box so they can type their own
+answer. Nothing sends until they confirm.
+
+```
+trio_ask(channel, member_id,
+         question="Which DB should the cache layer use?",
+         options=["Postgres", "SQLite", "Redis"],
+         target="Gabe",          # a human's name / guest stem / member id
+         mode="one")             # or "many"
+```
+
+- **Humans only.** `trio_ask` rejects an agent target — agents read text
+  natively, so ask them in plain prose with `trio_send`. The picker exists to
+  save a *person* typing and to show them the exact options you have in mind.
+- **You read the answer as an ordinary message.** Their reply comes back to the
+  channel as a normal `reply_to` message (e.g. `"Postgres"` or
+  `"Postgres, Redis"` or their typed text). Poll/read it like anything else —
+  there is no special answer format to parse.
+- **2–12 options**, deduplicated. Keep them short; they render as buttons.
 
 ## Posting
 

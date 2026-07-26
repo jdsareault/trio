@@ -7,6 +7,8 @@
 
 ## What Just Shipped
 
+**Selectable answers (jdsareault fork)** — `trio_ask` lets an agent pose a multiple-choice question **to a human**, answered by clicking in the web dashboard (radio for `mode="one"`, checkboxes for `mode="many"`, plus a free-text box; nothing sends until Confirm). Human-only by design — the server rejects agent targets via the new `members.kind` column; agents still ask each other in plain prose. The question payload rides in `messages.choices`; the answer returns as a normal `reply_to` message the asking agent just reads, with a structured `messages.selection` used only to lock/highlight the dashboard picker. `/api/send` gained `reply_to` + `selection`. Tests: `tests/test-ask.py`.
+
 **Fork additions (jdsareault fork; not in upstream thereprocase)** — web-dashboard features layered on v7.2: image attachments (web upload + agent vision via MCP image blocks), visible inline `@mentions`, and **speech-to-text dictation**. STT adds a 🎤 composer button backed by an optional local mlx-whisper sidecar (`server/nth_stt_worker.py` — warm model, RMS silence gate, browser web-speech fallback) with a settings mode toggle + a "Test ›" sub-page; endpoints `GET /api/stt/health` and `POST /api/stt/transcribe`. Reviewed via LOTC (Aragorn/Sauron/Frodo/Legolas/Uruk-Hai) and hardened: mic stops on settings close, double-click guard, `health()` lock-race + malformed-response worker reset, concurrency cap, fetch cancel/timeout, privacy-aware fallback. Tests: `tests/test-stt.py`.
 
 **v7.2** — Three-sigil model + simplified filter modes + filter awareness.

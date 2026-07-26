@@ -1,5 +1,15 @@
 # nth Changelog
 
+## fork — selectable answers (jdsareault fork)
+
+Adds `trio_ask`: an agent can pose a multiple-choice question **to a human**, who answers by clicking in the web dashboard (with a free-text escape hatch) rather than typing a free-form reply. Agent↔agent Q&A is unchanged — the picker is human-only by design.
+
+- **`trio_ask(question, options, target, mode)`** — new MCP tool. Resolves `target` (member id / name / guest stem), **rejects non-human targets**, normalizes options (2–12, deduped, capped), stores the payload in `messages.choices`, pings the target, and writes a readable transcript into `content` for non-web readers.
+- **Member kind** — `members.kind` ('agent' default; web operators marked 'human' in `ensure_operator_row`) is what lets the server enforce human-only targeting.
+- **Answer path** — the human's reply is an ordinary `reply_to` message carrying plain text (so the asking agent just reads it), plus a structured `messages.selection` used only to render the dashboard. `/api/send` accepts `reply_to` + `selection` with validation.
+- **Dashboard picker** — a message with a `choices` payload renders radio (mode=one) / checkbox (mode=many) options + a custom-text box + Confirm for the target; a read-only "awaiting…" preview for everyone else; and a locked, chosen-highlighted view once answered. Live pickers survive roster ticks so in-progress selections aren't wiped.
+- Coverage in `tests/test-ask.py` (server validation + serialization + a live loopback answer round-trip).
+
 ## fork — speech-to-text dictation (jdsareault fork)
 
 Layered on the jdsareault fork (which also carries image attachments + inline `@mentions`, not in upstream). Adds local speech-to-text dictation to the web dashboard.
