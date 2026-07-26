@@ -97,6 +97,9 @@ IDENTITY_SOURCE_TAILSCALE = "tailscale"
 IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
 IDENTITY_SOURCE_PENDING = "pending"
+# Identity tiers allowed to perform destructive, roster-wide actions (cull).
+# A self-declared guest is deliberately excluded — see _handle_cull.
+CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 # Agents reading the roster can check the member's summary field:
 #   "human — tailnet: knelsonb"       → identity-traceable via Tailscale
 #   "human — local (user: repro)"     → connected via loopback; trust level is
@@ -1550,13 +1553,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
         body = self._read_json_body(max_bytes=2048)
         if body is None:
             return
-        target_id = (body.get("target_member_id") or "").strip()
-        if not target_id:
+        # _read_json_body only guarantees valid JSON, not a dict of strings —
+        # guard both before .get()/.strip() so bad input is a clean 400, not an
+        # AttributeError that drops the connection.
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        target_id = body.get("target_member_id")
+        if not isinstance(target_id, str) or not target_id.strip():
             self._error(400, "target_member_id required")
             return
+        target_id = target_id.strip()
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
+            return
+        # Removing a member is destructive and roster-wide — restrict it to
+        # trusted identities (a local shell or a Tailscale-verified peer). A
+        # self-declared guest, the weakest tier, must not be able to rip out
+        # agents or other participants (esp. under --tailnet's 0.0.0.0 bind).
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can remove members")
             return
         db = None
         try:
@@ -2923,7 +2940,7 @@ INDEX_HTML = r"""<!doctype html>
   const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
                            '[retracted ', '[joined ', '[left ', '[ended ',
                            '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed '];
+                           '[renamed ', '[culled] '];
   function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
@@ -3992,6 +4009,14 @@ INDEX_HTML = r"""<!doctype html>
       const old = state.members.get(m.id);
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
+    }
+    // The roster event is a full snapshot — prune anyone no longer in it (e.g.
+    // culled). Without this, state.members is set-not-cleared, so a removed
+    // member ghosts in ack badges, watermark pins, and @-mention autocomplete
+    // until the page reloads.
+    const liveIds = new Set(members.map(m => m.id));
+    for (const id of [...state.members.keys()]) {
+      if (!liveIds.has(id)) state.members.delete(id);
     }
 
     if (rename_from.size > 0) {

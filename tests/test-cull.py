@@ -80,16 +80,66 @@ try:
     check("cull_member: member row deleted", gone is None)
     tstatus = db.execute("SELECT status, claimed_by FROM tasks WHERE id=?", (task_id,)).fetchone()
     check("cull_member: task back to open", tstatus["status"] == "open" and tstatus["claimed_by"] is None)
-    culled_msg = db.execute(
-        "SELECT 1 FROM messages WHERE channel=? AND content LIKE '[culled]%'", (CH,)).fetchone()
-    check("cull_member: posts [culled] system message", culled_msg is not None)
+    cmsg = db.execute(
+        "SELECT member_id, member_name FROM messages WHERE channel=? AND content LIKE '[culled]%'",
+        (CH,)).fetchone()
+    check("cull_member: posts [culled] system message", cmsg is not None)
+    check("cull_member: [culled] authored by the caller, not the victim",
+          cmsg["member_id"] == asker and cmsg["member_name"] == "Asker")
     # self / unknown guards
     _r, e_self = web.cull_member(db, CH, asker, "Asker", asker)
     check("cull_member: self rejected", e_self is not None and "yourself" in e_self.lower())
     _r, e_unk = web.cull_member(db, CH, asker, "Asker", "nope")
     check("cull_member: unknown rejected", e_unk is not None and "not found" in e_unk.lower())
+    # double-cull: the now-removed victim can't be culled again
+    _r, e_again = web.cull_member(db, CH, asker, "Asker", victim)
+    check("cull_member: double-cull -> not found", e_again is not None and "not found" in e_again.lower())
 finally:
     db.close()
+
+
+# ── unit: locks, channel isolation, task edge cases ──────────────────────────
+CHL, askerL = connect("AskerL", channel="culltest3")
+_ch, victimL = connect("VictimL", channel=CHL)
+_ch, otherL = connect("OtherL", channel=CHL)
+json.loads(srv.nth_lock(channel=CHL, member_id=victimL, resource="res-victim"))
+json.loads(srv.nth_lock(channel=CHL, member_id=otherL, resource="res-other"))
+# victim posts an OPEN task they never claim — must NOT be released/altered.
+tp = json.loads(srv.nth_send(channel=CHL, member_id=victimL, message="unclaimed", task=True))
+open_task = tp["task_id"]
+# victim claims two other tasks — both must be released.
+t1 = json.loads(srv.nth_send(channel=CHL, member_id=askerL, message="t1", task=True))["task_id"]
+t2 = json.loads(srv.nth_send(channel=CHL, member_id=askerL, message="t2", task=True))["task_id"]
+json.loads(srv.nth_claim(channel=CHL, member_id=victimL, task_id=t1))
+json.loads(srv.nth_claim(channel=CHL, member_id=victimL, task_id=t2))
+
+db = srv.get_db()
+try:
+    res, err = web.cull_member(db, CHL, askerL, "AskerL", victimL)
+    db.commit()
+    check("cull: releases multiple claimed tasks", err is None and set(res["released_tasks"]) == {t1, t2})
+    for tid in (t1, t2):
+        r = db.execute("SELECT status, claimed_by FROM tasks WHERE id=?", (tid,)).fetchone()
+        check(f"cull: task #{tid} back to open", r["status"] == "open" and r["claimed_by"] is None)
+    vlock = db.execute("SELECT 1 FROM locks WHERE channel=? AND held_by=?", (CHL, victimL)).fetchone()
+    check("cull: victim's lock released", vlock is None)
+    olock = db.execute("SELECT 1 FROM locks WHERE channel=? AND held_by=?", (CHL, otherL)).fetchone()
+    check("cull: other member's lock survives", olock is not None)
+    ot = db.execute("SELECT status, posted_by, claimed_by FROM tasks WHERE id=?", (open_task,)).fetchone()
+    check("cull: victim's own unclaimed task untouched",
+          ot["status"] == "open" and ot["posted_by"] == victimL and ot["claimed_by"] is None)
+    # channel isolation: can't cull a member of a different channel
+    _r, e_x = web.cull_member(db, "culltest2", askerL, "AskerL", otherL)
+    check("cull: cross-channel target rejected", e_x is not None and "not found" in e_x.lower())
+finally:
+    db.close()
+
+
+# ── authz policy: guests may not cull (Aragorn) ──────────────────────────────
+check("authz: guest not allowed to cull", web.IDENTITY_SOURCE_GUEST not in web.CULL_ALLOWED_SOURCES)
+check("authz: pending not allowed to cull", web.IDENTITY_SOURCE_PENDING not in web.CULL_ALLOWED_SOURCES)
+check("authz: loopback allowed", web.IDENTITY_SOURCE_LOOPBACK in web.CULL_ALLOWED_SOURCES)
+check("authz: tailscale allowed", web.IDENTITY_SOURCE_TAILSCALE in web.CULL_ALLOWED_SOURCES)
 
 
 # ── live: /api/cull round-trip ───────────────────────────────────────────────
@@ -140,6 +190,30 @@ try:
         finally:
             db.close()
         check("live: member removed from roster", gone is None)
+
+        # crash guards: non-string target + non-dict body → clean 400 (not 500/drop)
+        st, _ = http(port, "/api/cull", "POST", {"target_member_id": 123})
+        check("live: non-string target -> 400", st == 400)
+        st, _ = http(port, "/api/cull", "POST", [1, 2, 3])
+        check("live: non-dict body -> 400", st == 400)
+        # double-cull the already-removed victim2 → 400
+        st, _ = http(port, "/api/cull", "POST", {"target_member_id": victim2})
+        check("live: double-cull -> 400", st == 400)
+        # cross-channel: `asker` belongs to CH (culltest), not this channel (CH2)
+        st, _ = http(port, "/api/cull", "POST", {"target_member_id": asker})
+        check("live: cross-channel target -> 400", st == 400)
+        # full endpoint task-release path: victim with a claimed task, culled live
+        _c, victim2b = connect("LiveVictim2", channel=CH2)
+        tb = json.loads(srv.nth_send(channel=CH2, member_id=asker2, message="tb", task=True))["task_id"]
+        json.loads(srv.nth_claim(channel=CH2, member_id=victim2b, task_id=tb))
+        st, resp = http(port, "/api/cull", "POST", {"target_member_id": victim2b})
+        check("live: task-release via endpoint", st == 200 and resp.get("released_tasks") == [tb])
+        db = srv.get_db()
+        try:
+            rr = db.execute("SELECT status, claimed_by FROM tasks WHERE id=?", (tb,)).fetchone()
+        finally:
+            db.close()
+        check("live: released task is open in DB", rr["status"] == "open" and rr["claimed_by"] is None)
 except OSError as e:
     skip("live cull", f"could not start server: {e}")
 finally:
