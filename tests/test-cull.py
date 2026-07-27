@@ -78,6 +78,10 @@ try:
     check("cull_member: released the claimed task", res and res["released_tasks"] == [task_id])
     gone = db.execute("SELECT 1 FROM members WHERE id=? AND channel=?", (victim, CH)).fetchone()
     check("cull_member: member row deleted", gone is None)
+    live_sess = db.execute(
+        "SELECT 1 FROM sessions WHERE channel=? AND member_id=? AND revoked_at IS NULL",
+        (CH, victim)).fetchone()
+    check("cull_member: victim's sessions revoked", live_sess is None)
     tstatus = db.execute("SELECT status, claimed_by FROM tasks WHERE id=?", (task_id,)).fetchone()
     check("cull_member: task back to open", tstatus["status"] == "open" and tstatus["claimed_by"] is None)
     cmsg = db.execute(
