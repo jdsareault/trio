@@ -2415,6 +2415,7 @@ INDEX_HTML = r"""<!doctype html>
      only at true phone widths (<=560px) does it become a slide-in drawer over
      the chat with a tap-to-close backdrop. The header wraps once it's tight. */
   #side-backdrop { display: none; }
+  #side-drawer-head { display: none; }   /* only shown as a drawer header on phones */
   @media (max-width: 1000px) {
     #app { grid-template-columns: 1fr 240px; }
   }
@@ -2433,6 +2434,13 @@ INDEX_HTML = r"""<!doctype html>
             box-shadow: -8px 0 24px rgba(0,0,0,0.4);
             transform: translateX(0); transition: transform 0.2s ease; }
     #app.side-collapsed #side { display: flex; transform: translateX(100%); }
+    /* Explicit close (×) header on the drawer — tap-outside wasn't discoverable. */
+    #side-drawer-head { display: flex; justify-content: flex-end; position: sticky; top: 0;
+                        background: var(--panel); padding: 6px 8px; z-index: 1;
+                        border-bottom: 1px solid var(--border); }
+    #side-close { background: none; border: none; color: var(--dim); cursor: pointer;
+                  font-size: 22px; line-height: 1; padding: 2px 8px; border-radius: 4px; }
+    #side-close:hover { color: var(--fg); background: rgba(var(--ov),0.08); }
     /* Dim, tap-to-close backdrop while the drawer is open. */
     #side-backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,0.45); }
     #app.side-collapsed ~ #side-backdrop { display: none; }
@@ -2505,6 +2513,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
+    <div id="side-drawer-head"><button id="side-close" title="close roster" aria-label="close roster">×</button></div>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
@@ -5219,6 +5228,10 @@ INDEX_HTML = r"""<!doctype html>
   // backdrop closes it.
   const sideBackdrop = document.getElementById('side-backdrop');
   if (sideBackdrop) sideBackdrop.addEventListener('click', () => {
+    if (!_sideCollapsed) toggleSidebar();
+  });
+  const sideClose = document.getElementById('side-close');
+  if (sideClose) sideClose.addEventListener('click', () => {
     if (!_sideCollapsed) toggleSidebar();
   });
   function toggleSidebar() {
