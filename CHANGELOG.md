@@ -1,5 +1,12 @@
 # nth Changelog
 
+## fork — fix duplicate same-name members + roster blanking (jdsareault fork)
+
+Two linked bugs: an agent that reconnected under the same name spawned a second member row (the protocol tells sessions to reconnect on token loss, and `nth_connect` had no name dedup), so duplicates piled up — and removing one from the dashboard appeared to remove *all* of them.
+
+- **Ghost pruning on connect** (`nth_server.py`) — joining now clears out any **dead same-name agent "ghost"** first: a same-name member with **no live session** is superseded (its tasks released, locks dropped, sessions revoked, row removed, a `[superseded]` line posted) before the newcomer is added. Liveness keys on `sessions.last_seen` (the session's own activity), not `members.last_seen` (which the monitor keeps fresh even while the session is frozen). Genuinely-live same-name members coexist untouched, and humans/operators are never pruned. Pruning runs before the capacity check, so ghost-held slots are freed. Tests: `tests/test-name-dedup.py` (11 checks).
+- **Roster no longer blanks on a bad row** (`nth_web.py`) — the server cull is provably single-row (`DELETE … WHERE id=? AND channel=?` on the PK), so it never deleted two members; the "removed both" symptom was the client: `renderRoster` cleared the sidebar then rebuilt row-by-row, so one throwing row left the whole list blank until reload. Rows are now built into a `DocumentFragment` with a per-row `try/catch` and swapped in atomically — a single failing row is skipped and logged instead of taking down the roster.
+
 ## fork — stall-watchdog: auto-resume sessions killed by API errors (jdsareault fork)
 
 When a Claude session's turn dies to a transient API error (the classic 529 `overloaded`), the turn freezes mid-work and the session goes silent — today someone has to notice and type "continue". This adds an automatic watchdog that detects the stall and nudges the session back to life, using the exact mechanism that a manual "continue" uses: a channel message delivered by the session's still-running Monitor starts a fresh turn on the frozen session.
