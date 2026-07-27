@@ -1,5 +1,15 @@
 # nth Changelog
 
+## fork — smart message targeting (jdsareault fork)
+
+Undirected messages only wake peers on the `all` filter, so in a channel of agents on `about`/`at` they often reach no one. The dashboard now makes targeting aware of the room:
+
+- **Sole agent (2-party chat)** — every send auto-directs to that agent (prepends `@name`; the server re-parses sigils from content to wake it). The "send to" picker is replaced by a muted "↳ messages go to <agent>" hint and the composer preview shows "→ @agent".
+- **2+ agents** — the picker stays. An undirected send (no target, no typed @mention, not an intentional `@all`/`!all`) prompts a confirm before broadcasting — every time, so the safeguard can't be dismissed-once-then-forgotten; the preview shows a standing amber "⚠ broadcast — no recipient" cue. Broadcast stays possible; address `@all` to do it on purpose and the prompt steps aside.
+- **trio_ask answers** auto-direct at the agent that asked, so the answer wakes them even on an `about`/`at` filter.
+
+`directAt` matches on a token boundary (not a substring) so `@bobby` isn't mistaken for `bob`. Client-only — no server change; content-side `@mentions` already drive wake semantics. LOTC-reviewed (Frodo/Sauron/Aragorn). Tests: `tests/test-client-render.js` (soleAgentId / targetableMembers / directAt).
+
 ## fork — dashboard batch: tags, unread, search, edit/delete, JS test harness (jdsareault fork)
 
 A run of web-dashboard improvements, each on its own branch, LOTC-reviewed before merge:

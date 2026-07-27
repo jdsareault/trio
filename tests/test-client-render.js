@@ -193,6 +193,64 @@ check('applyTargetBars: a retracted message clears its target bars', () => {
     'retracted message should have no mention bar');
 });
 
+// ── smart targeting (soleAgentId / targetableMembers / directAt) ─────────────
+function seedRoster(...members) {
+  H.state.dmTargetId = '';
+  H.state.operator = { id: '_op_l_me', name: 'me' };
+  H.state.members = new Map();
+  H.state.members.set('_op_l_me', { id: '_op_l_me', name: 'me' });
+  for (const m of members) H.state.members.set(m.id, m);
+}
+check('targetableMembers excludes the operator and other web operators', () => {
+  seedRoster({ id: 'a1', name: 'alice' }, { id: '_op_g_guest', name: 'guest' });
+  // NB: the returned array lives in the vm realm, so its prototype differs from
+  // this file's Array — deepStrictEqual would reject it on identity. Assert on
+  // primitives instead.
+  const names = H.targetableMembers().map(m => m.name);
+  assert.strictEqual(names.length, 1);
+  assert.strictEqual(names[0], 'alice');
+});
+check('soleAgentId: null with zero agents', () => {
+  seedRoster();
+  assert.strictEqual(H.soleAgentId(), null);
+});
+check('soleAgentId: the id with exactly one agent', () => {
+  seedRoster({ id: 'a1', name: 'alice' });
+  assert.strictEqual(H.soleAgentId(), 'a1');
+});
+check('soleAgentId: null with two agents (picker applies)', () => {
+  seedRoster({ id: 'a1', name: 'alice' }, { id: 'a2', name: 'bob' });
+  assert.strictEqual(H.soleAgentId(), null);
+});
+check('soleAgentId: null in DM mode even with one agent', () => {
+  seedRoster({ id: 'a1', name: 'alice' });
+  H.state.dmTargetId = 'a1';
+  assert.strictEqual(H.soleAgentId(), null);
+  H.state.dmTargetId = '';
+});
+check('directAt prepends @name when absent', () => {
+  assert.strictEqual(H.directAt('ship it', { name: 'alice' }), '@alice ship it');
+});
+check('directAt is a no-op when the mention is already present (case-insensitive)', () => {
+  assert.strictEqual(H.directAt('yo @Alice ship it', { name: 'alice' }), 'yo @Alice ship it');
+  assert.strictEqual(H.directAt('done @bob.', { name: 'bob' }), 'done @bob.');
+});
+check('directAt uses a token boundary, not substring — @bobby is NOT bob', () => {
+  // The bug the fix closes: a substring check would treat "@bobby" as already
+  // mentioning "bob" and skip the prepend, so bob is never woken.
+  assert.strictEqual(H.directAt('see @bobby later', { name: 'bob' }), '@bob see @bobby later');
+  assert.strictEqual(H.directAt('@alice hi', { name: 'al' }), '@al @alice hi');
+  assert.strictEqual(H.directAt('@bob-guest here', { name: 'bob' }), '@bob @bob-guest here');
+});
+check('directAt escapes regex metacharacters in the name', () => {
+  // A name with a "." must not be treated as a regex wildcard.
+  assert.strictEqual(H.directAt('hi @axb', { name: 'a.b' }), '@a.b hi @axb');
+});
+check('directAt tolerates a missing/nameless member', () => {
+  assert.strictEqual(H.directAt('ship it', null), 'ship it');
+  assert.strictEqual(H.directAt('ship it', { id: 'x' }), 'ship it');
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
