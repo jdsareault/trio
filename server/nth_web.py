@@ -2161,6 +2161,12 @@ INDEX_HTML = r"""<!doctype html>
   #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
+  /* "new messages" divider before the first unread message */
+  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
+                    color: var(--mention); font-size: 10px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.6px; }
+  .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
+                    background: var(--mention); opacity: 0.5; }
 
   /* ── Roster sidebar ── */
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
@@ -2688,6 +2694,8 @@ INDEX_HTML = r"""<!doctype html>
     sttRecording: false,      // mic is actively capturing
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
+    lastSeenId: 0,                  // highest msg id the user has caught up to
+                                    // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
     originalTitle: 'nth_web',
@@ -3862,6 +3870,15 @@ INDEX_HTML = r"""<!doctype html>
     } else {
       state.jumpUnread++;
       updateJumpButton();
+    }
+
+    // Unread divider: if the user is keeping up (tab visible + at/near bottom),
+    // they've seen this message; otherwise it's unread since they looked away or
+    // scrolled up, and a "new messages" divider is drawn before the first such.
+    if (!document.hidden && (state.initialLoad || nearBottom)) {
+      state.lastSeenId = Math.max(state.lastSeenId, m.id);
+    } else {
+      refreshUnreadDivider();
     }
 
     // Tab-title badge when hidden
@@ -5570,20 +5587,60 @@ INDEX_HTML = r"""<!doctype html>
   });
 
   // ── Jump-to-latest + unread counter ──
+  // ── Unread divider ──
+  // Draw a "new messages" line before the first message with id > lastSeenId.
+  function refreshUnreadDivider() {
+    const old = document.getElementById('unread-divider');
+    if (old) old.remove();
+    if (!state.lastSeenId) return;   // fresh session with nothing seen yet
+    let firstId = null;
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id > state.lastSeenId) { firstId = id; break; }
+    }
+    if (firstId === null) return;
+    const dom = state.messageDomById.get(firstId);
+    if (!dom || dom.classList.contains('filtered-out') || dom.classList.contains('dm-hidden')) return;
+    const bar = document.createElement('div');
+    bar.id = 'unread-divider';
+    bar.className = 'unread-divider';
+    bar.textContent = 'new messages';
+    chat.insertBefore(bar, dom);
+  }
+  // The user has caught up to the latest message — clear the divider + advance.
+  function markCaughtUp() {
+    const ids = [...state.messageDomById.keys()];
+    if (ids.length) state.lastSeenId = Math.max(state.lastSeenId, Math.max(...ids));
+    const bar = document.getElementById('unread-divider');
+    if (bar) bar.remove();
+  }
+  // Is the unread divider currently above the visible viewport?
+  function unreadAbove() {
+    const bar = document.getElementById('unread-divider');
+    return !!bar && (bar.offsetTop + bar.offsetHeight) < chat.scrollTop;
+  }
+
   function updateJumpButton() {
     const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     if (atBottom) {
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
+      if (!document.hidden) markCaughtUp();   // reached bottom → all seen
+      return;
+    }
+    jumpBtn.classList.add('show');
+    // If unread messages sit above the current view, offer to jump UP to the
+    // first one; otherwise it's the normal "down to latest".
+    if (unreadAbove()) {
+      jumpBtn.firstChild.textContent = '↑ new';
     } else {
-      jumpBtn.classList.add('show');
-      if (state.jumpUnread > 0) {
-        jumpCount.style.display = '';
-        jumpCount.textContent = state.jumpUnread;
-      } else {
-        jumpCount.style.display = 'none';
-      }
+      jumpBtn.firstChild.textContent = '↓ latest';
+    }
+    if (state.jumpUnread > 0) {
+      jumpCount.style.display = '';
+      jumpCount.textContent = state.jumpUnread;
+    } else {
+      jumpCount.style.display = 'none';
     }
   }
   // ── "You are here" indicator — operator's emoji on topmost visible
@@ -5626,8 +5683,15 @@ INDEX_HTML = r"""<!doctype html>
   }
   chat.addEventListener('scroll', () => { updateJumpButton(); scheduleHereUpdate(); });
   jumpBtn.addEventListener('click', () => {
-    chat.scrollTop = chat.scrollHeight;
-    state.jumpUnread = 0;
+    const bar = document.getElementById('unread-divider');
+    if (bar && unreadAbove()) {
+      // Jump UP to the first unread message rather than skipping to the bottom.
+      chat.scrollTop = Math.max(0, bar.offsetTop - 8);
+    } else {
+      chat.scrollTop = chat.scrollHeight;
+      state.jumpUnread = 0;
+      if (!document.hidden) markCaughtUp();
+    }
     updateJumpButton();
   });
 
@@ -5640,6 +5704,12 @@ INDEX_HTML = r"""<!doctype html>
     if (!document.hidden) {
       state.unreadCount = 0;
       updateTitle();
+      // Returning to the tab: if already at the bottom, they've caught up;
+      // otherwise surface the "new messages" divider for what arrived while away.
+      const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
+      if (atBottom) markCaughtUp();
+      else refreshUnreadDivider();
+      updateJumpButton();
     }
   });
   window.addEventListener('focus', () => {
