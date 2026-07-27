@@ -1,5 +1,36 @@
 # nth Changelog
 
+## fork — stall-watchdog: auto-resume sessions killed by API errors (jdsareault fork)
+
+When a Claude session's turn dies to a transient API error (the classic 529 `overloaded`), the turn freezes mid-work and the session goes silent — today someone has to notice and type "continue". This adds an automatic watchdog that detects the stall and nudges the session back to life, using the exact mechanism that a manual "continue" uses: a channel message delivered by the session's still-running Monitor starts a fresh turn on the frozen session.
+
+- **Detection is event-driven, not a silence heuristic.** A Claude Code **`StopFailure`** hook (`server/nth_stall_hook.py`) fires precisely when a turn ends on an API error and records one `stall_events` row (`session_id`, `error`). Because it triggers on the *error itself*, it catches autonomous-work stalls that have no pending `@mention` (a silence-timeout can't), and it never fires for a cleanly-idle agent (no false positives). Verified live: the payload's error field is named **`error`** (not `error_type`), and `StopFailure` fires only *after* Claude Code exhausts its own internal retries — exactly when intervention is wanted.
+- **`StallWatchdog`** (a thread inside `nth_web.py`, mirroring `EventHub`) maps `session_id → member` via `sessions.fingerprint` and, if the session hasn't resumed on its own, posts an `@agent continue …` nudge (also `@`-pinging humans) on a backoff of **1m → 5m → 15m → 1h → 2h → 2h** (≤6 nudges, then it gives up and surfaces "needs a manual restart").
+- **Resume + clean history.** Resume is detected via `sessions.last_seen` advancing past the stall (the session's *own* tool calls — the Monitor's `members.last_seen` heartbeat is deliberately ignored because it keeps ticking while the session is frozen). On resume the event is resolved and the nudges are **auto-retracted**. Non-transient errors (auth/billing/bad-model) are surfaced to humans and never nudged.
+- **Session-id capture fix.** `trio_connect` recorded the Claude session id from `CLAUDE_SESSION_ID`/`CLAUDE_PID`, but neither env var exists in Claude Code 2.x — so `sessions.fingerprint` was empty for every member. Now reads the real **`CLAUDE_CODE_SESSION_ID`** (verified to equal the hook payload's `session_id`), which is what makes the mapping populate.
+
+**Activation — register the hook (one time, global).** The watchdog only sees stalls that the hook records, so add a `StopFailure` hook to `~/.claude/settings.json` for every session you want protected:
+
+```json
+{
+  "hooks": {
+    "StopFailure": [
+      {
+        "matcher": "overloaded|rate_limit|server_error|unknown|authentication_failed|oauth_org_not_allowed|billing_error|invalid_request|model_not_found|max_output_tokens",
+        "hooks": [
+          { "type": "command",
+            "command": "python3 ~/.claude/skills/nth/server/nth_stall_hook.py" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The matcher covers every StopFailure error type: the watchdog classifies them itself — nudging transient stalls (overloaded/rate_limit/server_error) and surfacing non-recoverable ones (auth/billing/bad-model) to a human. The hook is fully best-effort (any failure is swallowed, exit 0) so it can never disturb the session it protects; it only ever INSERTs a `stall_events` row. `setup.sh` registers this automatically. The watchdog runs wherever the dashboard runs (`python3 server/nth_web.py <channel>`).
+
+Tests: `tests/test-stall-watchdog.py` (24 checks — capture fix, due-nudge + `@`-mentions, backoff gating, resume/retract, non-transient surface, give-up, human-skip, unmapped-drop, per-channel isolation).
+
 ## fork — smart message targeting (jdsareault fork)
 
 Undirected messages only wake peers on the `all` filter, so in a channel of agents on `about`/`at` they often reach no one. The dashboard now makes targeting aware of the room:

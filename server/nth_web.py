@@ -47,7 +47,7 @@ import errno
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -922,6 +922,372 @@ class EventHub:
                 db.close()
             except sqlite3.Error:
                 pass
+
+
+class StallWatchdog:
+    """Resurrects Claude sessions whose turn died to a transient API error —
+    the classic 529 'overloaded' stall where the turn freezes and the session
+    goes silent mid-work.
+
+    Pipeline:
+        StopFailure hook  ->  stall_events row (session_id, error)
+        this watchdog     ->  map session_id -> member (sessions.fingerprint);
+                              if the session hasn't resumed on its own, post an
+                              @member nudge on a backoff schedule. The nudge is
+                              delivered by the member's still-running Monitor
+                              subprocess, which starts a fresh turn on the frozen
+                              session -> it resumes.
+
+    Why this is trustworthy: detection is *event-driven*. We only ever act on a
+    real StopFailure, never on a silence/idle heuristic — so a cleanly-finished
+    idle agent is never nudged (no false positives), and an autonomous-work
+    stall with no pending @mention is still caught (no false negatives). Resume
+    is detected via sessions.last_seen advancing past the stall (the session's
+    own tool calls). The Monitor's members.last_seen heartbeat is deliberately
+    ignored — it keeps ticking even while the session is frozen, so it cannot
+    tell alive from stalled.
+
+    Structure A: lives inside the dashboard server, mirroring EventHub (own DB
+    connection, own stop flag). Kept self-contained so it can be lifted into a
+    standalone daemon later without a rewrite.
+    """
+
+    # Errors a nudge can actually fix (transient / server-side). Everything
+    # else (auth, billing, bad model, output cap) is surfaced to humans once
+    # and never auto-nudged — a retry won't help.
+    TRANSIENT_ERRORS = {"", "overloaded", "rate_limit", "server_error",
+                        "api_error", "unknown"}
+
+    # Wait before nudge #1 (measured from the stall), then between successive
+    # nudges: 1m, 5m, 15m, 1h, 2h, 2h -> at most 6 nudges, then give up.
+    BACKOFF = [60, 300, 900, 3600, 7200, 7200]
+
+    POLL_INTERVAL = 5.0           # how often to scan stall_events (seconds)
+    UNMAPPED_GRACE = 300          # s to wait for a session_id to map before dropping
+    # Reap safety net: an open event this old is stuck (mapping gap, orphaned
+    # channel, unparseable ts) — the full backoff resolves a live one in ~5.3h,
+    # so 8h open means anomalous. Resolved rows are pruned after RESOLVED_TTL so
+    # the table can't grow without bound.
+    EXPIRE_AFTER = 8 * 3600
+    RESOLVED_TTL = 24 * 3600
+    AUTHOR_ID = "_op_stall_watchdog"
+    AUTHOR_NAME = "stall-watchdog"
+
+    def __init__(self, db_path: Path, channel: str):
+        self.db_path = db_path
+        self.channel = channel
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    # ── time helpers ──
+    @staticmethod
+    def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+        if not ts:
+            return None
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _age_seconds(self, ts: Optional[str], nowdt: datetime) -> Optional[float]:
+        dt = self._parse_ts(ts)
+        return None if dt is None else (nowdt - dt).total_seconds()
+
+    # ── main loop ──
+    def _run(self) -> None:
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] watchdog DB open failed: {e}\n")
+            return
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA busy_timeout=5000")
+            while not self._stop.is_set():
+                # Catch BROAD Exception, not just sqlite3.Error: one bad tick
+                # (a surprise from sigil parsing, a schema-drift row, a bug)
+                # must never break the loop and silently kill the watchdog — a
+                # watchdog that dies quietly is worse than none.
+                try:
+                    self._tick(db)
+                except Exception as e:
+                    sys.stderr.write(f"[nth_web] watchdog tick error: {e}\n")
+                self._stop.wait(self.POLL_INTERVAL)
+        finally:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+
+    def _tick(self, db: sqlite3.Connection) -> None:
+        nowdt = datetime.now(timezone.utc)
+        try:
+            rows = db.execute(
+                "SELECT * FROM stall_events WHERE resolved_at IS NULL ORDER BY id"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return  # table not migrated yet — nothing to do
+        for ev in rows:
+            self._process(db, ev, nowdt)
+        self._maintain(db, nowdt)
+
+    def _maintain(self, db: sqlite3.Connection, nowdt: datetime) -> None:
+        """Bound the table: expire stuck-open events and prune old resolved rows
+        so stall_events can't grow without limit (the hook is unauthenticated,
+        and mapping gaps can otherwise leave rows open forever)."""
+        expire_cut = (nowdt - timedelta(seconds=self.EXPIRE_AFTER)).isoformat()
+        prune_cut = (nowdt - timedelta(seconds=self.RESOLVED_TTL)).isoformat()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                "UPDATE stall_events SET resolved_at = ?, resolution = 'expired' "
+                "WHERE resolved_at IS NULL AND created_at < ?",
+                (now_iso(), expire_cut),
+            )
+            db.execute(
+                "DELETE FROM stall_events WHERE resolved_at IS NOT NULL "
+                "AND resolved_at < ?",
+                (prune_cut,),
+            )
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    def _process(self, db: sqlite3.Connection, ev: sqlite3.Row, nowdt: datetime) -> None:
+        # 1. Map the Claude session_id back to a trio member via the fingerprint
+        #    captured at connect. Newest live session wins.
+        sess = db.execute(
+            "SELECT s.member_id AS member_id, s.channel AS channel, "
+            "       COALESCE(m.kind, 'agent') AS kind "
+            "FROM sessions s "
+            "JOIN members m ON m.id = s.member_id AND m.channel = s.channel "
+            "WHERE s.fingerprint = ? AND s.revoked_at IS NULL "
+            "ORDER BY s.connected_at DESC LIMIT 1",
+            (ev["session_id"],),
+        ).fetchone()
+
+        if sess is None:
+            # Unmappable — an old/foreign session that never recorded a
+            # fingerprint. Drop it after a grace period so the table can't grow
+            # unbounded (nothing to nudge without a member to address).
+            if (self._age_seconds(ev["created_at"], nowdt) or 0) > self.UNMAPPED_GRACE:
+                self._resolve(db, ev["id"], "unmapped")
+            return
+
+        # Each channel's dashboard owns only its own members' stalls.
+        if sess["channel"] != self.channel:
+            return
+        member_id = sess["member_id"]
+
+        # 2. Already resumed (on its own, or from an earlier nudge)? Clean up.
+        if self._resumed(db, ev):
+            self._retract_nudges(db, ev, "session resumed")
+            self._resolve(db, ev["id"], "resumed")
+            return
+
+        # 3. Humans and non-transient errors are never auto-nudged.
+        if sess["kind"] == "human":
+            self._resolve(db, ev["id"], "not_agent")
+            return
+        if (ev["error"] or "") not in self.TRANSIENT_ERRORS:
+            self._surface(
+                db,
+                f"@{member_id}'s session ended with a non-recoverable error "
+                f"(`{self._safe(ev['error'])}`) — a retry won't fix this, so no "
+                f"auto-nudge. Needs a human." + self._human_suffix(db),
+            )
+            self._resolve(db, ev["id"], "surfaced")
+            return
+
+        # 4. Schedule. Due when the backoff interval since the last nudge (or the
+        #    stall itself, for nudge #1) has elapsed. For a fully-nudged event we
+        #    still wait the *final* interval before declaring defeat, so the last
+        #    nudge gets its full chance to land instead of being written off ~5s
+        #    later. min(n, len-1) reuses the last interval once n == len(BACKOFF).
+        n = ev["nudge_count"] or 0
+        anchor = ev["last_nudge_at"] or ev["created_at"]
+        elapsed = self._age_seconds(anchor, nowdt)
+        wait = self.BACKOFF[min(n, len(self.BACKOFF) - 1)]
+        if elapsed is None or elapsed < wait:
+            return  # not due yet (or unparseable anchor -> the reaper handles it)
+
+        # 5. Backoff exhausted (final interval elapsed, still no resume) -> give up.
+        if n >= len(self.BACKOFF):
+            self._surface(
+                db,
+                f"@{member_id} is still stalled after {len(self.BACKOFF)} nudges "
+                f"(last error `{self._safe(ev['error'] or 'unknown')}`). Giving up "
+                f"— it may need a manual restart." + self._human_suffix(db),
+            )
+            self._resolve(db, ev["id"], "gave_up")
+            return
+
+        # 6. Nudge.
+        self._nudge(db, ev, member_id, n)
+
+    # ── signals ──
+    @staticmethod
+    def _safe(text: str) -> str:
+        """Strip sigil chars from untrusted text so an attacker-controlled field
+        (the hook's `error`) can't inject @/#/! wakes when the message content is
+        sigil-parsed. e.g. an `error` of '!all' must not forge a bang broadcast."""
+        return re.sub(r"[@#!]", "", text or "")
+
+    def _resumed(self, db: sqlite3.Connection, ev: sqlite3.Row) -> bool:
+        """True if the *stalled* session acted after it stalled. Scoped to the
+        session's own fingerprint (not the member) — a sibling/sub-agent session
+        under the same member advancing its last_seen must NOT be mistaken for
+        the frozen session reviving. sessions.last_seen is bumped only by that
+        session's own tool calls, so an advance past created_at is a real turn."""
+        row = db.execute(
+            "SELECT MAX(last_seen) AS ls FROM sessions WHERE fingerprint = ?",
+            (ev["session_id"],),
+        ).fetchone()
+        seen = self._parse_ts(row["ls"] if row else None)
+        created = self._parse_ts(ev["created_at"])
+        return bool(seen and created and seen > created)
+
+    def _human_ids(self, db: sqlite3.Connection) -> List[str]:
+        try:
+            rows = db.execute(
+                "SELECT id FROM members WHERE channel = ? AND kind = 'human'",
+                (self.channel,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [r["id"] for r in rows]
+
+    def _human_suffix(self, db: sqlite3.Connection) -> str:
+        humans = self._human_ids(db)
+        return (" " + " ".join(f"@{h}" for h in humans)) if humans else ""
+
+    # ── posting ──
+    def _insert_message(self, db: sqlite3.Connection, content: str) -> Optional[int]:
+        """INSERT a watchdog message with proper sigil wake semantics and return
+        its id. Assumes the caller already holds an open transaction."""
+        mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
+            db, self.channel, content)
+        cur = db.execute(
+            "INSERT INTO messages "
+            "(channel, member_id, member_name, content, created_at, "
+            " mentions, refs, bangs) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (self.channel, self.AUTHOR_ID, self.AUTHOR_NAME, content, now_iso(),
+             json.dumps(mention_ids) if mention_ids else "",
+             json.dumps(ref_ids)     if ref_ids     else "",
+             json.dumps(bang_ids)    if bang_ids    else ""),
+        )
+        return cur.lastrowid
+
+    def _post(self, db: sqlite3.Connection, content: str) -> Optional[int]:
+        """Insert a standalone watchdog message in its own transaction."""
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            msg_id = self._insert_message(db, content)
+            db.execute("COMMIT")
+            return msg_id
+        except sqlite3.Error:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    def _surface(self, db: sqlite3.Connection, content: str) -> None:
+        self._post(db, content)
+
+    def _nudge(self, db: sqlite3.Connection, ev: sqlite3.Row,
+               member_id: str, n: int) -> None:
+        # Retract the prior nudge first, so only the latest is live (the channel
+        # stays readable; the last one is retracted anyway once resumed).
+        self._retract_nudges(db, ev, "superseded by newer nudge")
+        # `err` is untrusted (hook payload) -> strip sigils so it can't inject a
+        # wake. The @mention/count below are ours and stay intact.
+        err = self._safe(ev["error"] or "API error")
+        content = (
+            f"@{member_id} continue — your previous turn hit an API error "
+            f"(`{err}`) and stalled. Pick up where you left off. "
+            f"(auto-nudge {n + 1}/{len(self.BACKOFF)})" + self._human_suffix(db)
+        )
+        # Post the message and advance the counter in ONE transaction, so a crash
+        # can't leave a nudge posted with the count un-advanced (which would
+        # re-nudge next tick while silently burning a backoff step).
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            msg_id = self._insert_message(db, content)
+            db.execute(
+                "UPDATE stall_events SET nudge_count = ?, last_nudge_at = ?, "
+                "last_nudge_msg_id = ? WHERE id = ?",
+                (n + 1, now_iso(), msg_id, ev["id"]),
+            )
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    def _retract_nudges(self, db: sqlite3.Connection, ev: sqlite3.Row,
+                        reason: str) -> None:
+        """Retract THIS event's outstanding nudge by its recorded id. Only one
+        nudge per event is ever live (each nudge retracts the prior), so the
+        stored last_nudge_msg_id is exactly the message to pull — precise, and
+        immune to the cross-retract / LIKE-wildcard hazards of matching by
+        mention text. No synthetic [retracted #N] line: the point is clean
+        history, and EventHub broadcasts the retraction to open clients."""
+        msg_id = ev["last_nudge_msg_id"]
+        if not msg_id:
+            return
+        now = now_iso()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                "UPDATE messages SET retracted_at = ?, retracted_by = ?, "
+                "retraction_reason = ? "
+                "WHERE id = ? AND channel = ? AND member_id = ? "
+                "AND retracted_at IS NULL",
+                (now, self.AUTHOR_ID, f"auto-nudge retracted — {reason}",
+                 msg_id, self.channel, self.AUTHOR_ID),
+            )
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    def _resolve(self, db: sqlite3.Connection, event_id: int, resolution: str) -> None:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                "UPDATE stall_events SET resolved_at = ?, resolution = ? WHERE id = ?",
+                (now_iso(), resolution, event_id),
+            )
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
 
 
 # ───────── Local speech-to-text worker ─────────
@@ -6572,6 +6938,11 @@ def main() -> int:
     hub = EventHub(db_path, args.channel)
     hub.start()
 
+    # Stall-watchdog: auto-resume sessions whose turn died to a transient API
+    # error (see StallWatchdog). Mirrors the hub — own thread, own connection.
+    watchdog = StallWatchdog(db_path, args.channel)
+    watchdog.start()
+
     NthWebHandler.hub = hub
     NthWebHandler.channel = args.channel
     NthWebHandler.db_path = db_path
@@ -6599,6 +6970,7 @@ def main() -> int:
 
     def shutdown(_sig=None, _frm=None):
         hub.stop()
+        watchdog.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
@@ -6625,6 +6997,7 @@ def main() -> int:
         pass
     finally:
         hub.stop()
+        watchdog.stop()
 
     return 0
 
