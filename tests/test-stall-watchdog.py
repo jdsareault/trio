@@ -261,6 +261,101 @@ watchdog_tick(CH_I1)
 check("I: own-channel watchdog nudges it", event(eidI)["nudge_count"] == 1)
 
 
+# ── LOTC regression tests ─────────────────────────────────────────────────────
+
+# J: give-up waits the FINAL backoff interval, not ~5s (Sauron). A fully-nudged
+#    event whose last nudge just landed must NOT be written off immediately.
+clear_stalls()
+CH_J, agentJ = connect("AgentJ", channel="wd8", session_id="sid-j")
+set_last_seen(agentJ, CH_J, iso(-100000))
+# realistic: stalled ~5h ago (full backoff ~5.3h), nudge #6 landed 10s ago
+eidJ = insert_stall("sid-j", "overloaded", iso(-5 * 3600),
+                    nudge_count=len(web.StallWatchdog.BACKOFF), last_nudge_at=iso(-10))
+watchdog_tick(CH_J)
+check("J: fully-nudged but final interval not elapsed -> NOT gave_up yet",
+      event(eidJ)["resolved_at"] is None)
+
+# K: untrusted `error` cannot inject sigils (Aragorn). '!all' must not forge a
+#    bang broadcast, and the raw sigil chars must be stripped from the message.
+clear_stalls()
+CH_K, agentK = connect("AgentK", channel="wd9", session_id="sid-k")
+_h, humanK = connect("OpK", channel=CH_K, session_id="sid-k-h"); set_kind(humanK, CH_K, "human")
+set_last_seen(agentK, CH_K, iso(-600))
+insert_stall("sid-k", "!all", iso(-300))   # non-transient -> surface path
+watchdog_tick(CH_K)
+c = raw()
+try:
+    mk = c.execute("SELECT content, bangs FROM messages WHERE channel=? AND member_id=? "
+                   "ORDER BY id DESC LIMIT 1", (CH_K, web.StallWatchdog.AUTHOR_ID)).fetchone()
+finally:
+    c.close()
+check("K: injected '!all' error does not forge a bang broadcast",
+      mk is not None and (mk["bangs"] in ("", None)))
+check("K: sigil chars stripped from surfaced error text", mk is not None and "!all" not in mk["content"])
+check("unit: _safe strips @ # ! sigils", web.StallWatchdog._safe("!all @x #y ok") == "all x y ok")
+
+# L: concurrent same-member stalls don't cross-retract (Sauron + Uruk-Hai).
+#    Superseding one event's nudge must retract only ITS own message id.
+clear_stalls()
+CH_L, agentL = connect("AgentL", channel="wd10", session_id="sid-l")
+set_last_seen(agentL, CH_L, iso(-600))
+eL1 = insert_stall("sid-l", "overloaded", iso(-400))
+eL2 = insert_stall("sid-l", "overloaded", iso(-300))
+watchdog_tick(CH_L)   # both due -> both get their own nudge
+n1 = event(eL1)["last_nudge_msg_id"]; n2 = event(eL2)["last_nudge_msg_id"]
+check("L: concurrent stalls each get a distinct nudge",
+      n1 and n2 and n1 != n2)
+# make only eL1 due for its next nudge; eL2's nudge stays fresh
+c = raw()
+try:
+    c.execute("UPDATE stall_events SET last_nudge_at=? WHERE id=?", (iso(-100000), eL1))
+    c.execute("UPDATE stall_events SET last_nudge_at=? WHERE id=?", (iso(-1), eL2))
+finally:
+    c.close()
+watchdog_tick(CH_L)
+
+def _retracted(msg_id):
+    c = raw()
+    try:
+        r = c.execute("SELECT retracted_at FROM messages WHERE id=?", (msg_id,)).fetchone()
+    finally:
+        c.close()
+    return bool(r and r["retracted_at"])
+
+check("L: superseding eL1 retracts only its own prior nudge", _retracted(n1))
+check("L: eL2's live nudge is NOT cross-retracted", not _retracted(n2))
+
+# M: a sibling session's activity does NOT falsely resume the stalled one
+#    (Gandalf + Sauron — resume is scoped to the stalled fingerprint, not member).
+clear_stalls()
+CH_M, agentM = connect("AgentM", channel="wd11", session_id="sid-m-primary")
+c = raw()
+try:
+    # same member, a SECOND (sub-agent) session with its own fingerprint, active now
+    c.execute("INSERT INTO sessions (session_token, member_id, channel, role, pid, "
+              "fingerprint, connected_at, last_seen, last_read) "
+              "VALUES ('s_sib', ?, ?, 'read_only', 0, 'sid-m-sibling', ?, ?, 0)",
+              (agentM, CH_M, iso(-500), iso(0)))
+    # the stalled primary session's own last_seen stays old
+    c.execute("UPDATE sessions SET last_seen=? WHERE fingerprint='sid-m-primary'", (iso(-600),))
+finally:
+    c.close()
+eidM = insert_stall("sid-m-primary", "overloaded", iso(-300))
+watchdog_tick(CH_M)
+evM = event(eidM)
+check("M: sibling activity does not mark the stalled session resumed -> it nudges",
+      evM["resolved_at"] is None and evM["nudge_count"] == 1)
+
+# N: the reaper expires stuck-open events (Sauron #5) — a mapped event whose
+#    owning channel's dashboard never runs would otherwise linger open forever.
+clear_stalls()
+CH_N, agentN = connect("AgentN", channel="wd12", session_id="sid-n")
+stuck = insert_stall("sid-n", "overloaded", iso(-(web.StallWatchdog.EXPIRE_AFTER + 3600)))
+watchdog_tick("wd_other_n")  # a watchdog whose channel doesn't own this stall -> left open by _process
+check("N: stuck-open event past EXPIRE_AFTER is reaped as expired",
+      event(stuck)["resolution"] == "expired")
+
+
 shutil.rmtree(_tmp, ignore_errors=True)
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")
