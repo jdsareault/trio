@@ -354,6 +354,38 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
     """)
+    # Reverse lookup: the stall-watchdog resolves a StopFailure hook's
+    # session_id back to a member via sessions.fingerprint.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_fingerprint
+        ON sessions (fingerprint)
+    """)
+
+    # stall_events: a StopFailure hook records one row here when a Claude
+    # session's turn dies to an API error (overloaded/rate_limit/server_error/
+    # ...). The watchdog (in nth_web.py) picks up unresolved rows, maps
+    # session_id -> member via sessions.fingerprint, and nudges the stalled
+    # session back to life on a backoff schedule. Kept deliberately dumb: the
+    # hook only INSERTs (its output is ignored by Claude Code anyway); all
+    # policy — mapping, backoff, retract, give-up — lives in the watchdog.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stall_events (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            error              TEXT NOT NULL DEFAULT '',
+            cwd                TEXT NOT NULL DEFAULT '',
+            created_at         TEXT NOT NULL,
+            resolved_at        TEXT,
+            resolution         TEXT NOT NULL DEFAULT '',
+            nudge_count        INTEGER NOT NULL DEFAULT 0,
+            last_nudge_at      TEXT,
+            last_nudge_msg_id  INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_stall_events_open
+        ON stall_events (resolved_at, created_at)
+    """)
     conn.commit()
     return conn
 
