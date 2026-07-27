@@ -4420,10 +4420,16 @@ INDEX_HTML = r"""<!doctype html>
   }
   // Prepend "@name " to `text` unless it already mentions that member. Returns
   // the (possibly unchanged) text. Shared by auto-direct and ask-answer routing.
+  // The "already mentioned" test is a token-boundary match, not a raw substring:
+  // a substring check treats "@bobby" as already-mentioning "bob" and skips the
+  // prepend, so the real recipient never gets an @tag — and on the ask-answer
+  // path (which carries no mentions array) that means they're never woken. The
+  // trailing (?![\w-]) mirrors the server's word-boundary wake match.
   function directAt(text, member) {
     if (!member || !member.name) return text;
-    const atTag = '@' + member.name;
-    return text.toLowerCase().includes(atTag.toLowerCase()) ? text : atTag + ' ' + text;
+    const esc = member.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const already = new RegExp('@' + esc + '(?![\\w-])', 'i').test(text);
+    return already ? text : '@' + member.name + ' ' + text;
   }
   function targetStorageKey() {
     return 'trio_targets_' + (state.channel || '_');
@@ -5027,8 +5033,8 @@ INDEX_HTML = r"""<!doctype html>
       if (sole) {
         const m = state.members.get(sole);
         if (m) parts.push(`→ <span class="tgt">@${escapeHtml(m.name)}</span>`);
-      } else if (targetableMembers().length >= 2 && !/(^|\s)!all(\b|$)/.test(txtL)) {
-        parts.push('<span style="color:var(--dim)">broadcast — no recipient</span>');
+      } else if (targetableMembers().length >= 2 && !/(^|\s)[@!]all(\b|$)/.test(txtL)) {
+        parts.push('<span style="color:#e0a94a">⚠ broadcast — no recipient</span>');
       }
     }
     if (pings.length) {
@@ -5485,19 +5491,21 @@ INDEX_HTML = r"""<!doctype html>
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
     // Multi-agent broadcast nudge: with 2+ agents in the room and no recipient
-    // chosen (no target selected, no typed @mention, not an intentional !all),
-    // an undirected message won't wake agents on about/at filters — it's the
-    // weak default the operator rarely wants. Confirm once per session before
-    // broadcasting; broadcast stays possible, just no longer silent-by-accident.
+    // chosen (no target selected, no typed @mention, not an intentional
+    // @all/!all), an undirected message won't wake agents on about/at filters —
+    // it's the weak default the operator rarely wants. Confirm before sending.
+    // The prompt fires every time (no once-per-session ack, which would train
+    // dismissal and then stop protecting); to broadcast on purpose, address
+    // @all/!all and the prompt steps aside.
     if (!state.dmTargetId && state.selectedTargets.size === 0 &&
-        resolved.length === 0 && !/(^|\s)!all(\b|$)/i.test(text) &&
-        !soleAgentId() && targetableMembers().length >= 2 && !state.broadcastAck) {
+        resolved.length === 0 && !/(^|\s)[@!]all(\b|$)/i.test(text) &&
+        targetableMembers().length >= 2) {
       const ok = confirm(
         'No recipient selected — broadcast to everyone in the channel?\n\n' +
         'Undirected messages don’t wake agents listening only for @mentions. ' +
-        'Pick a "send to" target or @mention someone to direct this instead.');
+        'Pick a "send to" target or @mention someone to direct this instead ' +
+        '(or address @all to broadcast on purpose).');
       if (!ok) { sendBtn.disabled = false; input.focus(); return; }
-      state.broadcastAck = true;   // don't nag again this session
     }
     // DM mode: always include the DM target so the agent sees the message
     // (even if the operator forgot the @mention). Also prepend the visible
