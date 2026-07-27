@@ -607,6 +607,10 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
         ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
         ("messages", "reply_to",  "INTEGER"),
+        ("messages", "retracted_at", "TEXT"),
+        ("messages", "retracted_by", "TEXT"),
+        ("messages", "retraction_reason", "TEXT"),
+        ("messages", "edited_at",  "TEXT"),
     ):
         try:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -682,6 +686,9 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
         "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
         "reply_to": (r["reply_to"] if "reply_to" in keys else None),
+        "retracted_at": (r["retracted_at"] if "retracted_at" in keys else None),
+        "retraction_reason": (r["retraction_reason"] if "retraction_reason" in keys else None),
+        "edited_at": (r["edited_at"] if "edited_at" in keys else None),
         "created_at": r["created_at"],
         "attachments": attachments_for_message(db, r["id"]),
     }
@@ -731,7 +738,7 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "choices, selection, reply_to, created_at "
+                "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -861,18 +868,40 @@ class EventHub:
                 self.last_msg_id = int(row[0] or 0)
             except sqlite3.Error:
                 self.last_msg_id = 0
+            # Boundary for detecting edits/retracts of ALREADY-broadcast
+            # messages; anything changed before startup isn't re-announced.
+            self._change_scan = now_iso()
 
             while not self._stop.is_set():
                 try:
+                    prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, created_at "
+                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
                         self._broadcast(_message_event(db, r))
                         self.last_msg_id = r["id"]
+
+                    # Edits/retractions to messages already sent (id <= prev_last)
+                    # are pushed as `message_update` so open clients re-render them
+                    # in place rather than only on reload.
+                    scan_now = now_iso()
+                    changed = db.execute(
+                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "FROM messages WHERE channel = ? AND id <= ? AND "
+                        "((retracted_at IS NOT NULL AND retracted_at > ?) OR "
+                        " (edited_at IS NOT NULL AND edited_at > ?)) ORDER BY id",
+                        (self.channel, prev_last, self._change_scan, self._change_scan),
+                    ).fetchall()
+                    for r in changed:
+                        ev = _message_event(db, r)
+                        ev["type"] = "message_update"
+                        self._broadcast(ev)
+                    self._change_scan = scan_now
 
                     members = self._fetch_roster(db)
                     snapshot = json.dumps(members, sort_keys=True)
@@ -1185,6 +1214,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_transcribe()
         elif parsed.path == "/api/cull":
             self._handle_cull()
+        elif parsed.path == "/api/edit":
+            self._handle_edit()
+        elif parsed.path == "/api/delete":
+            self._handle_delete()
         else:
             self._error(404, "not found")
 
@@ -1658,6 +1691,152 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
+
+    def _edit_target(self, db, mid, ident):
+        """Load an operator-editable message row, or (None, error). The caller
+        must be its author (member_id == op_id) and it must not be retracted."""
+        op_id, op_name = ensure_operator_row(db, self.channel, ident)
+        row = db.execute(
+            "SELECT member_id, retracted_at FROM messages WHERE id = ? AND channel = ?",
+            (mid, self.channel),
+        ).fetchone()
+        if not row:
+            return None, (op_id, op_name), "message not found"
+        if row["member_id"] != op_id:
+            return None, (op_id, op_name), "you can only change your own messages"
+        if row["retracted_at"]:
+            return None, (op_id, op_name), "message is already deleted"
+        return row, (op_id, op_name), None
+
+    def _handle_edit(self) -> None:
+        """Edit the text of a message the operator authored (sets edited_at and
+        re-parses @/#/! sigils so targeting stays correct)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        mid = body.get("message_id")
+        content = body.get("content")
+        if not (type(mid) is int and mid > 0):
+            self._error(400, "invalid message_id")
+            return
+        if not isinstance(content, str) or not content.strip():
+            self._error(400, "empty content")
+            return
+        content = content.strip()
+        if len(content) > 4000:
+            self._error(400, "content too long (max 4000 chars)")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row, _op, err = self._edit_target(db, mid, ident)
+                if err:
+                    db.execute("ROLLBACK")
+                    code = (404 if err == "message not found"
+                            else 403 if "your own" in err else 400)
+                    self._error(code, err)
+                    return
+                m_ids, r_ids, b_ids = _parse_sigils_against_roster(db, self.channel, content)
+                db.execute(
+                    "UPDATE messages SET content = ?, mentions = ?, refs = ?, bangs = ?, "
+                    "edited_at = ? WHERE id = ? AND channel = ?",
+                    (content,
+                     json.dumps(m_ids) if m_ids else "",
+                     json.dumps(r_ids) if r_ids else "",
+                     json.dumps(b_ids) if b_ids else "",
+                     now_iso(), mid, self.channel),
+                )
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": mid})
+
+    def _handle_delete(self) -> None:
+        """Delete (retract) a message the operator authored — marks it retracted
+        in place and posts a synthetic [retracted #N] line, matching trio_cull's
+        retract behavior so agents polling over MCP see it too."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        mid = body.get("message_id")
+        if not (type(mid) is int and mid > 0):
+            self._error(400, "invalid message_id")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row, op, err = self._edit_target(db, mid, ident)
+                if err:
+                    db.execute("ROLLBACK")
+                    code = (404 if err == "message not found"
+                            else 403 if "your own" in err else 400)
+                    self._error(code, err)
+                    return
+                op_id, op_name = op
+                now = now_iso()
+                reason = "deleted by the author"
+                db.execute(
+                    "UPDATE messages SET retracted_at = ?, retracted_by = ?, "
+                    "retraction_reason = ? WHERE id = ? AND channel = ?",
+                    (now, op_id, reason, mid, self.channel),
+                )
+                db.execute(
+                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (self.channel, op_id, op_name, f"[retracted #{mid}] {reason}", now),
+                )
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": mid})
 
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
@@ -2183,6 +2362,27 @@ INDEX_HTML = r"""<!doctype html>
   /* Watermark pins — animal emoji parked at the highest message a given
      member has read. One pin per member, migrates forward as they ack. */
   .msg { position: relative; }
+  /* Own-message edit/delete controls (hover-revealed) + retracted/edited state */
+  .msg-actions { position: absolute; top: 3px; right: 8px; display: none; gap: 4px; z-index: 2; }
+  .msg:hover .msg-actions { display: flex; }
+  .msg-act { font-size: 10px; padding: 1px 7px; border-radius: 3px; cursor: pointer;
+             background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
+             font-family: inherit; }
+  .msg-act:hover { color: var(--fg); border-color: var(--accent); }
+  .msg.retracted .body { opacity: 0.55; font-style: italic; }
+  .edited-mark { color: var(--dim); font-size: 10px; font-style: italic; }
+  .msg-editor { margin-top: 4px; }
+  .msg-edit-input { width: 100%; box-sizing: border-box; min-height: 48px; padding: 6px 8px;
+                    border: 1px solid var(--accent); border-radius: 4px; background: var(--bg);
+                    color: var(--fg); font-family: inherit; font-size: 13px; resize: vertical; }
+  .msg-edit-input:focus { outline: none; }
+  .msg-edit-bar { display: flex; gap: 6px; margin-top: 4px; }
+  .msg-edit-save { padding: 4px 12px; border: 1px solid var(--accent); border-radius: 4px;
+                   background: var(--accent); color: var(--bg); font: inherit; font-weight: 600;
+                   cursor: pointer; }
+  .msg-edit-save:disabled { opacity: 0.5; cursor: not-allowed; }
+  .msg-edit-cancel { padding: 4px 12px; border: 1px solid var(--border); border-radius: 4px;
+                     background: none; color: var(--dim); font: inherit; cursor: pointer; }
   .watermark-pins { position: absolute; right: 6px; bottom: 2px;
                     display: flex; gap: 3px; pointer-events: none;
                     opacity: 0.9; }
@@ -3809,6 +4009,147 @@ INDEX_HTML = r"""<!doctype html>
     }, 250);
   }
 
+  // Paint a message's body (content / retracted / edited). Shared by first
+  // render and in-place updates so both look identical.
+  function paintBody(div, body, m) {
+    div.classList.toggle('retracted', !!m.retracted_at);
+    if (m.retracted_at) {
+      body.classList.add('plain');
+      const reason = (m.retraction_reason || '').trim();
+      body.textContent = '[deleted' + (reason ? ' — ' + reason : '') + ']';
+      return;
+    }
+    if (isSystemContent(m.content || '')) {
+      body.classList.add('plain');
+      body.textContent = humanizeIdSigils(m.content || '');
+    } else {
+      body.classList.remove('plain');
+      body.innerHTML = renderMarkdown(m.content || '');
+      decorateInlineMentions(body, m.mentions || []);
+    }
+    if (m.edited_at) {
+      const tag = document.createElement('span');
+      tag.className = 'edited-mark';
+      tag.textContent = ' (edited)';
+      tag.title = 'edited ' + formatTime(m.edited_at);
+      body.appendChild(tag);
+    }
+  }
+
+  // Rebuild a message's @/#/! target bars from its current arrays (edits can
+  // add/remove sigils; a delete clears them). Inserted above .body, in the same
+  // bang→mention→ref order appendMessage uses.
+  function applyTargetBars(div, m) {
+    div.querySelectorAll(':scope > .bangs-bar, :scope > .mentions-bar, :scope > .refs-bar')
+      .forEach(b => b.remove());
+    if (m.retracted_at) return;
+    const anchor = div.querySelector('.body');
+    const bars = [];
+    if (m.bangs && m.bangs.length) bars.push(renderTargetBar(m.bangs, 'bangs-bar', '!', 'BANG'));
+    if (m.mentions && m.mentions.length) bars.push(renderTargetBar(m.mentions, 'mentions-bar', '@', '→'));
+    if (m.refs && m.refs.length) bars.push(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
+    for (const bar of bars) { if (anchor) div.insertBefore(bar, anchor); else div.appendChild(bar); }
+  }
+
+  // Apply an SSE message_update (edit/retract of an already-rendered message).
+  function updateMessageDom(m) {
+    const div = state.messageDomById.get(m.id);
+    if (!div) return;                       // not in the loaded window
+    const prev = state.messages.get(m.id) || {};
+    // Preserve fields the update payload also carries; keep the cache current.
+    state.messages.set(m.id, Object.assign({}, prev, m));
+    if (!div.classList.contains('editing')) {
+      const body = div.querySelector('.body');
+      if (body) paintBody(div, body, m);
+      applyTargetBars(div, m);   // sigils may have changed / cleared on delete
+    }
+    // A retracted message is no longer editable — drop its author controls.
+    if (m.retracted_at) {
+      const acts = div.querySelector('.msg-actions');
+      if (acts) acts.remove();
+    }
+  }
+
+  // Edit / delete controls for the operator's own messages (hover-revealed).
+  function addOwnMsgActions(div, m) {
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    const edit = document.createElement('button');
+    edit.className = 'msg-act'; edit.textContent = 'edit'; edit.title = 'edit this message';
+    edit.addEventListener('click', (e) => { e.stopPropagation(); startEditMessage(div, m); });
+    const del = document.createElement('button');
+    del.className = 'msg-act'; del.textContent = 'delete'; del.title = 'delete this message';
+    del.addEventListener('click', (e) => { e.stopPropagation(); deleteOwnMessage(m); });
+    actions.appendChild(edit);
+    actions.appendChild(del);
+    div.appendChild(actions);
+  }
+  async function deleteOwnMessage(m) {
+    if (!confirm('Delete this message? It will show as "[deleted]" to everyone.')) return;
+    try {
+      const r = await fetch('/api/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_id: m.id }),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert('delete failed: ' + (e.error || r.status)); }
+      // success → SSE message_update repaints it as [deleted]
+    } catch (e) { alert('delete failed: ' + e.message); }
+  }
+  function startEditMessage(div, m) {
+    const body = div.querySelector('.body');
+    if (!body || div.classList.contains('editing')) return;
+    div.classList.add('editing');
+    const editor = document.createElement('div');
+    editor.className = 'msg-editor';
+    editor.addEventListener('click', (e) => e.stopPropagation());
+    const ta = document.createElement('textarea');
+    ta.className = 'msg-edit-input';
+    ta.value = ((state.messages.get(m.id) || m).content) || '';
+    ta.maxLength = 4000;
+    const bar = document.createElement('div');
+    bar.className = 'msg-edit-bar';
+    const save = document.createElement('button');
+    save.className = 'msg-edit-save'; save.textContent = 'Save';
+    const cancel = document.createElement('button');
+    cancel.className = 'msg-edit-cancel'; cancel.textContent = 'Cancel';
+    bar.appendChild(save); bar.appendChild(cancel);
+    editor.appendChild(ta); editor.appendChild(bar);
+    body.style.display = 'none';
+    body.after(editor);
+    ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+    function close() {
+      editor.remove(); body.style.display = ''; div.classList.remove('editing');
+      // Repaint from the latest cache — an edit/retract may have arrived over
+      // SSE while the editor was open (updateMessageDom updates the cache but
+      // skips painting during .editing).
+      const latest = state.messages.get(m.id);
+      if (latest) { paintBody(div, body, latest); applyTargetBars(div, latest); }
+    }
+    cancel.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save.click(); }
+    });
+    save.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const content = ta.value.trim();
+      if (!content) { alert('empty — use delete instead'); return; }
+      save.disabled = true;
+      try {
+        const r = await fetch('/api/edit', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message_id: m.id, content }),
+        });
+        if (!r.ok) {
+          const er = await r.json().catch(() => ({}));
+          alert('edit failed: ' + (er.error || r.status));
+          save.disabled = false; return;
+        }
+        close();   // SSE message_update repaints with the new content + (edited)
+      } catch (err) { alert('edit failed: ' + err.message); save.disabled = false; }
+    });
+  }
+
   function appendMessage(m) {
     if (state.seenMsgIds.has(m.id)) return;
     state.seenMsgIds.add(m.id);
@@ -3880,14 +4221,14 @@ INDEX_HTML = r"""<!doctype html>
     } else {
       const body = document.createElement('div');
       body.className = 'body';
-      if (isSystem) {
-        body.classList.add('plain');
-        body.textContent = humanizeIdSigils(m.content || '');
-      } else {
-        body.innerHTML = renderMarkdown(m.content || '');
-        decorateInlineMentions(body, m.mentions || []);
-      }
       div.appendChild(body);
+      paintBody(div, body, m);
+    }
+
+    // Edit/delete controls for your own (non-system, non-ask, non-deleted)
+    // messages — revealed on hover.
+    if (isMine && !isSystem && !isAsk && !m.retracted_at) {
+      addOwnMsgActions(div, m);
     }
 
     // Image attachments — inline thumbnails, click opens full size in a new tab.
@@ -4022,18 +4363,9 @@ INDEX_HTML = r"""<!doctype html>
       }
       // Re-humanize id-sigils in the body: a rename changes the display
       // form, and any unknown ids that have since joined the roster
-      // should now resolve.
+      // should now resolve. paintBody preserves retracted/edited rendering.
       const body = dom.querySelector('.body');
-      if (body) {
-        if (isSystemContent(m.content || '')) {
-          body.classList.add('plain');
-          body.textContent = humanizeIdSigils(m.content || '');
-        } else {
-          body.classList.remove('plain');
-          body.innerHTML = renderMarkdown(m.content || '');
-          decorateInlineMentions(body, m.mentions || []);
-        }
-      }
+      if (body && !dom.classList.contains('editing')) paintBody(dom, body, m);
       function rebuildBar(bar, ids, sigil) {
         if (!bar || !ids || !ids.length) return;
         while (bar.childNodes.length > 1) bar.removeChild(bar.lastChild);
@@ -5925,6 +6257,7 @@ INDEX_HTML = r"""<!doctype html>
       try {
         const payload = JSON.parse(ev.data);
         if (payload.type === 'message') appendMessage(payload);
+        else if (payload.type === 'message_update') updateMessageDom(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
       } catch (e) { console.error('bad event', e); }
     };

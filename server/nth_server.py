@@ -321,6 +321,8 @@ def get_db() -> sqlite3.Connection:
         ("retracted_by", "messages", "TEXT"),
         ("retraction_reason", "messages", "TEXT"),
         ("reply_to", "messages", "INTEGER"),
+        # fork: timestamp of the last author edit (web dashboard edit feature).
+        ("edited_at", "messages", "TEXT"),
         # v6: task lease with session heartbeat
         ("claimed_by_session", "tasks", "TEXT"),
         ("lease_expires_at", "tasks", "TEXT"),
