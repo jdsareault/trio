@@ -98,6 +98,10 @@ try:
         # edit guards
         st, _ = http(port, "/api/edit", {"message_id": own, "content": ""})
         check("edit: empty rejected", st == 400)
+        # non-string content must be a clean 400, not an AttributeError crash
+        for bad in (123, [1], True, {"a": 1}):
+            st, _ = http(port, "/api/edit", {"message_id": own, "content": bad})
+            check(f"edit: non-string content {bad!r} -> 400", st == 400)
         st, _ = http(port, "/api/edit", {"message_id": agent_msg, "content": "hijack"})
         check("edit: agent's message rejected", st == 403)
         check("edit: agent message untouched", row(agent_msg)["content"] == "agent message")

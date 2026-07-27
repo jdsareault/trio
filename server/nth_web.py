@@ -1692,10 +1692,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
 
-    def _edit_target(self, db, mid):
+    def _edit_target(self, db, mid, ident):
         """Load an operator-editable message row, or (None, error). The caller
         must be its author (member_id == op_id) and it must not be retracted."""
-        op_id, op_name = ensure_operator_row(db, self.channel, self._pending_ident)
+        op_id, op_name = ensure_operator_row(db, self.channel, ident)
         row = db.execute(
             "SELECT member_id, retracted_at FROM messages WHERE id = ? AND channel = ?",
             (mid, self.channel),
@@ -1718,13 +1718,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "invalid body")
             return
         mid = body.get("message_id")
-        content = (body.get("content") or "").strip()
+        content = body.get("content")
         if not (type(mid) is int and mid > 0):
             self._error(400, "invalid message_id")
             return
-        if not content:
+        if not isinstance(content, str) or not content.strip():
             self._error(400, "empty content")
             return
+        content = content.strip()
         if len(content) > 4000:
             self._error(400, "content too long (max 4000 chars)")
             return
@@ -1732,7 +1733,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
-        self._pending_ident = ident
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
@@ -1740,7 +1740,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                row, _op, err = self._edit_target(db, mid)
+                row, _op, err = self._edit_target(db, mid, ident)
                 if err:
                     db.execute("ROLLBACK")
                     code = (404 if err == "message not found"
@@ -1793,7 +1793,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
-        self._pending_ident = ident
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
@@ -1801,7 +1800,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                row, op, err = self._edit_target(db, mid)
+                row, op, err = self._edit_target(db, mid, ident)
                 if err:
                     db.execute("ROLLBACK")
                     code = (404 if err == "message not found"
@@ -4037,6 +4036,21 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Rebuild a message's @/#/! target bars from its current arrays (edits can
+  // add/remove sigils; a delete clears them). Inserted above .body, in the same
+  // bang→mention→ref order appendMessage uses.
+  function applyTargetBars(div, m) {
+    div.querySelectorAll(':scope > .bangs-bar, :scope > .mentions-bar, :scope > .refs-bar')
+      .forEach(b => b.remove());
+    if (m.retracted_at) return;
+    const anchor = div.querySelector('.body');
+    const bars = [];
+    if (m.bangs && m.bangs.length) bars.push(renderTargetBar(m.bangs, 'bangs-bar', '!', 'BANG'));
+    if (m.mentions && m.mentions.length) bars.push(renderTargetBar(m.mentions, 'mentions-bar', '@', '→'));
+    if (m.refs && m.refs.length) bars.push(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
+    for (const bar of bars) { if (anchor) div.insertBefore(bar, anchor); else div.appendChild(bar); }
+  }
+
   // Apply an SSE message_update (edit/retract of an already-rendered message).
   function updateMessageDom(m) {
     const div = state.messageDomById.get(m.id);
@@ -4044,8 +4058,11 @@ INDEX_HTML = r"""<!doctype html>
     const prev = state.messages.get(m.id) || {};
     // Preserve fields the update payload also carries; keep the cache current.
     state.messages.set(m.id, Object.assign({}, prev, m));
-    const body = div.querySelector('.body');
-    if (body && !div.classList.contains('editing')) paintBody(div, body, m);
+    if (!div.classList.contains('editing')) {
+      const body = div.querySelector('.body');
+      if (body) paintBody(div, body, m);
+      applyTargetBars(div, m);   // sigils may have changed / cleared on delete
+    }
     // A retracted message is no longer editable — drop its author controls.
     if (m.retracted_at) {
       const acts = div.querySelector('.msg-actions');
@@ -4100,7 +4117,14 @@ INDEX_HTML = r"""<!doctype html>
     body.style.display = 'none';
     body.after(editor);
     ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
-    function close() { editor.remove(); body.style.display = ''; div.classList.remove('editing'); }
+    function close() {
+      editor.remove(); body.style.display = ''; div.classList.remove('editing');
+      // Repaint from the latest cache — an edit/retract may have arrived over
+      // SSE while the editor was open (updateMessageDom updates the cache but
+      // skips painting during .editing).
+      const latest = state.messages.get(m.id);
+      if (latest) { paintBody(div, body, latest); applyTargetBars(div, latest); }
+    }
     cancel.addEventListener('click', (e) => { e.stopPropagation(); close(); });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { e.preventDefault(); close(); }
