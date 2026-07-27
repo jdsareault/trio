@@ -233,6 +233,18 @@ check('directAt prepends @name when absent', () => {
 });
 check('directAt is a no-op when the mention is already present (case-insensitive)', () => {
   assert.strictEqual(H.directAt('yo @Alice ship it', { name: 'alice' }), 'yo @Alice ship it');
+  assert.strictEqual(H.directAt('done @bob.', { name: 'bob' }), 'done @bob.');
+});
+check('directAt uses a token boundary, not substring — @bobby is NOT bob', () => {
+  // The bug the fix closes: a substring check would treat "@bobby" as already
+  // mentioning "bob" and skip the prepend, so bob is never woken.
+  assert.strictEqual(H.directAt('see @bobby later', { name: 'bob' }), '@bob see @bobby later');
+  assert.strictEqual(H.directAt('@alice hi', { name: 'al' }), '@al @alice hi');
+  assert.strictEqual(H.directAt('@bob-guest here', { name: 'bob' }), '@bob @bob-guest here');
+});
+check('directAt escapes regex metacharacters in the name', () => {
+  // A name with a "." must not be treated as a regex wildcard.
+  assert.strictEqual(H.directAt('hi @axb', { name: 'a.b' }), '@a.b hi @axb');
 });
 check('directAt tolerates a missing/nameless member', () => {
   assert.strictEqual(H.directAt('ship it', null), 'ship it');
