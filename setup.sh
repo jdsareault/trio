@@ -141,6 +141,7 @@ cp "$SCRIPT_DIR/server/nth_ask_client.js" "$SERVER_DIR/nth_ask_client.js"
 cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+cp "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
@@ -278,6 +279,45 @@ with open(settings_path, 'w') as f:
     f.write('\n')
 
 print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries removed')
+"
+
+# ---------- 7b. Register the stall-watchdog StopFailure hook ----------
+# Auto-resume sessions whose turn dies to a transient API error: this hook
+# records the stall, and nth_web.py's watchdog nudges the session back to life.
+# Idempotent — re-running setup.sh never duplicates the entry.
+HOOK_SCRIPT="$SERVER_DIR/nth_stall_hook.py"
+HOOK_NATIVE="$HOOK_SCRIPT"
+if [ "$PLATFORM" = "windows" ]; then
+    if command -v cygpath &>/dev/null; then
+        HOOK_NATIVE=$(cygpath -w "$HOOK_SCRIPT")
+    else
+        HOOK_NATIVE=$(echo "$HOOK_SCRIPT" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
+    fi
+fi
+
+"$PYTHON_CMD" -c "
+import json, os
+settings_path = r'$SETTINGS_JSON'
+py = r'$PYTHON_CMD'
+hook = r'$HOOK_NATIVE'
+cmd = f'{py} \"{hook}\"'
+
+settings = {}
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+
+hooks = settings.setdefault('hooks', {})
+sf = hooks.setdefault('StopFailure', [])
+if any('nth_stall_hook.py' in json.dumps(e) for e in sf):
+    print('StopFailure hook: already registered')
+else:
+    sf.append({'matcher': 'overloaded|rate_limit|server_error|unknown',
+               'hooks': [{'type': 'command', 'command': cmd}]})
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+        f.write('\n')
+    print('StopFailure hook: registered (stall-watchdog auto-resume)')
 "
 
 # ---------- 8. Verify ----------
