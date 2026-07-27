@@ -511,6 +511,63 @@ def _seconds_since(iso_timestamp: str) -> float:
         return float("inf")
 
 
+def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
+    """Remove dead same-name agent "ghosts" before a session joins under `name`.
+
+    The protocol tells a session that lost its token to reconnect — which mints a
+    fresh member_id and, without this, leaves the old row behind. Reconnecting
+    repeatedly piles up duplicate rows with the same name (which also makes
+    @Name wake every copy). We clear out the dead ones on the next join.
+
+    A member is a ghost only if it has NO live session: a session that is
+    non-revoked AND whose own `sessions.last_seen` is fresh. That timestamp is
+    bumped only by the session's own tool calls — `members.last_seen` is bumped
+    by the monitor even while the session is frozen, so it cannot be trusted for
+    liveness here. Genuinely-live same-name members are left untouched, and only
+    agents are ever pruned (never humans / operators).
+
+    Mirrors nth_cull's cleanup (release tasks, drop locks, revoke sessions,
+    delete row, post a system line). Returns the pruned member ids.
+    """
+    if not name:
+        return []
+    rows = db.execute(
+        "SELECT id, name FROM members WHERE channel = ? AND name = ? "
+        "AND COALESCE(kind, 'agent') = 'agent'",
+        (channel, name),
+    ).fetchall()
+    pruned = []
+    for r in rows:
+        gid = r["id"]
+        live = db.execute(
+            "SELECT MAX(last_seen) AS ls FROM sessions "
+            "WHERE channel = ? AND member_id = ? AND revoked_at IS NULL",
+            (channel, gid),
+        ).fetchone()
+        if live and _is_member_active(live["ls"]):
+            continue  # a real, live same-name member — leave it be
+        db.execute(
+            "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+            "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+            (now, channel, gid),
+        )
+        db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, gid))
+        db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (gid, channel))
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, channel, gid),
+        )
+        db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel, gid, r["name"],
+             f"[superseded] {r['name']} ({gid}) — stale duplicate cleared on reconnect", now),
+        )
+        pruned.append(gid)
+    return pruned
+
+
 def _mint_session_token(db, member_id: str, channel: str,
                         role: str = "primary", fingerprint: str = "",
                         pid: int | None = None) -> str:
@@ -633,6 +690,11 @@ def nth_connect(
         if existing:
             if existing["status"] == "ended":
                 return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+            # Clear out dead same-name ghosts from prior reconnects before this
+            # member joins, so duplicates don't accumulate (and pruning frees
+            # slots before the capacity check below).
+            _prune_name_ghosts(db, channel, name, now)
 
             # Check member count (all members who ever joined)
             count = db.execute(
