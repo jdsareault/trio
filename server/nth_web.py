@@ -572,6 +572,13 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
     )
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
+    # Revoke their sessions so a lingering token can't be reused if the same
+    # member_id ever re-joins (defence-in-depth; also stops row build-up).
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+        "AND revoked_at IS NULL",
+        (now, channel, target_id),
+    )
 
     released_ids = [r["id"] for r in released]
     msg = f"[culled] {target_name} ({target_id}) removed from channel"
@@ -2990,11 +2997,21 @@ INDEX_HTML = r"""<!doctype html>
     return Math.floor(s / 86400) + 'd';
   }
 
-  const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
-                           '[retracted ', '[joined ', '[left ', '[ended ',
-                           '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed ', '[culled] '];
-  function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
+  // System events are bracket-tagged. They come in two shapes — "[word] …"
+  // (joined/left/ended/locked/unlocked/pinned/renamed/objective/culled) and
+  // "[word #id] …" (claimed/done/cancelled/released/retracted/status) — so match
+  // the leading token (up to a space OR the closing bracket) against a word set.
+  // (The old prefix list assumed a trailing space and silently missed every
+  // "[word]" event, rendering them as markdown instead of muted system lines.)
+  const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
+    'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
+    'pinned', 'renamed', 'culled', 'objective']);
+  function isSystemContent(s) {
+    // "[word " (the #id family) OR "[word]" followed by a space/end. Requiring
+    // space-or-end after the "]" avoids muting a markdown link like [done](url).
+    const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
+    return !!m && SYSTEM_WORDS.has(m[1]);
+  }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
