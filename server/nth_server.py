@@ -511,6 +511,36 @@ def _seconds_since(iso_timestamp: str) -> float:
         return float("inf")
 
 
+def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
+    """Tear down a member: release its claimed tasks, drop its locks, delete the
+    row, and revoke its sessions. Shared by nth_cull and _prune_name_ghosts so
+    the teardown lives in exactly one place. Returns (released_task_ids,
+    released_lock_names); the caller posts its own system line and commits.
+    """
+    released_tasks = db.execute(
+        "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (channel, member_id),
+    ).fetchall()
+    if released_tasks:
+        db.execute(
+            "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+            "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+            (now, channel, member_id),
+        )
+    released_locks = db.execute(
+        "SELECT resource FROM locks WHERE channel = ? AND held_by = ?",
+        (channel, member_id),
+    ).fetchall()
+    db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, member_id))
+    db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (member_id, channel))
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+        "AND revoked_at IS NULL",
+        (now, channel, member_id),
+    )
+    return [t["id"] for t in released_tasks], [lk["resource"] for lk in released_locks]
+
+
 def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
     """Remove dead same-name agent "ghosts" before a session joins under `name`.
 
@@ -519,45 +549,37 @@ def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
     repeatedly piles up duplicate rows with the same name (which also makes
     @Name wake every copy). We clear out the dead ones on the next join.
 
-    A member is a ghost only if it has NO live session: a session that is
-    non-revoked AND whose own `sessions.last_seen` is fresh. That timestamp is
-    bumped only by the session's own tool calls — `members.last_seen` is bumped
-    by the monitor even while the session is frozen, so it cannot be trusted for
-    liveness here. Genuinely-live same-name members are left untouched, and only
-    agents are ever pruned (never humans / operators).
+    Liveness keys on the member's own `members.last_seen`, which its Monitor
+    heartbeat refreshes (~every 10s) for as long as the agent's *process* is
+    alive — including while it sits idle OR is stalled-but-revivable — and which
+    is set to `now` the instant a member row is inserted. So only a process gone
+    longer than STALE_THRESHOLD is a ghost. This deliberately uses the OPPOSITE
+    signal from the stall-watchdog: the watchdog needs `sessions.last_seen` to
+    tell "working" from "frozen", whereas here we want to *spare* a
+    frozen-but-alive agent, so the Monitor heartbeat is the right gate. It also
+    closes a race — a member that just joined but hasn't minted its session yet
+    still has a fresh `members.last_seen`, so a concurrent same-name connect
+    won't mistake the newcomer for a ghost and delete it.
 
-    Mirrors nth_cull's cleanup (release tasks, drop locks, revoke sessions,
-    delete row, post a system line). Returns the pruned member ids.
+    Name matching is case- and whitespace-insensitive so `Dev` / `dev` / `Dev `
+    are one identity (matching the sigil resolver's wake key). Only agents are
+    pruned, never humans / operators.
+
+    Returns the pruned member ids.
     """
-    if not name:
+    if not name or not name.strip():
         return []
     rows = db.execute(
-        "SELECT id, name FROM members WHERE channel = ? AND name = ? "
-        "AND COALESCE(kind, 'agent') = 'agent'",
+        "SELECT id, name, last_seen FROM members WHERE channel = ? "
+        "AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND COALESCE(kind, 'agent') = 'agent'",
         (channel, name),
     ).fetchall()
     pruned = []
     for r in rows:
+        if _is_member_active(r["last_seen"]):
+            continue  # process still alive (active, idle, or stalled) — not a ghost
         gid = r["id"]
-        live = db.execute(
-            "SELECT MAX(last_seen) AS ls FROM sessions "
-            "WHERE channel = ? AND member_id = ? AND revoked_at IS NULL",
-            (channel, gid),
-        ).fetchone()
-        if live and _is_member_active(live["ls"]):
-            continue  # a real, live same-name member — leave it be
-        db.execute(
-            "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
-            "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
-            (now, channel, gid),
-        )
-        db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, gid))
-        db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (gid, channel))
-        db.execute(
-            "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-            "AND revoked_at IS NULL",
-            (now, channel, gid),
-        )
+        _purge_member(db, channel, gid, now)
         db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -3195,42 +3217,8 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
         target_name = target["name"]
         now = now_iso()
 
-        # Release any tasks claimed by the culled member
-        released_tasks = db.execute(
-            "SELECT id, description FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
-            (channel, target_member_id),
-        ).fetchall()
-        if released_tasks:
-            db.execute(
-                "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
-                "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
-                (now, channel, target_member_id),
-            )
-
-        # Release any locks held by the culled member
-        released_locks = db.execute(
-            "SELECT resource FROM locks WHERE channel = ? AND held_by = ?",
-            (channel, target_member_id),
-        ).fetchall()
-        db.execute(
-            "DELETE FROM locks WHERE channel = ? AND held_by = ?",
-            (channel, target_member_id),
-        )
-
-        db.execute(
-            "DELETE FROM members WHERE id = ? AND channel = ?",
-            (target_member_id, channel),
-        )
-        # Revoke their sessions so a lingering token can't be reused if the same
-        # member_id ever re-joins (defence-in-depth; also stops row build-up).
-        db.execute(
-            "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-            "AND revoked_at IS NULL",
-            (now, channel, target_member_id),
-        )
-
-        released_ids = [t["id"] for t in released_tasks]
-        released_lock_names = [lk["resource"] for lk in released_locks]
+        # Release tasks/locks, delete the row, revoke sessions (shared teardown).
+        released_ids, released_lock_names = _purge_member(db, channel, target_member_id, now)
         cull_msg = f"[culled] {target_name} ({target_member_id}) removed from channel"
         if released_ids:
             cull_msg += f" — released tasks: {', '.join(f'#{tid}' for tid in released_ids)}"

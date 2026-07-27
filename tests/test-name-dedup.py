@@ -43,6 +43,8 @@ def iso(delta=0):
 def connect(name, channel="", sid=None):
     if sid is not None:
         os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+    else:
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
     r = json.loads(srv.nth_connect(summary="t", name=name, channel=channel))
     return r["channel"], r["member_id"]
 
@@ -53,10 +55,13 @@ def raw():
     return c
 
 
-def make_stale(member_id, channel):
-    """Age out the member's session so it counts as a dead ghost."""
+def make_dead(member_id, channel):
+    """Simulate a fully-dead ghost: its Monitor heartbeat (members.last_seen) is
+    stale (process gone), its session is stale, and it joined a while ago."""
     c = raw()
     try:
+        c.execute("UPDATE members SET last_seen=?, joined_at=? WHERE channel=? AND id=?",
+                  (iso(-4000), iso(-5000), channel, member_id))
         c.execute("UPDATE sessions SET last_seen=? WHERE channel=? AND member_id=?",
                   (iso(-4000), channel, member_id))
     finally:
@@ -74,7 +79,7 @@ def members_named(channel, name):
 
 # ── 1: a stale same-name ghost is pruned on reconnect ────────────────────────
 CH, dev1 = connect("Dev", channel="dd1", sid="dev-sid-1")
-make_stale(dev1, CH)
+make_dead(dev1, CH)
 _c, dev2 = connect("Dev", channel=CH, sid="dev-sid-2")
 named = members_named(CH, "Dev")
 check("1: only one 'Dev' member remains after reconnect", named == [dev2])
@@ -105,7 +110,7 @@ CH3, wrk1 = connect("Worker", channel="dd3", sid="wrk-1")
 _c, boss = connect("Boss", channel=CH3, sid="boss-1")
 tid = json.loads(srv.nth_send(channel=CH3, member_id=boss, message="do it", task=True))["task_id"]
 json.loads(srv.nth_claim(channel=CH3, member_id=wrk1, task_id=tid))
-make_stale(wrk1, CH3)
+make_dead(wrk1, CH3)
 _c, wrk2 = connect("Worker", channel=CH3, sid="wrk-2")
 c = raw()
 try:
@@ -126,8 +131,8 @@ try:
     c.execute("UPDATE members SET kind='human' WHERE channel=? AND id=?", (CH4, humanSam))
 finally:
     c.close()
-make_stale(humanSam, CH4)
-make_stale(agentX, CH4)
+make_dead(humanSam, CH4)
+make_dead(agentX, CH4)
 _c, agentY = connect("Sam", channel=CH4, sid="sam-agent-2")
 named4 = set(members_named(CH4, "Sam"))
 check("4: the stale human 'Sam' is preserved (humans never pruned)", humanSam in named4)
@@ -135,21 +140,55 @@ check("4: the stale AGENT 'Sam' ghost was pruned", agentX not in named4)
 check("4: the new agent 'Sam' joined", agentY in named4)
 
 
-# ── 5: a legacy member with NO session row is treated as a ghost ─────────────
+# ── 5: a dead legacy member with NO session row is treated as a ghost ────────
 CH5, _seed = connect("Seeded", channel="dd5", sid="seed-1")
 c = raw()
 try:
-    # insert a bare member with no sessions row at all (pre-v6 style)
+    # bare member, no sessions row at all (pre-v6 style), heartbeat long stale
     c.execute("INSERT INTO members (id, channel, name, summary, skills, last_seen, last_read, "
               "joined_at, active) VALUES ('legacy1', ?, 'Legacy', '', '', ?, 0, ?, 1)",
-              (CH5, iso(-10), iso(-10)))
+              (CH5, iso(-4000), iso(-5000)))
 finally:
     c.close()
 _c, legacy_new = connect("Legacy", channel=CH5, sid="legacy-2")
-check("5: a session-less legacy same-name row is pruned as a ghost",
+check("5: a dead session-less legacy same-name row is pruned as a ghost",
       members_named(CH5, "Legacy") == [legacy_new])
 
 
+# ── 6: an idle-but-ALIVE agent (fresh Monitor heartbeat, stale session) is
+#      spared — the key regression for the concurrent-race / idle-eviction fix.
+CH6, idleA = connect("Idle", channel="dd6", sid="idle-a")
+c = raw()
+try:
+    # process alive (members.last_seen fresh via monitor), but idle >5min at the
+    # session level, and it joined long ago (so no "just-joined" grace masks it)
+    c.execute("UPDATE members SET last_seen=?, joined_at=? WHERE channel=? AND id=?",
+              (iso(-5), iso(-9999), CH6, idleA))
+    c.execute("UPDATE sessions SET last_seen=? WHERE channel=? AND member_id=?",
+              (iso(-4000), CH6, idleA))
+finally:
+    c.close()
+_c, idleB = connect("Idle", channel=CH6, sid="idle-b")
+named6 = set(members_named(CH6, "Idle"))
+check("6: idle-but-alive agent (fresh heartbeat) is NOT pruned", idleA in named6)
+check("6: the new same-name join still succeeds alongside it", idleB in named6)
+
+
+# ── 7: name matching is case- and whitespace-insensitive ─────────────────────
+CH7, dga = connect("Case", channel="dd7", sid="case-1")
+make_dead(dga, CH7)
+_c, dgb = connect("  case  ", channel=CH7, sid="case-2")  # variant case + spaces
+c = raw()
+try:
+    remaining = [row["id"] for row in
+                 c.execute("SELECT id FROM members WHERE channel=?", (CH7,)).fetchall()]
+finally:
+    c.close()
+check("7: a case/space-variant reconnect prunes the dead same-name ghost", dga not in remaining)
+check("7: the new variant-cased member is present", dgb in remaining)
+
+
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
 shutil.rmtree(_tmp, ignore_errors=True)
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")
