@@ -1,5 +1,16 @@
 # nth Changelog
 
+## fork — dashboard batch: tags, unread, search, edit/delete, JS test harness (jdsareault fork)
+
+A run of web-dashboard improvements, each on its own branch, LOTC-reviewed before merge:
+
+- **Model tags** — agents self-report their tier on connect (`trio_connect(model="opus")`); the roster shows a color-coded opus/sonnet/haiku tag. Tests: `tests/test-model-tags.py`.
+- **Unread marker + jump-to-unread** — a "new messages" divider before the first message that arrived while you were away/scrolled up, and a top "↓ N new messages" bar to jump to it. (LOTC caught and fixed a divider-destroyed-on-return bug.)
+- **Full-history search** — a header 🔍 panel that searches the whole channel DB (not just the loaded window), newest-first, click a hit to jump+flash it; LIKE-wildcards escaped so `50%` is literal. `GET /api/search`; tests: `tests/test-search.py`.
+- **Edit / delete your own messages** — hover a message you authored → ✎ / 🗑; the change propagates live to every viewer over a new SSE `message_update` event (with target-bar rebuild + editor-repaint on update). `POST /api/edit` + `/api/delete`; author-only. LOTC (Sauron/Aragorn/Uruk-Hai) fixed a non-string-body crash, stale target bars, and a stale-editor repaint. Tests: `tests/test-edit-delete.py`.
+- **Correctness cleanups** — every `[word]` system event (`[joined]`/`[pinned]`/`[culled]`/…) now renders muted in the dashboard and terminal console instead of as markdown (the prefix check assumed a trailing space where there's a `]`); `trio_cull` revokes the culled member's sessions.
+- **Client-JS test harness** — the dashboard's client logic lives in one IIFE embedded in `nth_web.py` and assumed a browser, so it had no automated coverage (the `isAskChoices` render-gate shipped broken twice for exactly this reason). `tests/dom-harness.js` is a zero-dependency harness (Node stdlib `vm` + a hand-rolled fake DOM/BOM, no jsdom/npm) that runs the *actual shipped script* and reads its internal helpers back through a `__TRIO_TEST__` hook — which is stripped from the served browser bundle at render time so internal state never ships. `tests/test-client-render.js` (27 checks) covers `renderMarkdown`, `isSystemContent`, `humanizeIdSigils`, and the `paintBody`/`applyTargetBars`/`decorateInlineMentions` DOM path; `tests/test-web-bundle.py` locks in the bundle strip.
+
 ## fork — remove participant from dashboard (jdsareault fork)
 
 Adds a roster **remove (×)** button in the web dashboard + `POST /api/cull` so the operator can drop a member directly — mainly for clearing stale/dead agents left in the roster after a session closed, or trimming participants when starting new work. Mirrors the existing agent-only `trio_cull` tool: deletes the member row, releases their claimed tasks back to open, drops their locks, posts a `[culled]` system message. Restricted to trusted operators (loopback/tailscale — a self-declared guest can't cull, which matters under `--tailnet`); rejects self-removal, unknown/cross-channel and malformed targets; removes them from the roster but does not stop a running agent's process. LOTC-reviewed (authz, input-crash guards, client ghost-member pruning). Tests: `tests/test-cull.py`.
