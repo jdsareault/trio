@@ -2410,26 +2410,33 @@ INDEX_HTML = r"""<!doctype html>
                         font-weight: 600; cursor: pointer; }
   #guest-modal button:hover { background: var(--accent-hi); }
 
-  /* ── Responsive ── Desktop keeps the 1fr/300px grid. Tablet narrows the
-     sidebar; phone drops to a single column with the roster as a slide-in
-     overlay and a wrapping header. */
+  /* ── Responsive ── Desktop keeps the 1fr/300px grid. As width shrinks the
+     roster narrows but stays SIDE-BY-SIDE (so chat is never hidden behind it);
+     only at true phone widths (<=560px) does it become a slide-in drawer over
+     the chat with a tap-to-close backdrop. The header wraps once it's tight. */
+  #side-backdrop { display: none; }
   @media (max-width: 1000px) {
     #app { grid-template-columns: 1fr 240px; }
   }
-  @media (max-width: 720px) {
-    #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+  @media (max-width: 760px) {
+    /* Header can't fit on one 42px row — let it wrap and give it an auto row. */
+    #app { grid-template-columns: 1fr 210px; grid-template-rows: auto 1fr auto; }
     header { flex-wrap: wrap; height: auto; min-height: 42px; padding: 6px 10px; row-gap: 6px; }
     header .meta { flex-basis: 100%; order: 9; }   /* meta drops to its own line */
     #filter { flex: 1 1 120px; min-width: 90px; }
-    /* Roster becomes a right-side slide-in overlay, toggled by the roster pill. */
+  }
+  @media (max-width: 560px) {
+    /* True phone: single column, roster is a right-side drawer over the chat. */
+    #app, #app.side-collapsed { grid-template-columns: 1fr; }
     #side { position: fixed; top: 0; right: 0; bottom: 0; width: min(300px, 85vw);
             z-index: 60; border-left: 1px solid var(--border);
-            box-shadow: -8px 0 24px rgba(0,0,0,0.35);
+            box-shadow: -8px 0 24px rgba(0,0,0,0.4);
             transform: translateX(0); transition: transform 0.2s ease; }
     #app.side-collapsed #side { display: flex; transform: translateX(100%); }
-    #app.side-collapsed { grid-template-columns: 1fr; }  /* chat keeps full width */
-  }
-  @media (max-width: 420px) {
+    /* Dim, tap-to-close backdrop while the drawer is open. */
+    #side-backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,0.45); }
+    #app.side-collapsed ~ #side-backdrop { display: none; }
+    #app:not(.side-collapsed) ~ #side-backdrop { display: block; }
     header .title { font-size: 13px; }
     #composer { padding: 8px 10px; }
     #chat { padding: 8px 10px; }
@@ -2548,6 +2555,7 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </div>
 </div>
+<div id="side-backdrop" title="close roster"></div>
 
 <script>
 (() => {
@@ -5203,10 +5211,16 @@ INDEX_HTML = r"""<!doctype html>
     // No saved preference → collapse by default on narrow screens (where the
     // sidebar is a slide-in overlay), so chat is front-and-center on first load.
     _sideCollapsed = saved === null
-      ? window.matchMedia('(max-width: 720px)').matches
+      ? window.matchMedia('(max-width: 560px)').matches
       : saved === '1';
   } catch (_) {}
   applySidebar(_sideCollapsed);
+  // On phone widths the roster is a drawer over the chat — tapping the dim
+  // backdrop closes it.
+  const sideBackdrop = document.getElementById('side-backdrop');
+  if (sideBackdrop) sideBackdrop.addEventListener('click', () => {
+    if (!_sideCollapsed) toggleSidebar();
+  });
   function toggleSidebar() {
     _sideCollapsed = !_sideCollapsed;
     applySidebar(_sideCollapsed);
