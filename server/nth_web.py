@@ -1168,6 +1168,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._serve_attachment(path)
         elif path == "/api/stt/health":
             self._json(STT.health())
+        elif path == "/api/search":
+            self._handle_search(parsed)
         else:
             self._error(404, "not found")
 
@@ -1614,6 +1616,48 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, **(result or {})})
+
+    def _handle_search(self, parsed) -> None:
+        """Full-history search: substring match over this channel's stored
+        messages (beyond the ~200 the dashboard keeps in memory)."""
+        qs = parse_qs(parsed.query)
+        q = (qs.get("q", [""])[0] or "").strip()
+        if len(q) < 2:
+            self._error(400, "query too short (min 2 chars)")
+            return
+        q = q[:200]
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Escape LIKE wildcards so a query like "50%" is a literal substring.
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT 200",
+                (self.channel, like),
+            ).fetchall()
+            results = [{"id": r["id"], "member_id": r["member_id"],
+                        "member_name": r["member_name"] or r["member_id"],
+                        "content": r["content"] or "", "created_at": r["created_at"]}
+                       for r in rows]
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "query": q, "count": len(results), "results": results})
 
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
@@ -2169,6 +2213,28 @@ INDEX_HTML = r"""<!doctype html>
              user-select: none; }
   #new-bar.show { display: block; }
   #new-bar:hover { filter: brightness(1.1); }
+  /* Full-history search panel */
+  #search-panel { position: fixed; top: 8%; left: 50%; transform: translateX(-50%);
+    width: min(680px, 92vw); max-height: 80vh; z-index: 70; display: flex; flex-direction: column;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.55); overflow: hidden; }
+  #search-panel[hidden] { display: none; }
+  .search-head { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); }
+  #search-input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg); font: inherit; }
+  #search-input:focus { outline: none; border-color: var(--accent); }
+  #search-close { background: none; border: none; color: var(--dim); font-size: 22px;
+    line-height: 1; cursor: pointer; padding: 0 8px; }
+  #search-close:hover { color: var(--fg); }
+  #search-status { padding: 6px 12px; font-size: 11px; color: var(--dim); }
+  #search-results { overflow-y: auto; padding: 4px 8px 10px; }
+  .search-hit { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .search-hit:hover { background: rgba(var(--ov),0.06); border-color: rgba(var(--ov),0.15); }
+  .search-hit .sh-meta { font-size: 10px; color: var(--dim); margin-bottom: 2px; }
+  .search-hit .sh-author { font-weight: 600; }
+  .search-hit .sh-body { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg.flash { animation: flashmsg 1.4s ease-out; }
+  @keyframes flashmsg { 0% { background: rgba(var(--mention-rgb),0.35); } 100% { background: transparent; } }
   /* "new messages" divider before the first unread message */
   .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
                     color: var(--mention); font-size: 10px; font-weight: 600;
@@ -2530,6 +2596,7 @@ INDEX_HTML = r"""<!doctype html>
       <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill pill-icon" id="btn-search" title="search the full channel history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span class="lbl">search</span></span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill pill-icon" id="btn-notify" title="desktop notifications on @you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="lbl">off</span></span>
@@ -2600,6 +2667,14 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </div>
 <div id="side-backdrop" title="close roster"></div>
+<div id="search-panel" hidden>
+  <div class="search-head">
+    <input id="search-input" type="text" placeholder="search all history…" autocomplete="off" spellcheck="false">
+    <button id="search-close" title="close (Esc)" aria-label="close search">×</button>
+  </div>
+  <div id="search-status"></div>
+  <div id="search-results"></div>
+</div>
 
 <script>
 (() => {
@@ -5730,6 +5805,87 @@ INDEX_HTML = r"""<!doctype html>
   newBar.addEventListener('click', () => {
     const dom = firstVisibleUnreadDom();
     if (dom) chat.scrollTop = Math.max(0, dom.offsetTop - 8);
+  });
+
+  // ── Full-history search (queries the server DB, not just loaded messages) ──
+  const btnSearch = document.getElementById('btn-search');
+  const searchPanel = document.getElementById('search-panel');
+  const searchInput = document.getElementById('search-input');
+  const searchClose = document.getElementById('search-close');
+  const searchStatus = document.getElementById('search-status');
+  const searchResults = document.getElementById('search-results');
+  let searchTimer = 0, searchSeq = 0;
+
+  function openSearch() {
+    searchPanel.hidden = false;
+    if (state.filter && !searchInput.value) searchInput.value = state.filter;
+    searchInput.focus(); searchInput.select();
+    if (searchInput.value.trim().length >= 2) runSearch();
+  }
+  function closeSearch() { searchPanel.hidden = true; }
+  async function runSearch() {
+    const q = searchInput.value.trim();
+    searchResults.innerHTML = '';
+    if (q.length < 2) { searchStatus.textContent = 'type at least 2 characters'; return; }
+    searchStatus.textContent = 'searching…';
+    const seq = ++searchSeq;
+    try {
+      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+      const d = await r.json().catch(() => ({}));
+      if (seq !== searchSeq) return;   // a newer query superseded this one
+      if (!r.ok || !d.ok) { searchStatus.textContent = 'search failed: ' + (d.error || r.status); return; }
+      renderSearchResults(d.results || []);
+    } catch (e) {
+      if (seq === searchSeq) searchStatus.textContent = 'search failed: ' + e.message;
+    }
+  }
+  function renderSearchResults(results) {
+    const capped = results.length >= 200;
+    searchStatus.textContent = results.length
+      ? (results.length + (capped ? '+' : '') + ' match' + (results.length === 1 ? '' : 'es')
+         + ' — newest first')
+      : 'no matches';
+    const frag = document.createDocumentFragment();
+    for (const m of results) {
+      const hit = document.createElement('div');
+      hit.className = 'search-hit';
+      const meta = document.createElement('div');
+      meta.className = 'sh-meta';
+      const author = document.createElement('span');
+      author.className = 'sh-author';
+      author.textContent = m.member_name;
+      author.style.color = colorFor(m.member_id);
+      meta.appendChild(author);
+      meta.appendChild(document.createTextNode('  ·  ' + formatTime(m.created_at)));
+      const body = document.createElement('div');
+      body.className = 'sh-body';
+      body.textContent = humanizeIdSigils(m.content || '');
+      hit.appendChild(meta);
+      hit.appendChild(body);
+      // If the match is in the loaded timeline, jump + flash it; otherwise the
+      // panel row is the result (it's outside the in-memory window).
+      hit.addEventListener('click', () => {
+        const dom = state.messageDomById.get(m.id);
+        if (dom) {
+          closeSearch();
+          dom.scrollIntoView({ block: 'center' });
+          dom.classList.add('flash');
+          setTimeout(() => dom.classList.remove('flash'), 1500);
+        }
+      });
+      frag.appendChild(hit);
+    }
+    searchResults.appendChild(frag);
+  }
+  btnSearch.addEventListener('click', openSearch);
+  searchClose.addEventListener('click', closeSearch);
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 250);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearch(); }
+    else if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
   });
 
   // ── Title / tab badge ──
