@@ -2230,10 +2230,20 @@ INDEX_HTML = r"""<!doctype html>
                    display: none; cursor: pointer; }
   #filter-banner.active { display: block; }
 
-  /* ── Composer (unchanged from v1) ── */
+  /* ── Composer ── */
   #composer { grid-row: 3 / 4; grid-column: 1 / 3;
               background: var(--bg2); border-top: 1px solid var(--border);
-              padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; }
+              padding: 8px 14px; display: flex; flex-direction: column; gap: 4px;
+              position: relative; }
+  /* Drag grip to resize the compose box height. */
+  #composer-resize { position: absolute; top: 0; left: 0; right: 0; height: 7px;
+                     cursor: ns-resize; touch-action: none; }
+  #composer-resize::before { content: ""; position: absolute; left: 50%; top: 3px;
+                     width: 34px; height: 3px; margin-left: -17px; border-radius: 2px;
+                     background: var(--border); transition: background 0.1s; }
+  #composer-resize:hover::before, body.composer-resizing #composer-resize::before {
+                     background: var(--accent); }
+  body.composer-resizing { cursor: ns-resize; user-select: none; }
   #preview { font-size: 11px; color: var(--dim); min-height: 14px; }
   #preview .tgt { color: var(--mention); font-weight: 600; }
   /* Horizontal persistent-target selector — pick 1..N claudes (or All) and
@@ -2399,6 +2409,46 @@ INDEX_HTML = r"""<!doctype html>
                         color: var(--bg); border: none; border-radius: 4px;
                         font-weight: 600; cursor: pointer; }
   #guest-modal button:hover { background: var(--accent-hi); }
+
+  /* ── Responsive ── Desktop keeps the 1fr/300px grid. As width shrinks the
+     roster narrows but stays SIDE-BY-SIDE (so chat is never hidden behind it);
+     only at true phone widths (<=560px) does it become a slide-in drawer over
+     the chat with a tap-to-close backdrop. The header wraps once it's tight. */
+  #side-backdrop { display: none; }
+  #side-drawer-head { display: none; }   /* only shown as a drawer header on phones */
+  @media (max-width: 1000px) {
+    #app { grid-template-columns: 1fr 240px; }
+  }
+  @media (max-width: 760px) {
+    /* Header can't fit on one 42px row — let it wrap and give it an auto row. */
+    #app { grid-template-columns: 1fr 210px; grid-template-rows: auto 1fr auto; }
+    header { flex-wrap: wrap; height: auto; min-height: 42px; padding: 6px 10px; row-gap: 6px; }
+    header .meta { flex-basis: 100%; order: 9; }   /* meta drops to its own line */
+    #filter { flex: 1 1 120px; min-width: 90px; }
+  }
+  @media (max-width: 560px) {
+    /* True phone: single column, roster is a right-side drawer over the chat. */
+    #app, #app.side-collapsed { grid-template-columns: 1fr; }
+    #side { position: fixed; top: 0; right: 0; bottom: 0; width: min(300px, 85vw);
+            z-index: 60; border-left: 1px solid var(--border);
+            box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+            transform: translateX(0); transition: transform 0.2s ease; }
+    #app.side-collapsed #side { display: flex; transform: translateX(100%); }
+    /* Explicit close (×) header on the drawer — tap-outside wasn't discoverable. */
+    #side-drawer-head { display: flex; justify-content: flex-end; position: sticky; top: 0;
+                        background: var(--panel); padding: 6px 8px; z-index: 1;
+                        border-bottom: 1px solid var(--border); }
+    #side-close { background: none; border: none; color: var(--dim); cursor: pointer;
+                  font-size: 22px; line-height: 1; padding: 2px 8px; border-radius: 4px; }
+    #side-close:hover { color: var(--fg); background: rgba(var(--ov),0.08); }
+    /* Dim, tap-to-close backdrop while the drawer is open. */
+    #side-backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,0.45); }
+    #app.side-collapsed ~ #side-backdrop { display: none; }
+    #app:not(.side-collapsed) ~ #side-backdrop { display: block; }
+    header .title { font-size: 13px; }
+    #composer { padding: 8px 10px; }
+    #chat { padding: 8px 10px; }
+  }
 </style>
 </head>
 <body>
@@ -2463,6 +2513,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
+    <div id="side-drawer-head"><button id="side-close" title="close roster" aria-label="close roster">×</button></div>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
@@ -2476,6 +2527,7 @@ INDEX_HTML = r"""<!doctype html>
   </aside>
 
   <div id="composer">
+    <div id="composer-resize" title="drag to resize the compose box · double-click to reset"></div>
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
     <div id="stt-banner" hidden></div>
@@ -2512,6 +2564,7 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </div>
 </div>
+<div id="side-backdrop" title="close roster"></div>
 
 <script>
 (() => {
@@ -4463,15 +4516,62 @@ INDEX_HTML = r"""<!doctype html>
     }
     preview.innerHTML = parts.join('  ·  ');
   }
+  // User-set compose-box height (px), persisted; null = auto-grow to the 160px cap.
+  let composerHeight = (() => {
+    const v = parseInt(localStorage.getItem('trio.composerHeight') || '', 10);
+    return (v && v >= 36) ? v : null;
+  })();
   function autoResizeInput() {
-    input.style.height = 'auto';
-    input.style.height = Math.min(160, Math.max(36, input.scrollHeight)) + 'px';
+    if (composerHeight) {
+      // Fixed height chosen via the drag grip; content scrolls within it.
+      input.style.height = composerHeight + 'px';
+    } else {
+      input.style.height = 'auto';
+      input.style.height = Math.min(160, Math.max(36, input.scrollHeight)) + 'px';
+    }
     if (inputHighlight) {
       inputHighlight.style.height = input.style.height;
       inputHighlight.scrollTop = input.scrollTop;
       inputHighlight.scrollLeft = input.scrollLeft;
     }
   }
+  // Drag the grip atop the composer to set a fixed compose height; double-click
+  // to reset to auto-grow. Pointer events cover mouse + touch.
+  (function setupComposerResize() {
+    const grip = document.getElementById('composer-resize');
+    if (!grip) return;
+    let startY = 0, startH = 0, dragging = false;
+    const maxH = () => Math.max(120, Math.round(window.innerHeight * 0.6));
+    function onMove(e) {
+      if (!dragging) return;
+      composerHeight = Math.min(maxH(), Math.max(36, startH + (startY - e.clientY)));
+      autoResizeInput();
+      e.preventDefault();
+    }
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('composer-resizing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      try { localStorage.setItem('trio.composerHeight', String(composerHeight)); } catch (_) {}
+    }
+    grip.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      startY = e.clientY;
+      startH = input.getBoundingClientRect().height;
+      document.body.classList.add('composer-resizing');
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      e.preventDefault();
+    });
+    grip.addEventListener('dblclick', () => {
+      composerHeight = null;
+      try { localStorage.removeItem('trio.composerHeight'); } catch (_) {}
+      autoResizeInput();
+    });
+    autoResizeInput();   // apply any persisted height on load
+  })();
 
   // ── Send ──
   // ── Image attachments (composer upload) ──
@@ -5115,8 +5215,25 @@ INDEX_HTML = r"""<!doctype html>
     btnSide.classList.toggle('on', !collapsed);
   }
   let _sideCollapsed = false;
-  try { _sideCollapsed = localStorage.getItem('trio.sideCollapsed') === '1'; } catch (_) {}
+  try {
+    const saved = localStorage.getItem('trio.sideCollapsed');
+    // No saved preference → collapse by default on narrow screens (where the
+    // sidebar is a slide-in overlay), so chat is front-and-center on first load.
+    _sideCollapsed = saved === null
+      ? window.matchMedia('(max-width: 560px)').matches
+      : saved === '1';
+  } catch (_) {}
   applySidebar(_sideCollapsed);
+  // On phone widths the roster is a drawer over the chat — tapping the dim
+  // backdrop closes it.
+  const sideBackdrop = document.getElementById('side-backdrop');
+  if (sideBackdrop) sideBackdrop.addEventListener('click', () => {
+    if (!_sideCollapsed) toggleSidebar();
+  });
+  const sideClose = document.getElementById('side-close');
+  if (sideClose) sideClose.addEventListener('click', () => {
+    if (!_sideCollapsed) toggleSidebar();
+  });
   function toggleSidebar() {
     _sideCollapsed = !_sideCollapsed;
     applySidebar(_sideCollapsed);
