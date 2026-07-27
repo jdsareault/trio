@@ -4961,7 +4961,6 @@ INDEX_HTML = r"""<!doctype html>
       refreshMessageAuthors();
     }
 
-    rosterEl.innerHTML = '';
     const sorted = members.slice().sort((a, b) => {
       const order = { active: 0, idle: 1, stale: 2, dead: 3 };
       if (a.id === state.operator.id) return 1;
@@ -4971,7 +4970,19 @@ INDEX_HTML = r"""<!doctype html>
       if (oa !== ob) return oa - ob;
       return (a.name || '').localeCompare(b.name || '');
     });
-    for (const m of sorted) rosterEl.appendChild(renderMemberRow(m));
+    // Build off-DOM and guard each row: one row that throws must NOT blank the
+    // whole sidebar (that turned "cull one member" into "the roster vanished").
+    // We clear the live list only after the replacement is fully built.
+    const frag = document.createDocumentFragment();
+    for (const m of sorted) {
+      try {
+        frag.appendChild(renderMemberRow(m));
+      } catch (err) {
+        console.error('renderMemberRow failed for', m && m.id, err);
+      }
+    }
+    rosterEl.innerHTML = '';
+    rosterEl.appendChild(frag);
     rosterHeading.textContent = `Members (${members.length})`;
 
     renderComposerTargets();
