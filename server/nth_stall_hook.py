@@ -60,7 +60,7 @@ def _now_iso() -> str:
 
 def main() -> int:
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(1_000_000)   # bounded — never buffer a hostile stream
     except Exception:
         return 0
     if not raw:
@@ -68,6 +68,11 @@ def main() -> int:
     try:
         payload = json.loads(raw)
     except Exception:
+        return 0
+    # Valid JSON that isn't an object (null / list / number / string) has no
+    # fields to read — bail before any .get() so we honor the never-raise
+    # contract. (Previously .get() ran here and threw AttributeError on `null`.)
+    if not isinstance(payload, dict):
         return 0
 
     # Only act on StopFailure. The settings.json matcher should already scope
