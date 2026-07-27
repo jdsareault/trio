@@ -16,7 +16,7 @@ When a Claude session's turn dies to a transient API error (the classic 529 `ove
   "hooks": {
     "StopFailure": [
       {
-        "matcher": "overloaded|rate_limit|server_error|unknown",
+        "matcher": "overloaded|rate_limit|server_error|unknown|authentication_failed|oauth_org_not_allowed|billing_error|invalid_request|model_not_found|max_output_tokens",
         "hooks": [
           { "type": "command",
             "command": "python3 ~/.claude/skills/nth/server/nth_stall_hook.py" }
@@ -27,7 +27,7 @@ When a Claude session's turn dies to a transient API error (the classic 529 `ove
 }
 ```
 
-The hook is fully best-effort (any failure is swallowed, exit 0) so it can never disturb the session it protects; it only ever INSERTs a `stall_events` row. The watchdog runs wherever the dashboard runs (`python3 server/nth_web.py <channel>`).
+The matcher covers every StopFailure error type: the watchdog classifies them itself — nudging transient stalls (overloaded/rate_limit/server_error) and surfacing non-recoverable ones (auth/billing/bad-model) to a human. The hook is fully best-effort (any failure is swallowed, exit 0) so it can never disturb the session it protects; it only ever INSERTs a `stall_events` row. `setup.sh` registers this automatically. The watchdog runs wherever the dashboard runs (`python3 server/nth_web.py <channel>`).
 
 Tests: `tests/test-stall-watchdog.py` (24 checks — capture fix, due-nudge + `@`-mentions, backoff gating, resume/retract, non-transient surface, give-up, human-skip, unmapped-drop, per-channel isolation).
 

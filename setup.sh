@@ -296,27 +296,61 @@ if [ "$PLATFORM" = "windows" ]; then
 fi
 
 "$PYTHON_CMD" -c "
-import json, os
+import json, os, tempfile
 settings_path = r'$SETTINGS_JSON'
 py = r'$PYTHON_CMD'
 hook = r'$HOOK_NATIVE'
 cmd = f'{py} \"{hook}\"'
 
+# Match every StopFailure error type (not just the transient ones): the watchdog
+# classifies them itself — nudging transient stalls and surfacing the rest to a
+# human. A narrow matcher would make that surface path dead code.
+matcher = ('overloaded|rate_limit|server_error|unknown|authentication_failed'
+           '|oauth_org_not_allowed|billing_error|invalid_request|model_not_found'
+           '|max_output_tokens')
+
 settings = {}
 if os.path.exists(settings_path):
-    with open(settings_path) as f:
-        settings = json.load(f)
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (ValueError, OSError) as e:
+        # Don't abort the whole install on a malformed/unreadable settings.json —
+        # skip the hook and tell the user to add it by hand (see CHANGELOG).
+        print(f'StopFailure hook: SKIPPED (could not read {settings_path}: {e})')
+        raise SystemExit(0)
+if not isinstance(settings, dict):
+    settings = {}
 
 hooks = settings.setdefault('hooks', {})
+if not isinstance(hooks, dict):
+    print('StopFailure hook: SKIPPED (settings.hooks is not an object)')
+    raise SystemExit(0)
 sf = hooks.setdefault('StopFailure', [])
+if not isinstance(sf, list):
+    print('StopFailure hook: SKIPPED (settings.hooks.StopFailure is not a list)')
+    raise SystemExit(0)
+
 if any('nth_stall_hook.py' in json.dumps(e) for e in sf):
     print('StopFailure hook: already registered')
 else:
-    sf.append({'matcher': 'overloaded|rate_limit|server_error|unknown',
+    sf.append({'matcher': matcher,
                'hooks': [{'type': 'command', 'command': cmd}]})
-    with open(settings_path, 'w') as f:
-        json.dump(settings, f, indent=2)
-        f.write('\n')
+    # Atomic write: a crash/disk-full mid-write must never truncate the user's
+    # settings.json and lose unrelated settings.
+    d = os.path.dirname(settings_path) or '.'
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.settings-', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(settings, f, indent=2)
+            f.write('\n')
+        os.replace(tmp, settings_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     print('StopFailure hook: registered (stall-watchdog auto-resume)')
 "
 
