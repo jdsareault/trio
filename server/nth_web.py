@@ -2564,6 +2564,8 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-pill.on .tb-num { opacity: 0.9; }
   #target-bar .tb-pill.tb-all { border-style: dashed; }
   #target-bar .tb-pill.tb-all.on { border-style: solid; }
+  #target-bar .tb-auto { display: inline-flex; align-items: center; gap: 5px; }
+  #target-bar .tb-auto-name { color: var(--fg); font-weight: 600; }
   body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input-stack { flex: 1; position: relative; min-width: 0; background: var(--bg);
@@ -3959,8 +3961,13 @@ INDEX_HTML = r"""<!doctype html>
 
     submitBtn.addEventListener('click', async () => {
       if (sending || !allAnswered()) return;
-      const answerText = composedAnswer();
+      let answerText = composedAnswer();
       if (!answerText.trim()) return;
+      // Auto-direct the answer at the agent that asked, so it wakes them even
+      // if they're listening only for @mentions. The asker is this ask
+      // message's author; fall back to the stored name if they've since left.
+      const asker = state.members.get(msg.member_id);
+      answerText = directAt(answerText, asker || { name: msg.member_name });
       sending = true;
       submitBtn.disabled = true;
       submitBtn.textContent = 'Sending…';
@@ -4399,6 +4406,25 @@ INDEX_HTML = r"""<!doctype html>
     if (m.id.startsWith('_op_')) return false;
     return true;
   }
+  // The agents you can direct a message to (everyone targetable in the roster).
+  function targetableMembers() {
+    return [...state.members.values()].filter(isTargetable);
+  }
+  // When exactly one agent is present, its id — the unambiguous recipient for
+  // an undirected send. Null with 0 or 2+ agents, or in DM mode. Drives the
+  // auto-direct: a 2-party chat needs no "send to" picker.
+  function soleAgentId() {
+    if (state.dmTargetId) return null;
+    const t = targetableMembers();
+    return t.length === 1 ? t[0].id : null;
+  }
+  // Prepend "@name " to `text` unless it already mentions that member. Returns
+  // the (possibly unchanged) text. Shared by auto-direct and ask-answer routing.
+  function directAt(text, member) {
+    if (!member || !member.name) return text;
+    const atTag = '@' + member.name;
+    return text.toLowerCase().includes(atTag.toLowerCase()) ? text : atTag + ' ' + text;
+  }
   function targetStorageKey() {
     return 'trio_targets_' + (state.channel || '_');
   }
@@ -4469,6 +4495,19 @@ INDEX_HTML = r"""<!doctype html>
       lbl.className = 'tb-label';
       lbl.textContent = 'no agents in channel yet';
       targetBar.appendChild(lbl);
+      return;
+    }
+    // Exactly one agent: no picker needed — every send auto-directs to it.
+    // Show a compact muted hint of where messages go, not a "send to" chooser.
+    if (targetables.length === 1) {
+      const only = targetables[0];
+      const a = animalFor(only);
+      const hint = document.createElement('span');
+      hint.className = 'tb-label tb-auto';
+      hint.innerHTML = '↳ messages go to <span class="tb-auto-name">' +
+        (a.emoji ? escapeHtml(a.emoji) + ' ' : '') +
+        escapeHtml(only.name || only.id) + '</span>';
+      targetBar.appendChild(hint);
       return;
     }
     const lbl = document.createElement('span');
@@ -4981,6 +5020,16 @@ INDEX_HTML = r"""<!doctype html>
         .map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`)
         .join(', ');
       parts.push(`locked targets: ${tgts}`);
+    } else if (!state.dmTargetId && pings.length === 0) {
+      // Undirected: show where it will actually go — auto-directed to the sole
+      // agent, or a broadcast warning when 2+ agents would miss it.
+      const sole = soleAgentId();
+      if (sole) {
+        const m = state.members.get(sole);
+        if (m) parts.push(`→ <span class="tgt">@${escapeHtml(m.name)}</span>`);
+      } else if (targetableMembers().length >= 2 && !/(^|\s)!all(\b|$)/.test(txtL)) {
+        parts.push('<span style="color:var(--dim)">broadcast — no recipient</span>');
+      }
     }
     if (pings.length) {
       const names = pings.map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`).join(', ');
@@ -5435,6 +5484,21 @@ INDEX_HTML = r"""<!doctype html>
     if (!text && readyAtt.length === 0) return;
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
+    // Multi-agent broadcast nudge: with 2+ agents in the room and no recipient
+    // chosen (no target selected, no typed @mention, not an intentional !all),
+    // an undirected message won't wake agents on about/at filters — it's the
+    // weak default the operator rarely wants. Confirm once per session before
+    // broadcasting; broadcast stays possible, just no longer silent-by-accident.
+    if (!state.dmTargetId && state.selectedTargets.size === 0 &&
+        resolved.length === 0 && !/(^|\s)!all(\b|$)/i.test(text) &&
+        !soleAgentId() && targetableMembers().length >= 2 && !state.broadcastAck) {
+      const ok = confirm(
+        'No recipient selected — broadcast to everyone in the channel?\n\n' +
+        'Undirected messages don’t wake agents listening only for @mentions. ' +
+        'Pick a "send to" target or @mention someone to direct this instead.');
+      if (!ok) { sendBtn.disabled = false; input.focus(); return; }
+      state.broadcastAck = true;   // don't nag again this session
+    }
     // DM mode: always include the DM target so the agent sees the message
     // (even if the operator forgot the @mention). Also prepend the visible
     // @name to the content so it's unambiguous in main-tab backscroll — the
@@ -5463,6 +5527,16 @@ INDEX_HTML = r"""<!doctype html>
         tags.push(atTag);
       }
       if (tags.length > 0) text = tags.join(' ') + ' ' + text;
+    } else {
+      // No explicit target. If exactly one agent is in the room, auto-direct
+      // to it — a 2-party chat has an unambiguous recipient, so the operator
+      // shouldn't have to @mention it every time.
+      const sole = soleAgentId();
+      if (sole) {
+        const m = state.members.get(sole);
+        text = directAt(text, m);
+        if (!mentionIds.includes(sole)) mentionIds.push(sole);
+      }
     }
     sendBtn.disabled = true;
     try {
@@ -6389,6 +6463,7 @@ INDEX_HTML = r"""<!doctype html>
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
       paintBody, applyTargetBars, formatTime,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
+      isTargetable, targetableMembers, soleAgentId, directAt,
     };
   }
   // __TRIO_TEST_HOOK_END__
