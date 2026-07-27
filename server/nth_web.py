@@ -6373,6 +6373,21 @@ INDEX_HTML = r"""<!doctype html>
     updateChanStats();
   }
 
+  // Test hook: when this script is loaded under the Node DOM harness
+  // (tests/dom-harness.js), expose the internal render/parse helpers for
+  // unit testing. Completely inert in the browser — globalThis.__TRIO_TEST__
+  // is only ever pre-seeded by the harness sandbox, never in production.
+  // Placed before boot() so the hooks are available even if boot() throws
+  // against the harness's minimal DOM stubs.
+  if (typeof globalThis !== 'undefined' && globalThis.__TRIO_TEST__) {
+    globalThis.__TRIO_TEST__ = {
+      state,
+      renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
+      paintBody, applyTargetBars, formatTime,
+      askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
+    };
+  }
+
   boot();
 })();
 </script>
