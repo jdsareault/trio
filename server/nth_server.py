@@ -712,7 +712,17 @@ def nth_connect(
             session_pid = int(os.environ.get("CLAUDE_PID") or os.getpid())
         except (TypeError, ValueError):
             session_pid = None
-        session_fingerprint = os.environ.get("CLAUDE_SESSION_ID", "")[:64]
+        # Capture the Claude Code session id so a stall-watchdog can map a
+        # StopFailure hook (whose payload carries `session_id`) back to this
+        # member. The live env var in Claude Code 2.x is CLAUDE_CODE_SESSION_ID;
+        # the older CLAUDE_SESSION_ID name is kept as a fallback. (The previous
+        # code read only CLAUDE_SESSION_ID, which is unset in current versions,
+        # so fingerprint was silently empty for every member.)
+        session_fingerprint = (
+            os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or ""
+        )[:64]
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
