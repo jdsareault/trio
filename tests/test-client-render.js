@@ -162,6 +162,24 @@ check('paintBody: retracted takes precedence over edited', () => {
   H.paintBody(div, body, { id: 1, content: 'x', retracted_at: 'now', edited_at: 'now' });
   assert.ok(!body.textContent.includes('(edited)'), 'deleted message must not show (edited)');
 });
+check('paintBody: markdown path decorates a roster @mention (.inline-mention)', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  const { div, body } = makeMsgDom();
+  H.paintBody(div, body, { id: 1, content: 'hey @bob check this', mentions: ['bob1'] });
+  const spans = body.querySelectorAll('.inline-mention');
+  assert.strictEqual(spans.length, 1, 'expected one decorated mention: ' + body.innerHTML);
+  assert.strictEqual(spans[0].textContent, '@bob');
+  assert.strictEqual(spans[0].dataset.memberId, 'bob1');
+});
+check('paintBody: an @mention inside `code` is NOT decorated', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  const { div, body } = makeMsgDom();
+  H.paintBody(div, body, { id: 1, content: 'run `@bob` now', mentions: ['bob1'] });
+  assert.strictEqual(body.querySelectorAll('.inline-mention').length, 0,
+    'mention inside inline code must be left alone: ' + body.innerHTML);
+});
 
 // ── applyTargetBars (DOM) ────────────────────────────────────────────────────
 check('applyTargetBars: a retracted message clears its target bars', () => {
