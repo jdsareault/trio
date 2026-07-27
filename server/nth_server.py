@@ -307,6 +307,9 @@ def get_db() -> sqlite3.Connection:
         # one (an existing row wrongly treated as human is worse than the
         # reverse). Web operators are marked 'human' in ensure_operator_row.
         ("kind", "members", "TEXT NOT NULL DEFAULT 'agent'"),
+        # Self-reported model tier (e.g. "opus"/"sonnet"/"haiku"), shown in the
+        # dashboard so operators know who to expect fast vs. deep answers from.
+        ("model", "members", "TEXT NOT NULL DEFAULT ''"),
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
@@ -542,6 +545,7 @@ def nth_connect(
     topic: str = "",
     skills: str = "",
     pin_topic: bool = False,
+    model: str = "",
 ) -> str:
     """Join an nth channel. Creates the channel if it doesn't exist.
 
@@ -565,6 +569,9 @@ def nth_connect(
         channel: Channel code to join. If empty, generates from topic or randomly.
         topic: Used to generate a readable channel code (ignored if channel given)
         skills: Comma-separated list of your skills/capabilities
+        model: Your model tier — e.g. "opus", "sonnet", "haiku". Shown in the
+               dashboard roster so operators know who to expect fast vs. deep
+               answers from. Optional; free-form, lower-cased, capped at 40 chars.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -580,6 +587,7 @@ def nth_connect(
     # Cap input lengths to prevent bloated join messages and status renders
     summary = summary[:MAX_SUMMARY_LENGTH] if summary else ""
     skills = skills[:MAX_SKILLS_LENGTH] if skills else ""
+    model = (model or "").strip().lower()[:40]   # self-reported tier tag
 
     member_id = generate_member_id()
     now = now_iso()
@@ -665,6 +673,15 @@ def nth_connect(
             db.commit()
             action = "created"
 
+        # Record the self-reported model tier on the freshly-joined row (one
+        # UPDATE covers both the join and create branches).
+        if model:
+            db.execute(
+                "UPDATE members SET model = ? WHERE id = ? AND channel = ?",
+                (model, member_id, channel),
+            )
+            db.commit()
+
         # Gather current state for the joiner
         members = db.execute(
             "SELECT * FROM members WHERE channel = ? ORDER BY joined_at",
@@ -725,7 +742,8 @@ def nth_connect(
             "members": [
                 {"id": m["id"], "name": m["name"], "summary": m["summary"],
                  "skills": m["skills"], "active": _is_member_active(m["last_seen"]),
-                 "filter_mode": (m["filter_mode"] if "filter_mode" in m.keys() else "all") or "all"}
+                 "filter_mode": (m["filter_mode"] if "filter_mode" in m.keys() else "all") or "all",
+                 "model": (m["model"] if "model" in m.keys() else "") or ""}
                 for m in members
             ],
             "recent_messages": [

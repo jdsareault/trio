@@ -603,6 +603,7 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
     ALTER is idempotent (fails harmlessly if the column already exists)."""
     for table, col, defn in (
         ("members",  "kind",      "TEXT NOT NULL DEFAULT 'agent'"),
+        ("members",  "model",     "TEXT NOT NULL DEFAULT ''"),
         ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
         ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
         ("messages", "reply_to",  "INTEGER"),
@@ -770,7 +771,7 @@ class EventHub:
                 "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "m.filter_mode AS filter_mode, "
+                "m.filter_mode AS filter_mode, m.model AS model, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen "
                 "FROM members m "
@@ -823,6 +824,7 @@ class EventHub:
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
+                "model": (r["model"] if "model" in r.keys() else "") or "",
                 "status": member_status(effective_last_seen, r["status_text"] or ""),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
@@ -2197,6 +2199,17 @@ INDEX_HTML = r"""<!doctype html>
                          border-color: rgba(126, 222, 126, 0.25); }
   .member .fmode.at    { color: #f0c060; background: rgba(240, 192, 96, 0.1);
                          border-color: rgba(240, 192, 96, 0.3); }
+  .member .model-tag { font-size: 9px; padding: 1px 5px; border-radius: 3px;
+                       flex-shrink: 0; user-select: none; letter-spacing: 0.3px;
+                       color: var(--dim); background: var(--bg2);
+                       border: 1px solid var(--border); max-width: 84px;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .member .model-tag.opus   { color: #c88bf0; background: rgba(200, 139, 240, 0.1);
+                              border-color: rgba(200, 139, 240, 0.3); }
+  .member .model-tag.sonnet { color: #7cc0f0; background: rgba(124, 192, 240, 0.1);
+                              border-color: rgba(124, 192, 240, 0.3); }
+  .member .model-tag.haiku  { color: #7ede9e; background: rgba(126, 222, 158, 0.1);
+                              border-color: rgba(126, 222, 158, 0.3); }
   .member .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                   font-weight: 500; }
   .member .caret { color: var(--dimmer); font-size: 9px; transition: transform 0.1s; }
@@ -4220,6 +4233,20 @@ INDEX_HTML = r"""<!doctype html>
     idSpan.className = 'id';
     idSpan.textContent = m.id.slice(0, 8);
     topRow.appendChild(idSpan);
+    // Self-reported model tier (opus/sonnet/haiku), color-coded so you can see
+    // at a glance who's fast vs. deep.
+    const model = (m.model || '').trim();
+    if (model) {
+      const mt = document.createElement('span');
+      mt.className = 'model-tag';
+      const tier = /opus/.test(model) ? 'opus'
+                 : /sonnet/.test(model) ? 'sonnet'
+                 : /haiku/.test(model) ? 'haiku' : '';
+      if (tier) mt.classList.add(tier);
+      mt.textContent = model;
+      mt.title = 'model: ' + model;
+      topRow.appendChild(mt);
+    }
     // Filter mode pill — "all" shown dim, "about" green, "at" amber. Helps
     // humans see at a glance who will actually hear an ambient message.
     const fm = m.filter_mode || 'all';
