@@ -57,6 +57,15 @@ from pathlib import Path
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
 
+# This hook runs on EVERY tool call (PreToolUse), and Claude Code blocks the tool
+# until the hook exits — so it sits on the critical path of every Bash/Read/etc.
+# Under N concurrent agents contending on the shared nth.db write lock, a long
+# busy timeout would add that much latency to every tool call. A missed last_seen
+# stamp is harmless (the next tool call re-stamps), so we fail FAST instead: give
+# up the write after a fraction of a second rather than stalling the host's tool.
+# (The turn/stall hooks fire only once or twice per turn, so their 5s is fine.)
+BUSY_TIMEOUT_MS = 500
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -77,9 +86,12 @@ def main() -> int:
         return 0
 
     # Only act on activity events. The settings.json registration scopes this to
-    # PreToolUse / UserPromptSubmit, but defend against a mis-wired hook.
+    # PreToolUse / UserPromptSubmit, but defend against a mis-wired hook. A truly
+    # absent field (None) is tolerated — some Claude Code versions omit it and the
+    # registration already scopes which events reach us — but any *present* value
+    # that isn't ours (including "" or "Stop") is rejected.
     event = payload.get("hook_event_name")
-    if event and event not in ("PreToolUse", "UserPromptSubmit"):
+    if event not in (None, "PreToolUse", "UserPromptSubmit"):
         return 0
 
     session_id = (payload.get("session_id")
@@ -92,9 +104,10 @@ def main() -> int:
     now = _now_iso()
     conn = None
     try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=5, isolation_level=None)
+        conn = sqlite3.connect(str(DB_PATH), timeout=BUSY_TIMEOUT_MS / 1000,
+                               isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "UPDATE sessions SET last_seen = ? WHERE fingerprint = ?",

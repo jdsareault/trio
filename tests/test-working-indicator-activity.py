@@ -120,6 +120,8 @@ check("non-dict JSON (list): exit 0, no-op", fire([1, 2, 3]) and last_seen("act-
 check("non-dict JSON (string): exit 0, no-op", fire('"hi"') and last_seen("act-sid-1") == frozen)
 check("wrong event name: defensive no-op",
       fire({"session_id": "act-sid-1", "hook_event_name": "Stop"}) and last_seen("act-sid-1") == frozen)
+check("empty event name: rejected, not treated as missing",
+      fire({"session_id": "act-sid-1", "hook_event_name": ""}) and last_seen("act-sid-1") == frozen)
 check("no session_id anywhere (env cleared): no-op",
       fire({"hook_event_name": "PreToolUse"}, clear_session_env=True)
       and last_seen("act-sid-1") == frozen)

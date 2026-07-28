@@ -1202,7 +1202,14 @@ class StallWatchdog:
         session's own fingerprint (not the member) — a sibling/sub-agent session
         under the same member advancing its last_seen must NOT be mistaken for
         the frozen session reviving. sessions.last_seen is bumped only by that
-        session's own tool calls, so an advance past created_at is a real turn."""
+        session's own tool calls, so an advance past created_at is a real turn.
+
+        As of the activity hook (nth_activity_hook.py), last_seen is bumped on
+        every PreToolUse *and* UserPromptSubmit — so "resumed" is now also
+        satisfied by a human typing directly into the frozen session, not only
+        the agent's own tool call. That is a genuine resume (the session is being
+        re-driven), so cancelling the pending nudge is correct; noted here so a
+        future reader doesn't assume resume == the agent acting autonomously."""
         row = db.execute(
             "SELECT MAX(last_seen) AS ls FROM sessions WHERE fingerprint = ?",
             (ev["session_id"],),

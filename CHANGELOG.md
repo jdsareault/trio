@@ -12,7 +12,10 @@ The roster's green "active" dot only meant "the Monitor process is alive" — a 
 
 Tests: `tests/test-working-indicator.py` (16 checks — `member_status` states, the turn hook stamping Stop+StopFailure, roster flipping idle→working) and `tests/test-working-indicator-activity.py` (17 checks — the activity hook stamping last_seen on PreToolUse/UserPromptSubmit, hostile-input robustness, and a non-trio tool call flipping idle→working).
 
-Known follow-up: the very first turn after connect still shows the legacy solid-green `active` dot (no `last_turn_end` baseline exists until the first Stop hook fires). It's green either way, so it doesn't misread as idle; a safe turn-1 pulse would need a `hook_active` flag to distinguish "hook installed, turn 1" from "hook not installed" — deferred to avoid breaking the hook-less `active` fallback.
+Known follow-ups:
+- The very first turn after connect still shows the legacy solid-green `active` dot (no `last_turn_end` baseline exists until the first Stop hook fires). It's green either way, so it doesn't misread as idle; a safe turn-1 pulse would need a `hook_active` flag to distinguish "hook installed, turn 1" from "hook not installed" — deferred to avoid breaking the hook-less `active` fallback.
+- `nth_activity_hook.py`, `nth_turn_hook.py`, and `nth_stall_hook.py` now share a near-identical scaffold (bounded stdin read, dict/event guards, session_id→fingerprint mapping, best-effort exit-0 SQLite write). The existing stall+turn consolidation follow-up should be **extended to all three** — extract a copied `nth_hook_base.run_stamp_hook(events, stamp_fn)` so the never-raise/bounded-read invariants live in one place (it must itself be `cp`'d by setup.sh, like `nth_constants.py`).
+- Under many concurrent agents, PreToolUse's per-tool-call SQLite write against the shared `nth.db` could still contend on the single-writer lock (mitigated here by a fail-fast 500ms busy timeout). If that proves insufficient, a per-session sentinel-file (`touch` mtime) that the server/dashboard polls would remove the shared-DB write entirely.
 
 ## fork — fix duplicate same-name members + roster blanking (jdsareault fork)
 
