@@ -1,5 +1,16 @@
 # nth Changelog
 
+## fork — agent working/idle indicator (jdsareault fork)
+
+The roster's green "active" dot only meant "the Monitor process is alive" — a hard-working agent and one sitting idle waiting on you looked identical, so you had to go find the terminal to tell. The dashboard now shows whether an agent is actually **working** vs **idle**.
+
+- **Turn-boundary signal** (`server/nth_turn_hook.py`) — a Claude Code **`Stop` + `StopFailure`** hook stamps `sessions.last_turn_end` whenever a turn ends (cleanly or on an API error). Reuses the stall-watchdog's hook pipeline (session_id→member via `sessions.fingerprint`, `setup.sh` registration); best-effort and self-healing like the stall hook.
+- **`member_status()` split** (`server/nth_web.py`) — **working** = alive AND the agent has acted (its own `sessions.last_seen`) since its last turn end (mid-turn); **idle** = alive but the last turn has ended (waiting) or it set a sleeping status. Recording *both* Stop and StopFailure means a frozen/stalled turn can't read as a false "working". If the hook isn't installed there's no turn data, so it falls back to the legacy **active** dot — hook-less deployments are unchanged.
+- **The dot** — `working` is a breathing green pulse (`@keyframes workpulse`, respects `prefers-reduced-motion`): the "it's on it, keep chilling" cue. Distinct from solid-green `active` and grey `idle`.
+- **Install** — `setup.sh` registers the turn hook as a `Stop` + `StopFailure` hook automatically (idempotent per event/script), alongside the watchdog's. Needs an MCP-server restart so new sessions capture the `session_id` and the `last_turn_end` column exists (the hook self-heals the column otherwise).
+
+Tests: `tests/test-working-indicator.py` (16 checks — `member_status` states, the hook stamping Stop+StopFailure, and the roster flipping idle→working on new activity).
+
 ## fork — fix duplicate same-name members + roster blanking (jdsareault fork)
 
 Two linked bugs: an agent that reconnected under the same name spawned a second member row (the protocol tells sessions to reconnect on token loss, and `nth_connect` had no name dedup), so duplicates piled up — and removing one from the dashboard appeared to remove *all* of them.
