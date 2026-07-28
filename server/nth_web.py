@@ -361,22 +361,49 @@ def parse_obj_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
 
-def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
-    """Match the dashboard's status classification."""
-    if not last_seen_iso:
-        return "dead"
+def _iso_secs(iso: Optional[str]) -> Optional[float]:
+    """Parse an ISO 8601 timestamp to epoch seconds, or None if unusable."""
+    if not iso:
+        return None
     try:
-        ts = datetime.fromisoformat(last_seen_iso).timestamp()
+        return datetime.fromisoformat(iso).timestamp()
     except (ValueError, TypeError):
+        return None
+
+
+def member_status(last_seen_iso: Optional[str], status_text: str,
+                  session_activity_iso: Optional[str] = None,
+                  last_turn_end_iso: Optional[str] = None) -> str:
+    """Classify a member for the roster dot.
+
+    States: working / active / idle / stale / dead.
+      dead    — no heartbeat for DEAD_SECONDS (process gone).
+      stale   — heartbeat aging (> STALE_SECONDS).
+      idle    — alive, but its last turn has ended (nothing since) or it set a
+                sleeping status_text: "done / waiting on you".
+      working — alive AND it has acted since its last turn end (mid-turn). This
+                is the pulsing "keep chilling, it's on it" dot; it needs the
+                nth_turn_hook to have recorded a turn end.
+      active  — alive but we have no turn data (hook not installed): the legacy
+                green dot, so hook-less deployments are unchanged.
+    """
+    ls = _iso_secs(last_seen_iso)
+    if ls is None:
         return "dead"
-    age = datetime.now(timezone.utc).timestamp() - ts
+    age = datetime.now(timezone.utc).timestamp() - ls
     if age > DEAD_SECONDS:
         return "dead"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
         return "idle"
-    return "active"
+    # Turn-state split — only when the turn hook has recorded an end for this
+    # member. Acted since that end -> mid-turn -> working; otherwise finished.
+    end = _iso_secs(last_turn_end_iso)
+    if end is not None:
+        act = _iso_secs(session_activity_iso)
+        return "working" if (act is not None and act > end) else "idle"
+    return "active"  # no turn data (hook not installed) — legacy behavior
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -780,7 +807,8 @@ class EventHub:
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, m.model AS model, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen "
+                "MAX(s.last_seen) AS session_last_seen, "
+                "MAX(s.last_turn_end) AS session_last_turn_end "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -823,6 +851,8 @@ class EventHub:
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
             fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
+            keys = r.keys()
+            s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -832,7 +862,12 @@ class EventHub:
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
                 "model": (r["model"] if "model" in r.keys() else "") or "",
-                "status": member_status(effective_last_seen, r["status_text"] or ""),
+                # working/idle split uses the session's OWN activity (not the
+                # monitor-inflated effective_last_seen) vs. its last turn end.
+                "status": member_status(
+                    effective_last_seen, r["status_text"] or "",
+                    session_activity_iso=(r["session_last_seen"] or None),
+                    last_turn_end_iso=s_turn_end),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -2862,6 +2897,16 @@ INDEX_HTML = r"""<!doctype html>
   .member.expanded .caret { transform: rotate(90deg); }
   .member .id { color: var(--dimmer); font-size: 10px; margin-left: 2px; }
   .dot.active { background: var(--accent2); }
+  /* working = alive AND mid-turn: a breathing green dot, the "it's on it,
+     keep chilling" cue. Distinct from the solid green "active" (legacy /
+     hook-not-installed) and the grey "idle" (turn ended, waiting on you). */
+  .dot.working { background: var(--accent2); animation: workpulse 1.3s ease-in-out infinite; }
+  @keyframes workpulse {
+    0%   { opacity: 1;    transform: scale(1); }
+    50%  { opacity: 0.4;  transform: scale(0.72); }
+    100% { opacity: 1;    transform: scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
