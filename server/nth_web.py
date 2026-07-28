@@ -6317,6 +6317,7 @@ INDEX_HTML = r"""<!doctype html>
     ['Message font', 'font-picker'],
     ['Roster sidebar', 'btn-side'],
     ['Compact messages', 'btn-compact'],
+    ['Message numbers', 'btn-msgnum'],
     ['Desktop notifications', 'btn-notify'],
     ['Chime on new message', 'btn-sound'],
   ].forEach(([labelText, id]) => {
