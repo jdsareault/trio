@@ -383,11 +383,14 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
                 sleeping status_text: "done / waiting on you".
       working — alive AND it has acted since its last turn end (mid-turn). This
                 is the pulsing "keep chilling, it's on it" dot; it needs the
-                nth_turn_hook to have recorded a turn end. "Acted" means a trio
-                RPC (its own sessions.last_seen): a normal agent polls on wake,
-                so this holds through long local work (Bash/tests) until the
-                turn's Stop hook fires; a turn that makes zero trio calls would
-                read idle.
+                nth_turn_hook to have recorded a turn end. "Acted" means its
+                sessions.last_seen advanced past that turn end. With the
+                nth_activity_hook installed (PreToolUse + UserPromptSubmit),
+                *any* tool call or prompt bumps last_seen, so this holds for the
+                whole active turn — reasoning, a long Bash, a sub-agent — not
+                just from the agent's first trio call. Without the activity hook
+                only trio RPCs bump last_seen, so a turn that makes zero trio
+                calls would read idle until its Stop hook fires.
       active  — alive but we have no turn data (hook not installed): the legacy
                 green dot, so hook-less deployments are unchanged.
     """
