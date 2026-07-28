@@ -142,6 +142,7 @@ cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 cp "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
+cp "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
@@ -282,25 +283,30 @@ print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries rem
 "
 
 # ---------- 7b. Register the stall-watchdog StopFailure hook ----------
-# Auto-resume sessions whose turn dies to a transient API error: this hook
-# records the stall, and nth_web.py's watchdog nudges the session back to life.
-# Idempotent — re-running setup.sh never duplicates the entry.
-HOOK_SCRIPT="$SERVER_DIR/nth_stall_hook.py"
-HOOK_NATIVE="$HOOK_SCRIPT"
-if [ "$PLATFORM" = "windows" ]; then
-    if command -v cygpath &>/dev/null; then
-        HOOK_NATIVE=$(cygpath -w "$HOOK_SCRIPT")
+# Two hooks:
+#   nth_stall_hook (StopFailure)        -> records a stall for the watchdog.
+#   nth_turn_hook  (Stop + StopFailure) -> stamps last_turn_end so the dashboard
+#                                          shows working vs. idle.
+# Idempotent per (event, script) — re-running setup.sh never duplicates.
+native_path() {  # native_path <posix-path>
+    if [ "$PLATFORM" = "windows" ]; then
+        if command -v cygpath &>/dev/null; then cygpath -w "$1"
+        else echo "$1" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g'; fi
     else
-        HOOK_NATIVE=$(echo "$HOOK_SCRIPT" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
+        echo "$1"
     fi
-fi
+}
+STALL_NATIVE=$(native_path "$SERVER_DIR/nth_stall_hook.py")
+TURN_NATIVE=$(native_path "$SERVER_DIR/nth_turn_hook.py")
 
 "$PYTHON_CMD" -c "
 import json, os, tempfile
 settings_path = r'$SETTINGS_JSON'
 py = r'$PYTHON_CMD'
-hook = r'$HOOK_NATIVE'
-cmd = f'{py} \"{hook}\"'
+stall = r'''$STALL_NATIVE'''
+turn  = r'''$TURN_NATIVE'''
+stall_cmd = f'{py} \"{stall}\"'
+turn_cmd  = f'{py} \"{turn}\"'
 
 # Match every StopFailure error type (not just the transient ones): the watchdog
 # classifies them itself — nudging transient stalls and surfacing the rest to a
@@ -316,26 +322,38 @@ if os.path.exists(settings_path):
             settings = json.load(f)
     except (ValueError, OSError) as e:
         # Don't abort the whole install on a malformed/unreadable settings.json —
-        # skip the hook and tell the user to add it by hand (see CHANGELOG).
-        print(f'StopFailure hook: SKIPPED (could not read {settings_path}: {e})')
+        # skip the hooks and tell the user to add them by hand (see CHANGELOG).
+        print(f'trio hooks: SKIPPED (could not read {settings_path}: {e})')
         raise SystemExit(0)
 if not isinstance(settings, dict):
     settings = {}
 
 hooks = settings.setdefault('hooks', {})
 if not isinstance(hooks, dict):
-    print('StopFailure hook: SKIPPED (settings.hooks is not an object)')
-    raise SystemExit(0)
-sf = hooks.setdefault('StopFailure', [])
-if not isinstance(sf, list):
-    print('StopFailure hook: SKIPPED (settings.hooks.StopFailure is not a list)')
+    print('trio hooks: SKIPPED (settings.hooks is not an object)')
     raise SystemExit(0)
 
-if any('nth_stall_hook.py' in json.dumps(e) for e in sf):
-    print('StopFailure hook: already registered')
+def register(event, marker, cmd, matcher=None):
+    arr = hooks.setdefault(event, [])
+    if not isinstance(arr, list):
+        print(f'trio hooks: SKIPPED ({event} is not a list)')
+        return False
+    if any(marker in json.dumps(e) for e in arr):
+        return False  # already present
+    entry = {'hooks': [{'type': 'command', 'command': cmd}]}
+    if matcher:
+        entry['matcher'] = matcher
+    arr.append(entry)
+    return True
+
+changed = False
+changed |= register('StopFailure', 'nth_stall_hook.py', stall_cmd, matcher)
+changed |= register('Stop',        'nth_turn_hook.py',  turn_cmd)
+changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd, matcher)
+
+if not changed:
+    print('trio hooks: already registered')
 else:
-    sf.append({'matcher': matcher,
-               'hooks': [{'type': 'command', 'command': cmd}]})
     # Atomic write: a crash/disk-full mid-write must never truncate the user's
     # settings.json and lose unrelated settings.
     d = os.path.dirname(settings_path) or '.'
@@ -351,7 +369,7 @@ else:
         except OSError:
             pass
         raise
-    print('StopFailure hook: registered (stall-watchdog auto-resume)')
+    print('trio hooks: registered (stall-watchdog + working indicator)')
 "
 
 # ---------- 8. Verify ----------
