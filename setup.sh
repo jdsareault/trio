@@ -252,7 +252,9 @@ OLD_PATTERNS="roam-hive-mind nth-cluster nth-hive"
 "$PYTHON_CMD" -c "
 import json, os
 
-settings_path = r'$SETTINGS_JSON'
+# Triple-quoted so an apostrophe in the path (e.g. /Users/O'Brien) can't abort
+# the install with an unterminated string literal.
+settings_path = r'''$SETTINGS_JSON'''
 tools = $(printf '%s\n' "${ALL_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 old_patterns = '$OLD_PATTERNS'.split()
 
@@ -301,8 +303,10 @@ TURN_NATIVE=$(native_path "$SERVER_DIR/nth_turn_hook.py")
 
 "$PYTHON_CMD" -c "
 import json, os, tempfile
-settings_path = r'$SETTINGS_JSON'
-py = r'$PYTHON_CMD'
+# Triple-quoted raw strings so an apostrophe in the path (e.g. /Users/O'Brien)
+# doesn't produce an unterminated string literal and abort the install.
+settings_path = r'''$SETTINGS_JSON'''
+py = r'''$PYTHON_CMD'''
 stall = r'''$STALL_NATIVE'''
 turn  = r'''$TURN_NATIVE'''
 stall_cmd = f'{py} \"{stall}\"'
@@ -347,9 +351,13 @@ def register(event, marker, cmd, matcher=None):
     return True
 
 changed = False
+# The stall hook is scoped by error type (the watchdog classifies them). The
+# turn hook must fire on EVERY turn end — including a novel StopFailure error not
+# in the matcher — or a session that acted mid-turn could show a false 'working'
+# forever, so it's registered matcher-less on StopFailure.
 changed |= register('StopFailure', 'nth_stall_hook.py', stall_cmd, matcher)
 changed |= register('Stop',        'nth_turn_hook.py',  turn_cmd)
-changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd, matcher)
+changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd)
 
 if not changed:
     print('trio hooks: already registered')

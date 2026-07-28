@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """nth_turn_hook.py — Claude Code Stop/StopFailure hook for the working indicator.
 
-Wire this as BOTH a `Stop` and a `StopFailure` hook in settings.json. Whenever a
-Claude turn ends — cleanly (Stop) or on an API error (StopFailure) — Claude Code
-runs this script with the hook payload on stdin. We stamp `sessions.last_turn_end`
+Wire this as BOTH a `Stop` and a `StopFailure` hook in settings.json — the
+StopFailure registration is MATCHER-LESS (fires on every error type), because
+this hook must record *every* turn end so a frozen/stalled turn can't leave a
+session reading as a false "working". Whenever a Claude turn ends — cleanly
+(Stop) or on an API error (StopFailure) — Claude Code runs this script with the
+hook payload on stdin. We stamp `sessions.last_turn_end`
 for the matching session so the dashboard can distinguish:
   * "working" — the agent has acted (its own tool calls bump sessions.last_seen)
     MORE recently than its last turn end -> it woke and is mid-turn.

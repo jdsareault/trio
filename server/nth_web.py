@@ -383,7 +383,11 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
                 sleeping status_text: "done / waiting on you".
       working — alive AND it has acted since its last turn end (mid-turn). This
                 is the pulsing "keep chilling, it's on it" dot; it needs the
-                nth_turn_hook to have recorded a turn end.
+                nth_turn_hook to have recorded a turn end. "Acted" means a trio
+                RPC (its own sessions.last_seen): a normal agent polls on wake,
+                so this holds through long local work (Bash/tests) until the
+                turn's Stop hook fires; a turn that makes zero trio calls would
+                read idle.
       active  — alive but we have no turn data (hook not installed): the legacy
                 green dot, so hook-less deployments are unchanged.
     """
@@ -864,6 +868,11 @@ class EventHub:
                 "model": (r["model"] if "model" in r.keys() else "") or "",
                 # working/idle split uses the session's OWN activity (not the
                 # monitor-inflated effective_last_seen) vs. its last turn end.
+                # MAX(last_seen) and MAX(last_turn_end) are taken independently,
+                # which is correct under trio's one-primary-session-per-member
+                # invariant (nth_connect mints a single session per member id).
+                # If multi-session members are reintroduced, pair both values
+                # from the newest-last_seen session instead.
                 "status": member_status(
                     effective_last_seen, r["status_text"] or "",
                     session_activity_iso=(r["session_last_seen"] or None),
