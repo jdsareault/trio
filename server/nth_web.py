@@ -383,11 +383,14 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
                 sleeping status_text: "done / waiting on you".
       working — alive AND it has acted since its last turn end (mid-turn). This
                 is the pulsing "keep chilling, it's on it" dot; it needs the
-                nth_turn_hook to have recorded a turn end. "Acted" means a trio
-                RPC (its own sessions.last_seen): a normal agent polls on wake,
-                so this holds through long local work (Bash/tests) until the
-                turn's Stop hook fires; a turn that makes zero trio calls would
-                read idle.
+                nth_turn_hook to have recorded a turn end. "Acted" means its
+                sessions.last_seen advanced past that turn end. With the
+                nth_activity_hook installed (PreToolUse + UserPromptSubmit),
+                *any* tool call or prompt bumps last_seen, so this holds for the
+                whole active turn — reasoning, a long Bash, a sub-agent — not
+                just from the agent's first trio call. Without the activity hook
+                only trio RPCs bump last_seen, so a turn that makes zero trio
+                calls would read idle until its Stop hook fires.
       active  — alive but we have no turn data (hook not installed): the legacy
                 green dot, so hook-less deployments are unchanged.
     """
@@ -1199,7 +1202,14 @@ class StallWatchdog:
         session's own fingerprint (not the member) — a sibling/sub-agent session
         under the same member advancing its last_seen must NOT be mistaken for
         the frozen session reviving. sessions.last_seen is bumped only by that
-        session's own tool calls, so an advance past created_at is a real turn."""
+        session's own tool calls, so an advance past created_at is a real turn.
+
+        As of the activity hook (nth_activity_hook.py), last_seen is bumped on
+        every PreToolUse *and* UserPromptSubmit — so "resumed" is now also
+        satisfied by a human typing directly into the frozen session, not only
+        the agent's own tool call. That is a genuine resume (the session is being
+        re-driven), so cancelling the pending nudge is correct; noted here so a
+        future reader doesn't assume resume == the agent acting autonomously."""
         row = db.execute(
             "SELECT MAX(last_seen) AS ls FROM sessions WHERE fingerprint = ?",
             (ev["session_id"],),
