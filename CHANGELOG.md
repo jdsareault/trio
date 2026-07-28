@@ -1,5 +1,16 @@
 # nth Changelog
 
+## fork — visible message numbers (jdsareault fork)
+
+Agents constantly reference messages by number (`re #766`), but the dashboard never showed those ids — you had to guess. Now each message carries its **`#N` id** in a left gutter.
+
+- **The number** (`server/nth_web.py`, `appendMessage`) — a per-message `#N` span in a full-height absolute gutter on the left. `N` is the message's **real global DB id** (a single auto-increment shared across every channel), so it matches exactly what agents cite; gaps between consecutive messages in one channel are expected (other channels' traffic consumes ids).
+- **Sticky positioning** — pure CSS: the gutter spans the message height and flex-centres the number, which is `position: sticky` (top/bottom `10px`). So the number rests at the message's vertical centre and, once that centre would scroll past the viewport edge, pins just inside it — always visible beside the message's visible slice, then leaves with the message when it's fully off-screen. No scroll handler / observer.
+- **Toggle** — a `#nums` pill relocated into the ⚙ settings panel (alongside compact/notify/sound), persisted per-origin in `localStorage['trio.msgNumbers']`, **default ON**. Flipping it toggles `#chat.show-msg-nums`; OFF reclaims the gutter entirely (zero layout impact).
+- **Details** — the number is selectable/copyable (click doesn't toggle the message), `aria-hidden` on the gutter so screen readers don't announce an id before every message, `tabular-nums` + `var(--dim)` to match timestamps, `@operator`-targeted messages tint the number with the accent colour, and the gutter shrinks on ≤560px screens so it doesn't squeeze the body on phones.
+
+LOTC-reviewed (Sauron CLEAN on data-flow; Frodo/Gandalf/Uruk-Hai — self-contained `position:relative`, mobile-gutter shrink, large-id overflow guard, click-to-copy, this entry).
+
 ## fork — agent working/idle indicator (jdsareault fork)
 
 The roster's green "active" dot only meant "the Monitor process is alive" — a hard-working agent and one sitting idle waiting on you looked identical, so you had to go find the terminal to tell. The dashboard now shows whether an agent is actually **working** vs **idle**.
