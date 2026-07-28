@@ -2574,11 +2574,14 @@ INDEX_HTML = r"""<!doctype html>
      leaves with the message once it's fully off-screen. Pure CSS — the gutter
      spans the full message height and flex-centres the sticky number. */
   .msg-num-gutter { display: none; }
-  #chat.show-msg-nums .msg { padding-left: 52px; }
+  /* position:relative is also set on .msg below for hover actions/pins; repeated
+     here so this gutter's absolute/full-height centring can't silently break if
+     that unrelated rule is ever changed. */
+  #chat.show-msg-nums .msg { padding-left: 52px; position: relative; }
   #chat.show-msg-nums .msg-num-gutter {
     display: flex; align-items: center; justify-content: flex-end;
-    position: absolute; left: 0; top: 0; height: 100%; width: 42px;
-    pointer-events: none; }
+    position: absolute; left: 0; top: 0; height: 100%; width: 46px;
+    overflow: hidden; pointer-events: none; }
   #chat.show-msg-nums .msg-num {
     position: sticky; top: 10px; bottom: 10px;
     font-size: 10px; line-height: 1.2; color: var(--dim);
@@ -3198,6 +3201,9 @@ INDEX_HTML = r"""<!doctype html>
     header .title { font-size: 13px; }
     #composer { padding: 8px 10px; }
     #chat { padding: 8px 10px; }
+    /* Shrink the message-number gutter on phones so it doesn't eat the body. */
+    #chat.show-msg-nums .msg { padding-left: 32px; }
+    #chat.show-msg-nums .msg-num-gutter { width: 26px; }
   }
 </style>
 </head>
@@ -4643,6 +4649,9 @@ INDEX_HTML = r"""<!doctype html>
     numEl.className = 'msg-num';
     numEl.textContent = '#' + m.id;
     numEl.title = 'message ' + m.id;
+    // The number is selectable/copyable; don't let a click on it also toggle
+    // the message's compact/expand state.
+    numEl.addEventListener('click', (e) => e.stopPropagation());
     numGutter.appendChild(numEl);
     div.appendChild(numGutter);
 
