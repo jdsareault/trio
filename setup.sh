@@ -143,6 +143,7 @@ cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 cp "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
 cp "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
+cp "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
@@ -285,10 +286,14 @@ print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries rem
 "
 
 # ---------- 7b. Register the stall-watchdog StopFailure hook ----------
-# Two hooks:
-#   nth_stall_hook (StopFailure)        -> records a stall for the watchdog.
-#   nth_turn_hook  (Stop + StopFailure) -> stamps last_turn_end so the dashboard
-#                                          shows working vs. idle.
+# Three hooks:
+#   nth_stall_hook    (StopFailure)              -> records a stall for the watchdog.
+#   nth_turn_hook     (Stop + StopFailure)       -> stamps last_turn_end so the
+#                                                   dashboard shows working vs. idle.
+#   nth_activity_hook (PreToolUse + UserPromptSubmit) -> stamps last_seen on every
+#                                                   tool/prompt so 'working' spans
+#                                                   the whole turn, not just from
+#                                                   the first trio call.
 # Idempotent per (event, script) — re-running setup.sh never duplicates.
 native_path() {  # native_path <posix-path>
     if [ "$PLATFORM" = "windows" ]; then
@@ -300,6 +305,7 @@ native_path() {  # native_path <posix-path>
 }
 STALL_NATIVE=$(native_path "$SERVER_DIR/nth_stall_hook.py")
 TURN_NATIVE=$(native_path "$SERVER_DIR/nth_turn_hook.py")
+ACTIVITY_NATIVE=$(native_path "$SERVER_DIR/nth_activity_hook.py")
 
 "$PYTHON_CMD" -c "
 import json, os, tempfile
@@ -309,8 +315,10 @@ settings_path = r'''$SETTINGS_JSON'''
 py = r'''$PYTHON_CMD'''
 stall = r'''$STALL_NATIVE'''
 turn  = r'''$TURN_NATIVE'''
+activity = r'''$ACTIVITY_NATIVE'''
 stall_cmd = f'{py} \"{stall}\"'
 turn_cmd  = f'{py} \"{turn}\"'
+activity_cmd = f'{py} \"{activity}\"'
 
 # Match every StopFailure error type (not just the transient ones): the watchdog
 # classifies them itself — nudging transient stalls and surfacing the rest to a
@@ -358,6 +366,12 @@ changed = False
 changed |= register('StopFailure', 'nth_stall_hook.py', stall_cmd, matcher)
 changed |= register('Stop',        'nth_turn_hook.py',  turn_cmd)
 changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd)
+# The activity hook stamps sessions.last_seen on every tool call and prompt so
+# the dashboard shows 'working' for the whole active turn (not just from the
+# agent's first trio call). Matcher-less on both events — every tool/prompt is
+# activity, regardless of kind.
+changed |= register('PreToolUse',       'nth_activity_hook.py', activity_cmd)
+changed |= register('UserPromptSubmit', 'nth_activity_hook.py', activity_cmd)
 
 if not changed:
     print('trio hooks: already registered')
@@ -377,7 +391,7 @@ else:
         except OSError:
             pass
         raise
-    print('trio hooks: registered (stall-watchdog + working indicator)')
+    print('trio hooks: registered (stall-watchdog + working indicator + activity)')
 "
 
 # ---------- 8. Verify ----------
