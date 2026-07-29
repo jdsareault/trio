@@ -2581,9 +2581,14 @@ INDEX_HTML = r"""<!doctype html>
   #chat.show-msg-nums .msg-num-gutter {
     display: flex; align-items: center; justify-content: flex-end;
     position: absolute; left: 0; top: 0; height: 100%; width: 46px;
-    overflow: hidden; pointer-events: none; }
+    pointer-events: none; }
+  /* NB: no overflow:auto/hidden/scroll on .msg-num-gutter (or any ancestor up to
+     #chat) — that would make the gutter the sticky scroll-container and break the
+     number's position:sticky. The large-id overflow guard lives on the sticky
+     span itself (own-overflow is safe), not on an ancestor. */
   #chat.show-msg-nums .msg-num {
     position: sticky; top: 10px; bottom: 10px;
+    max-width: 46px; overflow: hidden;
     font-size: 10px; line-height: 1.2; color: var(--dim);
     font-variant-numeric: tabular-nums; white-space: nowrap;
     pointer-events: auto; user-select: text; cursor: text; }
