@@ -4212,7 +4212,14 @@ INDEX_HTML = r"""<!doctype html>
   function renderComposerMentionHighlights() {
     if (!inputHighlight) return;
     const text = input.value || '';
-    const matches = collectMentionMatches(text, null);
+    // Collect all three sigils (was @-only) so #refs and !bangs also highlight
+    // in the composer preview, in the mentioned member's roster color — matching
+    // the rendered message. Reuse the @ class (composer-mention) so glyph weight/
+    // width stays identical to the textarea (a bolder overlay would misalign the
+    // monospace mirror); @all / !all broadcasts keep the rainbow shimmer.
+    const matches = ['@', '#', '!']
+      .flatMap(sig => collectMentionMatches(text, null, sig))
+      .sort((a, b) => a.start - b.start);
     let html = '';
     let cursor = 0;
     for (const match of matches) {
