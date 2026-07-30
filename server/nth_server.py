@@ -920,6 +920,125 @@ def nth_connect(
         db.close()
 
 
+def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
+    """Resolve @pings / #pounds / !bangs in `content` against the channel
+    roster. Returns (mention_ids, ref_ids, bang_ids) — lists of member_ids.
+
+    All three sigils resolve in the same roster pass:
+      @name  → mentions (wakes the target under default filter modes)
+      #name  → refs     (never wakes on any filter; grep via nth_pounds)
+      !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
+    @all / !all both broadcast — @all pings everyone under their filter,
+    !all wakes everyone unconditionally. There is no #all.
+
+    Sigils govern WAKE, not visibility — a DM's recipients are set
+    separately. Shared by nth_send and nth_dm so both carry identical wake
+    semantics; mirrors nth_web._parse_sigils_against_roster on the web side."""
+    mention_ids: list = []
+    ref_ids: list = []
+    bang_ids: list = []
+    if "@" in content or "#" in content or "!" in content:
+        all_members = db.execute(
+            "SELECT id, name FROM members WHERE channel = ?",
+            (channel,),
+        ).fetchall()
+        content_lower = content.lower()
+        all_ids = [m["id"] for m in all_members]
+        # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
+        # doesn't broadcast; "@all" or "@all " or "@all," does.
+        at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
+        bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
+        if at_all:
+            mention_ids = list(all_ids)
+        if bang_all:
+            bang_ids = list(all_ids)
+        hit_at: set = set()
+        hit_ref: set = set()
+        hit_bang: set = set()
+        literal_names_lower: set = set()
+        for m in all_members:
+            name_stripped = (m["name"] or "").strip()
+            mid = m["id"]
+            # Direct-id mention path: @<member_id> routes regardless of
+            # name. Agents that cache the id from nth_connect survive
+            # renames and don't need to re-parse the roster on every send.
+            id_esc = re.escape(mid)
+            if not at_all:
+                if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    if mid not in hit_at:
+                        mention_ids.append(mid)
+                        hit_at.add(mid)
+            if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                if mid not in hit_ref:
+                    ref_ids.append(mid)
+                    hit_ref.add(mid)
+            if not bang_all:
+                if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    if mid not in hit_bang:
+                        bang_ids.append(mid)
+                        hit_bang.add(mid)
+            # Skip a member named literally "all" — the @all/!all shortcuts
+            # already handle that keyword; matching it as a regular name
+            # would double-count. "all" is also a reserved display name
+            # we refuse during identity registration on the web side.
+            if name_stripped.lower() == "all" or not name_stripped:
+                continue
+            literal_names_lower.add(name_stripped.lower())
+            name_esc = re.escape(name_stripped)
+            if not at_all and mid not in hit_at:
+                at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                if at_pat.search(content):
+                    mention_ids.append(mid)
+                    hit_at.add(mid)
+            if mid not in hit_ref:
+                hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                if hash_pat.search(content):
+                    ref_ids.append(mid)
+                    hit_ref.add(mid)
+            if not bang_all and mid not in hit_bang:
+                bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                if bang_pat.search(content):
+                    bang_ids.append(mid)
+                    hit_bang.add(mid)
+
+        # Guest-stem fallback: if the roster has `gabe-guest` (or the
+        # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
+        # the guest — the `-guest` tag is a trust label, not part of
+        # the handle. Skip when the stem collides with a real member's
+        # literal name (trust favors the non-guest identity), or when
+        # multiple guests share a stem (ambiguous — force literal).
+        guest_by_stem: dict = {}
+        for m in all_members:
+            stem = _guest_stem(m["name"] or "")
+            if not stem:
+                continue
+            guest_by_stem.setdefault(stem.lower(), []).append(m)
+        _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
+        for stem_lower, guests in guest_by_stem.items():
+            if stem_lower in _RESERVED_STEMS:
+                continue  # never let a stem fight the @all/!all broadcast shortcut
+            if stem_lower in literal_names_lower:
+                continue
+            if len(guests) != 1:
+                continue
+            g = guests[0]
+            stem = _guest_stem(g["name"] or "") or ""
+            if not stem:
+                continue
+            stem_esc = re.escape(stem)
+            gid = g["id"]
+            if not at_all and gid not in hit_at:
+                if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    mention_ids.append(gid)
+            if gid not in hit_ref:
+                if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    ref_ids.append(gid)
+            if not bang_all and gid not in hit_bang:
+                if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    bang_ids.append(gid)
+    return mention_ids, ref_ids, bang_ids
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_send")
 def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None) -> str:
     """Send a message to the channel. No turns — send anytime.
@@ -1070,116 +1189,8 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         else:
             content = message
 
-        # Detect @pings, #pounds, and !bangs in content. All three resolve
-        # against member names against the same roster pass:
-        #   @name  → mentions (wakes target under default filter modes)
-        #   #name  → refs     (never wakes on any filter; grep via nth_pounds)
-        #   !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
-        # @all / !all both broadcast — @all pings everyone under their filter,
-        # !all wakes everyone unconditionally. There is no #all (a reference
-        # to every member is just noise).
-        mention_ids: list[str] = []
-        ref_ids: list[str] = []
-        bang_ids: list[str] = []
-        if "@" in content or "#" in content or "!" in content:
-            all_members = db.execute(
-                "SELECT id, name FROM members WHERE channel = ?",
-                (channel,),
-            ).fetchall()
-            content_lower = content.lower()
-            all_ids = [m["id"] for m in all_members]
-            # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
-            # doesn't broadcast; "@all" or "@all " or "@all," does.
-            at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
-            bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
-            if at_all:
-                mention_ids = list(all_ids)
-            if bang_all:
-                bang_ids = list(all_ids)
-            hit_at: set = set()
-            hit_ref: set = set()
-            hit_bang: set = set()
-            literal_names_lower: set = set()
-            for m in all_members:
-                name_stripped = (m["name"] or "").strip()
-                mid = m["id"]
-                # Direct-id mention path: @<member_id> routes regardless of
-                # name. Agents that cache the id from nth_connect survive
-                # renames and don't need to re-parse the roster on every send.
-                id_esc = re.escape(mid)
-                if not at_all:
-                    if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        if mid not in hit_at:
-                            mention_ids.append(mid)
-                            hit_at.add(mid)
-                if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    if mid not in hit_ref:
-                        ref_ids.append(mid)
-                        hit_ref.add(mid)
-                if not bang_all:
-                    if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        if mid not in hit_bang:
-                            bang_ids.append(mid)
-                            hit_bang.add(mid)
-                # Skip a member named literally "all" — the @all/!all shortcuts
-                # already handle that keyword; matching it as a regular name
-                # would double-count. "all" is also a reserved display name
-                # we refuse during identity registration on the web side.
-                if name_stripped.lower() == "all" or not name_stripped:
-                    continue
-                literal_names_lower.add(name_stripped.lower())
-                name_esc = re.escape(name_stripped)
-                if not at_all and mid not in hit_at:
-                    at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if at_pat.search(content):
-                        mention_ids.append(mid)
-                        hit_at.add(mid)
-                if mid not in hit_ref:
-                    hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if hash_pat.search(content):
-                        ref_ids.append(mid)
-                        hit_ref.add(mid)
-                if not bang_all and mid not in hit_bang:
-                    bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if bang_pat.search(content):
-                        bang_ids.append(mid)
-                        hit_bang.add(mid)
-
-            # Guest-stem fallback: if the roster has `gabe-guest` (or the
-            # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
-            # the guest — the `-guest` tag is a trust label, not part of
-            # the handle. Skip when the stem collides with a real member's
-            # literal name (trust favors the non-guest identity), or when
-            # multiple guests share a stem (ambiguous — force literal).
-            guest_by_stem: dict[str, list] = {}
-            for m in all_members:
-                stem = _guest_stem(m["name"] or "")
-                if not stem:
-                    continue
-                guest_by_stem.setdefault(stem.lower(), []).append(m)
-            _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
-            for stem_lower, guests in guest_by_stem.items():
-                if stem_lower in _RESERVED_STEMS:
-                    continue  # never let a stem fight the @all/!all broadcast shortcut
-                if stem_lower in literal_names_lower:
-                    continue
-                if len(guests) != 1:
-                    continue
-                g = guests[0]
-                stem = _guest_stem(g["name"] or "") or ""
-                if not stem:
-                    continue
-                stem_esc = re.escape(stem)
-                gid = g["id"]
-                if not at_all and gid not in hit_at:
-                    if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        mention_ids.append(gid)
-                if gid not in hit_ref:
-                    if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        ref_ids.append(gid)
-                if not bang_all and gid not in hit_bang:
-                    if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        bang_ids.append(gid)
+        # Detect @pings, #pounds, and !bangs against the roster (shared helper).
+        mention_ids, ref_ids, bang_ids = _parse_sigils(db, channel, content)
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
         bangs_json = json.dumps(bang_ids) if bang_ids else ""
@@ -1254,6 +1265,199 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             result["task_id"] = task_id
         if pin:
             result["pinned"] = True
+        return json.dumps(result)
+    finally:
+        db.close()
+
+
+def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
+    """Resolve a comma-separated `to` string of names and/or member_ids to a
+    de-duplicated list of recipient member_ids. Returns (recipient_ids,
+    unresolved_tokens). Matching is by exact member_id first, then
+    case-insensitive display name; a leading '@' the caller may have typed is
+    tolerated. Names that collide keep the first roster match."""
+    roster = db.execute(
+        "SELECT id, name FROM members WHERE channel = ?", (channel,)
+    ).fetchall()
+    by_id = {r["id"] for r in roster}
+    by_name: dict = {}
+    for r in roster:
+        nm = (r["name"] or "").strip().lower()
+        if nm:
+            by_name.setdefault(nm, r["id"])
+    recipient_ids: list = []
+    unresolved: list = []
+    for tok in (to or "").split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        cand = t.lstrip("@").strip()
+        rid = None
+        if cand in by_id:
+            rid = cand
+        elif cand.lower() in by_name:
+            rid = by_name[cand.lower()]
+        if rid is None:
+            unresolved.append(t)
+        elif rid not in recipient_ids:
+            recipient_ids.append(rid)
+    return recipient_ids, unresolved
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_dm")
+def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: str = "", reply_to: int | None = None) -> str:
+    """Send a PRIVATE direct message to specific member(s) — a REAL DM.
+
+    Unlike trio_send (which broadcasts to the whole channel), trio_dm is
+    addressed: the server stores the recipient list and WITHHOLDS the message
+    from every non-recipient at delivery time. Only the sender, the named
+    recipients, and the human operator (all-seeing, for audit) will ever see
+    it via trio_poll / trio_history / trio_pounds / the dashboard / the
+    monitor. Other agents' polls never return it.
+
+    Boundary strength depends on deployment (see FUTURE_IMPROVEMENTS #9):
+    against a well-behaved agent — which only ever touches the channel through
+    these tools — the withholding is real. Locally the DB is a plaintext
+    SQLite file the agents share, so this is soft scoping, NOT encryption; a
+    determined local agent could read the file directly. For remote quartet
+    spokes (no filesystem access to the hub) it is a genuine boundary.
+
+    Sigils vs. recipients:
+      • `to` governs VISIBILITY — who may read the message.
+      • @/#/! sigils in `message` govern WAKE as usual. Recipients are also
+        auto-woken (added to the ping set) so a DM actually reaches them even
+        if you forget to @them. @-mentioning a NON-recipient is inert: they
+        are woken by nothing they can see, so their monitor stays quiet.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (from trio_connect)
+        message: The private message (max 4000 chars). @/#/! sigils still parse.
+        to: Comma-separated recipient names and/or member_ids
+            (e.g. "Reviewer, x1y2z3"). Names match case-insensitively.
+        session_token: Your session token (same capability check as trio_send).
+        reply_to: Optional id of a message this replies to (must be in-channel).
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    if not message or not message.strip():
+        return json.dumps({"error": "Message cannot be empty."})
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return json.dumps({"error": f"Message too long ({len(message)} > {MAX_MESSAGE_LENGTH})."})
+    if not to or not to.strip():
+        return json.dumps({"error": "trio_dm requires `to` (comma-separated recipient names/ids)."})
+
+    db = get_db()
+    try:
+        ch = _get_channel(db, channel)
+        if not ch:
+            return json.dumps({"error": f'Channel "{channel}" not found.'})
+        if ch["status"] == "ended":
+            return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        # Same session-token capability check as nth_send: a provided token
+        # must be valid, match member_id, and be a 'primary' (not read_only) role.
+        author_session = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            if sess["role"] != "primary":
+                return json.dumps({"error": f"session_token role '{sess['role']}' cannot send. Use a primary token."})
+            author_session = session_token
+
+        # Resolve recipients against the roster BEFORE inserting. A DM with no
+        # resolvable recipient must be rejected — storing '[]' would silently
+        # turn it into a broadcast (a privacy inversion / leak).
+        recipient_ids, unresolved = _resolve_recipients(db, channel, to)
+        if unresolved:
+            return json.dumps({"error": f"Unknown recipient(s): {', '.join(unresolved)}. "
+                                        "Use names or member_ids from the roster (trio_roster)."})
+        if not recipient_ids:
+            return json.dumps({"error": "trio_dm requires at least one recipient in `to`."})
+
+        # Validate reply_to (must reference an existing in-channel message).
+        if reply_to is not None:
+            target = db.execute(
+                "SELECT id FROM messages WHERE id = ? AND channel = ?",
+                (reply_to, channel),
+            ).fetchone()
+            if not target:
+                return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
+
+        now = now_iso()
+        content = message
+
+        # Wake semantics: parse sigils as usual, then auto-add recipients to
+        # the ping set so a DM actually wakes its recipients (they CAN see it).
+        # Visibility is governed by `recipients`, independent of these sigils.
+        mention_ids, ref_ids, bang_ids = _parse_sigils(db, channel, content)
+        for rid in recipient_ids:
+            if rid not in mention_ids:
+                mention_ids.append(rid)
+
+        mentions_json = json.dumps(mention_ids) if mention_ids else ""
+        refs_json = json.dumps(ref_ids) if ref_ids else ""
+        bangs_json = json.dumps(bang_ids) if bang_ids else ""
+        recipients_json = json.dumps(recipient_ids)
+
+        cur = db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
+            "recipients, author_session, reply_to, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
+             recipients_json, author_session, reply_to, now),
+        )
+        msg_id = cur.lastrowid
+
+        if author_session:
+            db.execute(
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now, author_session),
+            )
+
+        # Mirror nth_send: refresh heartbeat / clear sleeping status, bump channel.
+        current_status = member["status_text"] if "status_text" in member.keys() else ""
+        if current_status and any(kw in current_status.lower() for kw in SLEEPING_KEYWORDS):
+            db.execute(
+                "UPDATE members SET last_seen = ?, status_text = '', status_changed_at = ? "
+                "WHERE id = ? AND channel = ?",
+                (now, now, member_id, channel),
+            )
+        else:
+            db.execute(
+                "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                (now, member_id, channel),
+            )
+        db.execute("UPDATE channels SET updated_at = ? WHERE code = ?", (now, channel))
+        db.commit()
+
+        # Resolve recipient names for the console + response (audit-friendly).
+        recipient_names = []
+        for rid in recipient_ids:
+            rm = _get_member(db, channel, rid)
+            recipient_names.append(rm["name"] if rm and rm["name"] else rid)
+        _console("🔒", channel, f"{member['name']} → {', '.join(recipient_names)} (DM): {content}", 35)
+
+        result = {
+            "ok": True,
+            "channel": channel,
+            "message_id": msg_id,
+            "recipients": recipient_ids,
+            "recipient_names": recipient_names,
+            "private": True,
+        }
+        nag = _sentinel_nag(member)
+        if nag:
+            result["footer"] = nag
         return json.dumps(result)
     finally:
         db.close()
