@@ -3466,7 +3466,7 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill pill-icon" id="btn-notify" title="desktop notifications on @you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="lbl">off</span></span>
-    <span class="pill pill-icon" id="btn-sound" title="play a chime on new messages (scope in settings)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
+    <span class="pill pill-icon" id="btn-sound" title="play a chime on new messages (scope in settings when on)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
     <span class="pill pill-icon" id="btn-settings" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">settings</span></span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
@@ -6745,8 +6745,12 @@ INDEX_HTML = r"""<!doctype html>
   try {
     const ss = localStorage.getItem('trio.soundScope'); if (ss) state.soundScope = ss;
   } catch (_) {}
+  // Wording ('all messages' / '@mentions only') and the mention-first vs
+  // all-first default are matched to the notify-scope select so the two read as
+  // siblings; the title spells out that they're independent controls.
   const soundScopeSel = prefSelect(
-    [['all', 'any message'], ['mention', '@mentions only']], state.soundScope);
+    [['all', 'all messages'], ['mention', '@mentions only']], state.soundScope);
+  soundScopeSel.title = 'Chime scope — independent of desktop notifications';
   soundScopeSel.addEventListener('change', () => {
     state.soundScope = soundScopeSel.value;
     try { localStorage.setItem('trio.soundScope', state.soundScope); } catch (_) {}
