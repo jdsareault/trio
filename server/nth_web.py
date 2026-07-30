@@ -2894,16 +2894,50 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "not found")
             return
         att_id = int(tail)
+        # ── Identity + visibility gate ──
+        # Attachment bytes are message content: a DM image must be withheld from
+        # anyone who cannot see its owning message. Resolve the requester the
+        # same way the SSE feed / search do, require a non-PENDING identity (an
+        # unidentified visitor gets nothing, matching sibling endpoints), then
+        # apply THE visibility predicate (can_see) to the owning message. This
+        # is what closes the leak where any reachable client could fetch a DM
+        # attachment by id, bypassing the visibility engine.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        viewer_id = ident.member_id
+        viewer_all_seeing = is_all_seeing(viewer_id)
         row = None
+        msg = None
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             row = db.execute(
-                "SELECT mime, path FROM attachments WHERE id = ? AND channel = ?",
+                "SELECT mime, path, message_id, member_id FROM attachments "
+                "WHERE id = ? AND channel = ?",
                 (att_id, self.channel),
             ).fetchone()
+            # Load the OWNING message so its sender + recipients drive can_see.
+            # Only needed for non-operators (the operator is all-seeing) and only
+            # when the attachment is linked to a message. Defensive: fall back to
+            # a recipients-less SELECT on a pre-migration DB (treated as broadcast,
+            # preserving legacy every-member-sees-everything behavior).
+            if (row is not None and not viewer_all_seeing
+                    and row["message_id"] is not None):
+                try:
+                    msg = db.execute(
+                        "SELECT member_id, recipients FROM messages "
+                        "WHERE id = ? AND channel = ?",
+                        (row["message_id"], self.channel),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    msg = db.execute(
+                        "SELECT member_id FROM messages WHERE id = ? AND channel = ?",
+                        (row["message_id"], self.channel),
+                    ).fetchone()
         except sqlite3.Error:
             row = None
         finally:
@@ -2915,6 +2949,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if not row:
             self._error(404, "not found")
             return
+        # Visibility check — the SAME predicate the SSE feed applies. Serve only
+        # if the requester can_see the owning message: broadcast (empty
+        # recipients), the sender, an addressed recipient, or the all-seeing
+        # operator. Deny with 404 (NOT 403) so a DM attachment id is not an
+        # existence oracle to a non-recipient. Broadcasts stay visible to every
+        # identified viewer, so normal (non-DM) image sharing is unaffected.
+        if not viewer_all_seeing:
+            if msg is not None:
+                recips_raw = (msg["recipients"] if "recipients" in msg.keys() else "")
+                allowed = can_see(viewer_id, None, msg["member_id"], recips_raw,
+                                  allow_all_seeing=False)
+            else:
+                # Not linked to a message yet (freshly uploaded, still composing)
+                # or the owning message is gone — fail closed: only the uploader
+                # may fetch it.
+                allowed = (viewer_id is not None and viewer_id == row["member_id"])
+            if not allowed:
+                self._error(404, "not found")
+                return
         try:
             chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", self.channel)).resolve()
             resolved = Path(row["path"]).resolve()
