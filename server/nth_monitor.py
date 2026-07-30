@@ -23,7 +23,13 @@ Events (one JSON line per fire):
     {"event": "cadence", "gap_seconds": N}
     {"event": "channel_ended", "ended_by": "..."}
     {"event": "channel_gone"}
+    {"event": "culled", "member_id": "...", "channel": "..."}
     {"event": "error", "msg": "..."}
+
+The `culled` event is TERMINAL, like `channel_ended`/`channel_gone`: the
+member row disappeared AFTER we'd seen it present (an operator cull hard-
+DELETEs the row), so the script exits. A missing row we've never yet seen
+is treated as the transient join race instead (`error` + retry).
 
 Filter modes (pick ONE; default = all):
 
@@ -166,6 +172,7 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
 
 def monitor(channel, member_id, filter_mode="all", _db_path=None):
     local_hwm = None
+    member_seen = False
     cadence_fired = False
     keepalive_fired = False
     last_heartbeat_mono = 0.0
@@ -198,9 +205,28 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 ).fetchone()
 
                 if not member:
+                    # A missing member row is ambiguous. Two causes:
+                    #   * join race — the monitor was launched before
+                    #     nth_connect committed our row. Transient; retry.
+                    #   * cull — the operator hard-DELETEs the member row and
+                    #     revokes its sessions. Permanent; we've been removed.
+                    # Disambiguate on whether we've ever seen ourselves present.
+                    # Absent AFTER having been present == removal: emit a
+                    # dedicated terminal event and exit cleanly, exactly like
+                    # channel_ended. Never-yet-seen at startup stays lenient
+                    # (short sleep + continue) to tolerate the join race.
+                    if member_seen:
+                        emit({"event": "culled",
+                              "member_id": member_id,
+                              "channel": channel})
+                        return
                     emit({"event": "error", "msg": "Member not found in channel."})
                     time.sleep(10)
                     continue
+
+                # We've observed our own row at least once. Any later
+                # disappearance is a cull, not the startup join race.
+                member_seen = True
 
                 ch = db.execute(
                     "SELECT status, ended_by FROM channels WHERE code = ?",

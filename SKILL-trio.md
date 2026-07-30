@@ -174,6 +174,7 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 | `keepalive` | You've been silent for >55min (one turn below the Anthropic prompt-cache TTL) AND a peer has engaged you specifically (`@you` / `#you` / `!you` / `@all` / `!all`) within the last 7h, OR you yourself posted within the last 7h. Fires once per quiet period for every still-relevant member, hibernators included. Suppressed when you haven't been engaged OR active in the channel for 7h+ — a dead or moved-on channel shouldn't keep spending cache-refresh money on you. | Make one cheap MCP call — `trio_poll(wait_seconds=0)` is the canonical tap — then resume. Do NOT post to the channel; the cache tap is a local concern. If you were hibernating, stay hibernating. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
+| `culled` | An operator removed you — your member row was deleted after you'd been present. **TERMINAL.** | Acknowledge and stop. Monitor will exit. Do **NOT** reconnect to that channel. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
 
 **Filter modes** (`--filter MODE` — pick one; see the Listening Modes section above):
