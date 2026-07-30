@@ -2658,32 +2658,33 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--mention-member-color, var(--mention));
     margin-right: 4px; vertical-align: 1px;
   }
-  /* #pound reference inline — same chip+dot mechanism as @, but tinted from the
-     muted "about" green (matches .refs-bar) and lighter weight so it reads
-     quieter than an @ping. Dot stays member-colored to keep the "who". */
+  /* #pound reference inline — same chip+dot mechanism as @, tinted from the
+     mentioned member's roster color (like @), but with a fainter fill and
+     lighter weight so it reads quieter than an @ping. Dot stays member-colored
+     to keep the "who". */
   .msg .body .inline-ref {
     display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
-    background: rgba(126, 222, 126, 0.08);
-    color: color-mix(in srgb, #9ccf9c, var(--fg) 32%);
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 8%, transparent);
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)), var(--fg) 38%);
     font-weight: 500; white-space: nowrap;
   }
   .msg .body .inline-ref::before {
     content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--mention-member-color, #9ccf9c);
+    background: var(--mention-member-color, var(--mention));
     margin-right: 4px; vertical-align: 1px;
   }
-  /* !bang alert inline — same mechanism, tinted from the loud coral (matches
-     .bangs-bar) with heavier weight so it reads louder than an @ping. Dot stays
-     member-colored to keep the "who". */
+  /* !bang alert inline — same mechanism, tinted from the mentioned member's
+     roster color (like @), but with a stronger fill and heavier weight so it
+     reads louder than an @ping. Dot stays member-colored to keep the "who". */
   .msg .body .inline-bang {
     display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
-    background: rgba(255, 132, 112, 0.16);
-    color: color-mix(in srgb, #ff8470, var(--fg) 18%);
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 16%, transparent);
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)), var(--fg) 38%);
     font-weight: 800; white-space: nowrap;
   }
   .msg .body .inline-bang::before {
     content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--mention-member-color, #ff8470);
+    background: var(--mention-member-color, var(--mention));
     margin-right: 4px; vertical-align: 1px;
   }
   .msg .body > *:first-child { margin-top: 0; }
