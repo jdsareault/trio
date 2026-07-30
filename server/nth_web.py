@@ -1619,6 +1619,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._json(STT.health())
         elif path == "/api/search":
             self._handle_search(parsed)
+        elif path == "/api/tasks":
+            self._handle_tasks(parsed)
         else:
             self._error(404, "not found")
 
@@ -2111,6 +2113,72 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
+
+    def _handle_tasks(self, parsed) -> None:
+        """Read-only task board: every task in this channel, ordered by status
+        priority (open → claimed → blocked → completed → cancelled) then id.
+        Additive — no schema changes; the tasks table is already fully
+        structured (nth_server.py posts the lifecycle markers into chat, this
+        just surfaces the underlying rows). Mirrors _handle_search's identity
+        gate + short-lived read connection idioms."""
+        # This server instance serves exactly one channel (self.channel); a
+        # ?channel= param is accepted for forward-compat / symmetry with the
+        # documented URL but must match, so one channel's board can't read
+        # another's over a shared DB.
+        qs = parse_qs(parsed.query)
+        want = (qs.get("channel", [""])[0] or "").strip()
+        if want and want != self.channel:
+            self._error(403, "channel mismatch")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Status sort priority: active work first, terminal states last.
+        order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
+                 "WHEN 'blocked' THEN 2 WHEN 'completed' THEN 3 "
+                 "WHEN 'cancelled' THEN 4 ELSE 5 END")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, posted_by, claimed_by, status, description, result, "
+                "blocked_by, created_at, updated_at, lease_expires_at "
+                "FROM tasks WHERE channel = ? "
+                f"ORDER BY {order}, id",
+                (self.channel,),
+            ).fetchall()
+            tasks = []
+            for r in rows:
+                try:
+                    deps = json.loads(r["blocked_by"] or "[]")
+                except (ValueError, TypeError):
+                    deps = []
+                tasks.append({
+                    "id": r["id"],
+                    "posted_by": r["posted_by"],
+                    "claimed_by": r["claimed_by"],
+                    "status": r["status"],
+                    "description": r["description"] or "",
+                    "result": r["result"] or "",
+                    "blocked_by": deps,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "lease_expires_at": r["lease_expires_at"],
+                })
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": self.channel,
+                    "count": len(tasks), "tasks": tasks})
 
     def _edit_target(self, db, mid, ident):
         """Load an operator-editable message row, or (None, error). The caller
@@ -2755,6 +2823,34 @@ INDEX_HTML = r"""<!doctype html>
   }
   .msg.compact .body::after { content: ""; }
   .msg.system .body { color: var(--dim); font-style: italic; }
+
+  /* ── In-chat task lifecycle cards ── */
+  .msg.task-event .task-event-card { display: flex; align-items: baseline;
+      flex-wrap: wrap; gap: 6px; padding: 4px 8px; border-radius: 5px;
+      background: var(--bg2); border: 1px solid var(--border);
+      border-left: 3px solid var(--border); font-style: normal; }
+  .msg.task-event.te-open      .task-event-card { border-left-color: #7cc0f0; }
+  .msg.task-event.te-claimed   .task-event-card { border-left-color: #f0c060; }
+  .msg.task-event.te-completed .task-event-card { border-left-color: #7ede9e; }
+  .msg.task-event.te-released  .task-event-card { border-left-color: var(--dim); }
+  .msg.task-event.te-cancelled .task-event-card { border-left-color: var(--dimmer); }
+  .task-event-badge { font-size: 9px; padding: 1px 6px; border-radius: 3px;
+      text-transform: uppercase; letter-spacing: 0.5px; user-select: none;
+      flex-shrink: 0; border: 1px solid transparent; }
+  .task-event-badge.open      { color: #7cc0f0; background: rgba(124, 192, 240, 0.12);
+                                border-color: rgba(124, 192, 240, 0.3); }
+  .task-event-badge.claimed   { color: #f0c060; background: rgba(240, 192, 96, 0.12);
+                                border-color: rgba(240, 192, 96, 0.3); }
+  .task-event-badge.completed { color: #7ede9e; background: rgba(126, 222, 158, 0.12);
+                                border-color: rgba(126, 222, 158, 0.3); }
+  .task-event-badge.released,
+  .task-event-badge.cancelled { color: var(--dim); background: var(--bg);
+                                border-color: var(--border); }
+  .task-event-chip { font-size: 10px; font-weight: 600; color: var(--dim);
+      background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+      padding: 0 5px; flex-shrink: 0; }
+  .task-event-text { color: var(--fg); font-size: 12px; min-width: 0;
+      overflow-wrap: anywhere; }
   .msg.mine .author { color: var(--accent2); }
   .msg.targeted { background: rgba(var(--mention-rgb), 0.09); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
@@ -3035,6 +3131,46 @@ INDEX_HTML = r"""<!doctype html>
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
   #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
                letter-spacing: -1px; padding-top: 4px; }
+
+  /* ── Task board (sidebar) ── */
+  #tasks-wrap .task-group { margin-bottom: 8px; }
+  #tasks-wrap .task-group:last-child { margin-bottom: 0; }
+  #tasks-wrap .task-group-head { font-size: 9px; text-transform: uppercase;
+                    letter-spacing: 0.06em; color: var(--dim); font-weight: 600;
+                    margin: 6px 0 4px; display: flex; align-items: center; gap: 6px; }
+  #tasks-wrap .task-group-count { color: var(--dimmer); font-weight: 500; }
+  #tasks-wrap .task-empty { font-size: 10px; color: var(--dimmer); font-style: italic; }
+  .task { padding: 5px 0; border-top: 1px solid var(--border); font-size: 11px; }
+  .task:first-child { border-top: none; }
+  .task .task-row { display: flex; align-items: baseline; gap: 6px; }
+  .task .task-id { color: var(--dimmer); font-weight: 600; flex-shrink: 0; }
+  .task .task-desc { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; }
+  .task.status-completed .task-desc { color: var(--dim); text-decoration: line-through; }
+  .task.status-cancelled .task-desc { color: var(--dimmer); text-decoration: line-through; }
+  .task .task-badge { font-size: 8px; padding: 1px 5px; border-radius: 3px;
+                      flex-shrink: 0; user-select: none; text-transform: uppercase;
+                      letter-spacing: 0.5px; border: 1px solid transparent; }
+  .task .task-badge.open      { color: #7cc0f0; background: rgba(124, 192, 240, 0.1);
+                                border-color: rgba(124, 192, 240, 0.3); }
+  .task .task-badge.claimed   { color: #f0c060; background: rgba(240, 192, 96, 0.1);
+                                border-color: rgba(240, 192, 96, 0.3); }
+  .task .task-badge.blocked   { color: #f08c8c; background: rgba(240, 140, 140, 0.1);
+                                border-color: rgba(240, 140, 140, 0.3); }
+  .task .task-badge.completed { color: #7ede9e; background: rgba(126, 222, 158, 0.1);
+                                border-color: rgba(126, 222, 158, 0.3); }
+  .task .task-badge.cancelled { color: var(--dim); background: var(--bg2);
+                                border-color: var(--border); }
+  .task .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px;
+                     padding-left: 2px; font-size: 10px; color: var(--dim); }
+  .task .task-animal { font-size: 12px; line-height: 1; }
+  .task .task-claimer { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                        max-width: 110px; }
+  .task .task-age { color: var(--dimmer); flex-shrink: 0; }
+  .task .task-deps { color: var(--dimmer); }
+  .task .task-result { color: var(--dim); font-style: italic; padding-left: 2px;
+                       margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; }
   #filter-banner { padding: 4px 8px; background: rgba(var(--mention-rgb), 0.12); color: var(--mention);
                    font-size: 10px; border-radius: 3px; margin-bottom: 6px;
                    display: none; cursor: pointer; }
@@ -3351,6 +3487,10 @@ INDEX_HTML = r"""<!doctype html>
       <h2 id="r-heading">Members</h2>
       <div id="r-list"></div>
     </section>
+    <section id="tasks-wrap">
+      <h2 id="t-heading">Tasks</h2>
+      <div id="t-list"></div>
+    </section>
     <section id="chanstats-wrap">
       <h2>Channel stats</h2>
       <div id="chanstats"></div>
@@ -3413,6 +3553,8 @@ INDEX_HTML = r"""<!doctype html>
   const chat = document.getElementById('chat');
   const rosterEl = document.getElementById('r-list');
   const rosterHeading = document.getElementById('r-heading');
+  const tasksEl = document.getElementById('t-list');
+  const tasksHeading = document.getElementById('t-heading');
   const chanStatsEl = document.getElementById('chanstats');
   const sparkEl = document.getElementById('sparkline');
   const hChannel = document.getElementById('h-channel');
@@ -3888,6 +4030,55 @@ INDEX_HTML = r"""<!doctype html>
     // space-or-end after the "]" avoids muting a markdown link like [done](url).
     const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
     return !!m && SYSTEM_WORDS.has(m[1]);
+  }
+
+  // Task lifecycle events are ordinary chat messages tagged with a leading
+  // marker ("[task #7] …", "[claimed #7] by X", "[done #7] …", "[released
+  // #7] …", "[cancelled #7] …" — posted by nth_server.py). We special-case
+  // them into a compact status card, the same way isSystemContent muting
+  // special-cases the plain "[word] …" notices.
+  //
+  // BRITTLE (v1): this keys on the text prefix, so renaming a marker server-
+  // side silently drops the styling and a user typing "[done #3]" would be
+  // mis-styled. The durable fix is a structured kind/task_id column on the
+  // messages row so the client keys on data, not a string prefix (same
+  // additive-ALTER pattern the tasks table already uses) — intentionally NOT
+  // added here.
+  const TASK_VERBS = {
+    task:      { label: 'posted',    cls: 'open' },
+    claimed:   { label: 'claimed',   cls: 'claimed' },
+    done:      { label: 'done',      cls: 'completed' },
+    released:  { label: 'released',  cls: 'released' },
+    cancelled: { label: 'cancelled', cls: 'cancelled' },
+  };
+  function taskEventInfo(s) {
+    const m = /^\[(task|claimed|done|released|cancelled) #?(\d+)\]\s*(.*)$/s.exec(s || '');
+    if (!m) return null;
+    const meta = TASK_VERBS[m[1]];
+    return { verb: m[1], label: meta.label, cls: meta.cls,
+             id: m[2], rest: (m[3] || '').trim() };
+  }
+  function renderTaskEventCard(evt) {
+    const card = document.createElement('div');
+    card.className = 'task-event-card';
+    const badge = document.createElement('span');
+    badge.className = 'task-event-badge ' + evt.cls;
+    badge.textContent = evt.label;
+    card.appendChild(badge);
+    const chip = document.createElement('span');
+    chip.className = 'task-event-chip';
+    chip.textContent = '#' + evt.id;
+    chip.title = 'task #' + evt.id;
+    card.appendChild(chip);
+    if (evt.rest) {
+      const txt = document.createElement('span');
+      txt.className = 'task-event-text';
+      // Humanize any @<member_id> sigils the same way message bodies do, then
+      // render as plain text (no markdown — these are short status lines).
+      txt.textContent = humanizeIdSigils(evt.rest);
+      card.appendChild(txt);
+    }
+    return card;
   }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
@@ -4772,12 +4963,17 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     const isMine = m.member_id === state.operator.id;
-    const isSystem = isSystemContent(m.content || '');
+    // Task lifecycle lines render as compact status cards (see taskEventInfo);
+    // treat them as system so the author/bars/edit chrome is suppressed the
+    // same way it is for the muted "[word] …" notices.
+    const taskEvt = taskEventInfo(m.content || '');
+    const isSystem = isSystemContent(m.content || '') || !!taskEvt;
     const isAsk = !isSystem && isAskChoices(m.choices);
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
+                  + (taskEvt ? ' task-event te-' + taskEvt.cls : '')
                   + (mentionsOperator ? ' targeted' : '');
     div.dataset.msgId = String(m.id);
     div.dataset.search = (m.content || '').toLowerCase() + ' '
@@ -4832,7 +5028,11 @@ INDEX_HTML = r"""<!doctype html>
       div.appendChild(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
     }
 
-    if (isAsk) {
+    if (taskEvt) {
+      // Task lifecycle: a compact status card (badge + #id chip + short text)
+      // in place of the raw "[done #7] …" prose.
+      div.appendChild(renderTaskEventCard(taskEvt));
+    } else if (isAsk) {
       // trio_ask multiple-choice question: render the interactive picker
       // instead of the plain body (the body text is only a transcript for
       // non-web readers). Stop clicks from toggling compact/expand on the msg.
@@ -6973,6 +7173,154 @@ INDEX_HTML = r"""<!doctype html>
     updateTitle();
   });
 
+  // ── Task board ──
+  // Reads GET /api/tasks and renders the channel's tasks in the sidebar,
+  // grouped by status. The tasks table is authoritative server-side; this is
+  // a pure read view refreshed off the SSE feed (see below).
+  const TASK_GROUPS = [
+    ['open',      'Open'],
+    ['claimed',   'Claimed'],
+    ['blocked',   'Blocked'],
+    ['completed', 'Completed'],
+    ['cancelled', 'Cancelled'],
+  ];
+  // A task lifecycle event IS an ordinary chat message today (e.g. "[claimed
+  // #3] by X" — see nth_server.py), so there's no dedicated SSE task event to
+  // key on. We re-fetch the board whenever an incoming message looks like a
+  // lifecycle marker. Brittle (string match); the durable fix is a structured
+  // kind/task_id column on messages so the client keys on data, not a prefix.
+  const TASK_LIFECYCLE_RE = /^\[(task|claimed|done|released|cancelled) #?\d+/;
+  function isTaskLifecycle(content) {
+    return TASK_LIFECYCLE_RE.test(content || '');
+  }
+
+  function renderTaskRow(t) {
+    const div = document.createElement('div');
+    div.className = 'task status-' + (t.status || '');
+    div.dataset.taskId = String(t.id);
+
+    const row = document.createElement('div');
+    row.className = 'task-row';
+    const idEl = document.createElement('span');
+    idEl.className = 'task-id';
+    idEl.textContent = '#' + t.id;
+    row.appendChild(idEl);
+    const desc = document.createElement('span');
+    desc.className = 'task-desc';
+    desc.textContent = t.description || '';
+    desc.title = t.description || '';
+    row.appendChild(desc);
+    const badge = document.createElement('span');
+    badge.className = 'task-badge ' + (t.status || '');
+    badge.textContent = t.status || '';
+    row.appendChild(badge);
+    div.appendChild(row);
+
+    // Meta line: claimer avatar + name, age, deps.
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+    if (t.claimed_by) {
+      const mem = state.members.get(t.claimed_by);
+      const anim = animalForId(t.claimed_by);
+      const av = document.createElement('span');
+      av.className = 'task-animal';
+      av.textContent = anim.emoji || '';
+      meta.appendChild(av);
+      const who = document.createElement('span');
+      who.className = 'task-claimer';
+      who.textContent = (mem && mem.name) || anim.name || t.claimed_by.slice(0, 8);
+      who.style.color = colorFor(t.claimed_by);
+      meta.appendChild(who);
+    }
+    const age = document.createElement('span');
+    age.className = 'task-age';
+    const created = t.created_at ? Date.parse(t.created_at) : NaN;
+    if (isFinite(created)) {
+      age.textContent = fmtRel((Date.now() - created) / 1000);
+      age.title = t.created_at;
+    } else {
+      age.textContent = '—';
+    }
+    meta.appendChild(age);
+    if (Array.isArray(t.blocked_by) && t.blocked_by.length) {
+      const deps = document.createElement('span');
+      deps.className = 'task-deps';
+      deps.textContent = '⛓ ' + t.blocked_by.map(n => '#' + n).join(' ');
+      deps.title = 'blocked by ' + t.blocked_by.map(n => '#' + n).join(', ');
+      meta.appendChild(deps);
+    }
+    // Only append the meta line if it carries something.
+    if (meta.childNodes.length) div.appendChild(meta);
+
+    if (t.result) {
+      const res = document.createElement('div');
+      res.className = 'task-result';
+      res.textContent = '→ ' + t.result;
+      res.title = t.result;
+      div.appendChild(res);
+    }
+    return div;
+  }
+
+  function renderTasks(tasks) {
+    tasks = tasks || [];
+    tasksHeading.textContent = 'Tasks (' + tasks.length + ')';
+    const frag = document.createDocumentFragment();
+    if (!tasks.length) {
+      const empty = document.createElement('div');
+      empty.className = 'task-empty';
+      empty.textContent = 'no tasks yet';
+      frag.appendChild(empty);
+    } else {
+      const byStatus = new Map();
+      for (const t of tasks) {
+        const k = t.status || 'other';
+        if (!byStatus.has(k)) byStatus.set(k, []);
+        byStatus.get(k).push(t);
+      }
+      for (const [status, label] of TASK_GROUPS) {
+        const group = byStatus.get(status);
+        if (!group || !group.length) continue;
+        const head = document.createElement('div');
+        head.className = 'task-group-head';
+        head.innerHTML = '';
+        const lbl = document.createElement('span');
+        lbl.textContent = label;
+        head.appendChild(lbl);
+        const cnt = document.createElement('span');
+        cnt.className = 'task-group-count';
+        cnt.textContent = group.length;
+        head.appendChild(cnt);
+        const wrap = document.createElement('div');
+        wrap.className = 'task-group';
+        wrap.appendChild(head);
+        for (const t of group) {
+          try { wrap.appendChild(renderTaskRow(t)); }
+          catch (err) { console.error('renderTaskRow failed for', t && t.id, err); }
+        }
+        frag.appendChild(wrap);
+      }
+    }
+    tasksEl.innerHTML = '';
+    tasksEl.appendChild(frag);
+  }
+
+  let tasksInFlight = false;
+  async function refreshTasks() {
+    if (tasksInFlight) return;  // coalesce bursts of lifecycle messages
+    tasksInFlight = true;
+    try {
+      const r = await fetch('/api/tasks?channel=' + encodeURIComponent(state.channel || ''));
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.ok) renderTasks(data.tasks);
+    } catch (e) {
+      console.error('refreshTasks failed', e);
+    } finally {
+      tasksInFlight = false;
+    }
+  }
+
   // ── SSE ──
   let es = null;
   let reconnectTimer = null;
@@ -6987,7 +7335,12 @@ INDEX_HTML = r"""<!doctype html>
     es.onmessage = (ev) => {
       try {
         const payload = JSON.parse(ev.data);
-        if (payload.type === 'message') appendMessage(payload);
+        if (payload.type === 'message') {
+          appendMessage(payload);
+          // A task lifecycle event arrives as an ordinary message; refresh the
+          // board when one does. (v1: string-match the marker — see isTaskLifecycle.)
+          if (isTaskLifecycle(payload.content)) refreshTasks();
+        }
         else if (payload.type === 'message_update') updateMessageDom(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
       } catch (e) { console.error('bad event', e); }
@@ -7102,6 +7455,7 @@ INDEX_HTML = r"""<!doctype html>
     input.focus();
     updatePreview();
     updateChanStats();
+    refreshTasks();
   }
 
   // __TRIO_TEST_HOOK_START__
@@ -7119,6 +7473,8 @@ INDEX_HTML = r"""<!doctype html>
       state,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
       paintBody, applyTargetBars, formatTime,
+      isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
+      taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
       colorFor, rememberColors,
