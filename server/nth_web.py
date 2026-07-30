@@ -2658,6 +2658,34 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--mention-member-color, var(--mention));
     margin-right: 4px; vertical-align: 1px;
   }
+  /* #pound reference inline — same chip+dot mechanism as @, but tinted from the
+     muted "about" green (matches .refs-bar) and lighter weight so it reads
+     quieter than an @ping. Dot stays member-colored to keep the "who". */
+  .msg .body .inline-ref {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: rgba(126, 222, 126, 0.08);
+    color: color-mix(in srgb, #9ccf9c, var(--fg) 32%);
+    font-weight: 500; white-space: nowrap;
+  }
+  .msg .body .inline-ref::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, #9ccf9c);
+    margin-right: 4px; vertical-align: 1px;
+  }
+  /* !bang alert inline — same mechanism, tinted from the loud coral (matches
+     .bangs-bar) with heavier weight so it reads louder than an @ping. Dot stays
+     member-colored to keep the "who". */
+  .msg .body .inline-bang {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: rgba(255, 132, 112, 0.16);
+    color: color-mix(in srgb, #ff8470, var(--fg) 18%);
+    font-weight: 800; white-space: nowrap;
+  }
+  .msg .body .inline-bang::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, #ff8470);
+    margin-right: 4px; vertical-align: 1px;
+  }
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
@@ -3806,9 +3834,12 @@ INDEX_HTML = r"""<!doctype html>
     });
   }
 
-  function mentionMemberForToken(token, allowedIds) {
+  function mentionMemberForToken(token, allowedIds, allowAll) {
     const lower = (token || '').toLowerCase();
-    if (lower === 'all') return { id: 'all', name: 'all' };
+    // @all / !all resolve to the every-member pseudo-target; #all has no
+    // analogue (a reference-to-everyone is just noise), so allowAll is false
+    // for the '#' sigil and the literal token stays plain.
+    if (allowAll !== false && lower === 'all') return { id: 'all', name: 'all' };
     for (const mem of state.members.values()) {
       if (allowedIds && !allowedIds.has(mem.id)) continue;
       if ((mem.id || '').toLowerCase() === lower ||
@@ -3817,12 +3848,17 @@ INDEX_HTML = r"""<!doctype html>
     return null;
   }
 
-  // Find only syntactically complete, roster-resolved @mentions. Unknown
-  // @words stay unadorned, which doubles as feedback that they will not ping
-  // a participant.
-  function collectMentionMatches(text, allowedIds) {
+  // Find only syntactically complete, roster-resolved sigil tokens. Defaults to
+  // '@' (mentions); pass '#' / '!' to collect refs / bangs the same way. Unknown
+  // sigil words stay unadorned, which doubles as feedback that they will not
+  // route to a participant.
+  function collectMentionMatches(text, allowedIds, sigil) {
+    sigil = sigil || '@';
+    // '#all' is noise (no every-member analogue); '@all' / '!all' are targets.
+    const allowAll = sigil !== '#';
+    const sig = sigil.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const matches = [];
-    const re = /(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]+)/g;
+    const re = new RegExp('(^|[^A-Za-z0-9_])' + sig + '([A-Za-z0-9_.-]+)', 'g');
     let hit;
     while ((hit = re.exec(text || ''))) {
       // The token class greedily swallows trailing sentence punctuation
@@ -3831,10 +3867,10 @@ INDEX_HTML = r"""<!doctype html>
       // jen.chen / gabe-guest still match), then trim trailing "."/"-" and
       // retry so the mention still highlights, matching the server's routing.
       let token = hit[2];
-      let member = mentionMemberForToken(token, allowedIds);
+      let member = mentionMemberForToken(token, allowedIds, allowAll);
       while (!member && (token.endsWith('.') || token.endsWith('-'))) {
         token = token.slice(0, -1);
-        member = mentionMemberForToken(token, allowedIds);
+        member = mentionMemberForToken(token, allowedIds, allowAll);
       }
       if (!member) continue;
       const start = hit.index + hit[1].length;
@@ -3843,32 +3879,45 @@ INDEX_HTML = r"""<!doctype html>
     return matches;
   }
 
-  function decorateInlineMentions(root, mentionIds) {
-    if (!root || !mentionIds || !mentionIds.length) return;
-    const allowed = new Set(mentionIds);
+  // Per-sigil hover title for an inline-decorated token.
+  const INLINE_SIGIL_TITLES = {
+    '@': (m) => m.id === 'all' ? 'Mentions every participant'
+                               : 'Mentions ' + (m.name || m.id),
+    '#': (m) => 'References ' + (m.name || m.id),
+    '!': (m) => m.id === 'all' ? 'Alerts every participant'
+                               : 'Alerts ' + (m.name || m.id),
+  };
+
+  // Wrap roster-resolved <sigil>token occurrences in the message prose with a
+  // styled inline span (className) carrying the member color on the dot. Shared
+  // by @ (inline-mention), # (inline-ref) and ! (inline-bang) — same mechanism,
+  // distinct per-sigil tint. Tokens inside code/pre/links or an already-
+  // decorated span are skipped so we never double-wrap or touch literal code.
+  function decorateInlineSigil(root, sigil, className, ids) {
+    if (!root || !ids || !ids.length) return;
+    const allowed = new Set(ids);
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     while (walker.nextNode()) {
       const node = walker.currentNode;
       const parent = node.parentElement;
-      if (!parent || parent.closest('code, pre, a, .inline-mention')) continue;
-      if (collectMentionMatches(node.nodeValue || '', allowed).length) nodes.push(node);
+      if (!parent || parent.closest('code, pre, a, .inline-mention, .inline-ref, .inline-bang')) continue;
+      if (collectMentionMatches(node.nodeValue || '', allowed, sigil).length) nodes.push(node);
     }
+    const titleFor = INLINE_SIGIL_TITLES[sigil] || INLINE_SIGIL_TITLES['@'];
     for (const node of nodes) {
       const text = node.nodeValue || '';
-      const matches = collectMentionMatches(text, allowed);
+      const matches = collectMentionMatches(text, allowed, sigil);
       if (!matches.length) continue;
       const frag = document.createDocumentFragment();
       let cursor = 0;
       for (const match of matches) {
         frag.appendChild(document.createTextNode(text.slice(cursor, match.start)));
         const span = document.createElement('span');
-        span.className = 'inline-mention';
+        span.className = className;
         span.textContent = text.slice(match.start, match.end);
         span.dataset.memberId = match.member.id;
-        span.title = match.member.id === 'all'
-          ? 'Mentions every participant'
-          : 'Mentions ' + (match.member.name || match.member.id);
+        span.title = titleFor(match.member);
         if (match.member.id !== 'all') {
           span.style.setProperty('--mention-member-color', colorFor(match.member.id));
         }
@@ -3878,6 +3927,15 @@ INDEX_HTML = r"""<!doctype html>
       frag.appendChild(document.createTextNode(text.slice(cursor)));
       node.replaceWith(frag);
     }
+  }
+
+  // Decorate all three targeting sigils inline from a message's parsed arrays.
+  // @ runs first so its spans exist before the # / ! passes (each pass skips the
+  // others' spans via the exclusion selector).
+  function decorateInlineMentions(root, mentionIds, refIds, bangIds) {
+    decorateInlineSigil(root, '@', 'inline-mention', mentionIds);
+    decorateInlineSigil(root, '#', 'inline-ref',     refIds);
+    decorateInlineSigil(root, '!', 'inline-bang',    bangIds);
   }
 
   function renderComposerMentionHighlights() {
@@ -4493,7 +4551,7 @@ INDEX_HTML = r"""<!doctype html>
     } else {
       body.classList.remove('plain');
       body.innerHTML = renderMarkdown(m.content || '');
-      decorateInlineMentions(body, m.mentions || []);
+      decorateInlineMentions(body, m.mentions || [], m.refs || [], m.bangs || []);
     }
     if (m.edited_at) {
       const tag = document.createElement('span');
