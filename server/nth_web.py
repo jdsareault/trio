@@ -2658,6 +2658,31 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--mention-member-color, var(--mention));
     margin-right: 4px; vertical-align: 1px;
   }
+  /* @all broadcast — a celebratory rainbow shimmer so "ping everyone" reads
+     louder than a single-member @mention. The gradient is clipped to the glyphs
+     and slowly panned; the dot is a static rainbow bead. Targets the pseudo-
+     member id "all" that decorateInlineSigil sets on the span. Motion is
+     disabled under prefers-reduced-motion (the static rainbow still reads). */
+  .msg .body .inline-mention[data-member-id="all"] {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    animation: at-all-shimmer 3s linear infinite;
+    font-weight: 800;
+  }
+  .msg .body .inline-mention[data-member-id="all"]::before {
+    background: conic-gradient(#ff5f5f, #ffb347, #ffe66d, #7ede7e,
+      #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+  }
+  @keyframes at-all-shimmer {
+    0%   { background-position:   0% 50%; }
+    100% { background-position: 200% 50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .msg .body .inline-mention[data-member-id="all"] { animation: none; }
+  }
   /* #pound reference inline — same chip+dot mechanism as @, but tinted from the
      muted "about" green (matches .refs-bar) and lighter weight so it reads
      quieter than an @ping. Dot stays member-colored to keep the "who". */
@@ -3071,6 +3096,20 @@ INDEX_HTML = r"""<!doctype html>
   #input-highlight .composer-mention {
     color: var(--mention-member-color, var(--mention));
     box-shadow: inset 0 -2px 0 var(--mention-member-color, var(--mention));
+  }
+  /* @all in the composer gets the same rainbow shimmer as the rendered chip,
+     so typing "@all" previews the broadcast. Reuses the at-all-shimmer keyframe. */
+  #input-highlight .composer-mention-all {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    box-shadow: none;
+    animation: at-all-shimmer 3s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #input-highlight .composer-mention-all { animation: none; }
   }
   /* The textarea's own glyphs are hidden (color: transparent) so the colored
      #input-highlight mirror behind it is what the user reads; caret-color keeps
@@ -3987,10 +4026,12 @@ INDEX_HTML = r"""<!doctype html>
     for (const match of matches) {
       html += escapeHtml(text.slice(cursor, match.start));
       // colorFor returns a fixed palette hex (injection-safe); @all has no
-      // per-member color and falls back to --mention via the CSS default.
-      const mc = match.member.id === 'all' ? '' : colorFor(match.member.id);
+      // per-member color and falls back to the rainbow shimmer via its own class.
+      const isAll = match.member.id === 'all';
+      const mc = isAll ? '' : colorFor(match.member.id);
       const styleAttr = mc ? ' style="--mention-member-color:' + mc + '"' : '';
-      html += '<span class="composer-mention"' + styleAttr + '>' +
+      const cls = isAll ? 'composer-mention composer-mention-all' : 'composer-mention';
+      html += '<span class="' + cls + '"' + styleAttr + '>' +
               escapeHtml(text.slice(match.start, match.end)) + '</span>';
       cursor = match.end;
     }
