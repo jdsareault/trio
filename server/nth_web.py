@@ -2636,18 +2636,44 @@ class NthWebHandler(BaseHTTPRequestHandler):
         """Expand a leading ~ (and ~user). No other transformation — existence
         is checked as-is, so a relative candidate resolves against the server's
         current working directory (best-effort; if it doesn't resolve there it
-        simply won't be linked, which is the intended validation behavior)."""
+        simply won't be linked, which is the intended validation behavior).
+        NOTE: relative candidates are validated against the SERVER's cwd, not
+        any client/agent cwd — this is unchanged, intentional, best-effort."""
         return os.path.expanduser(candidate)
+
+    @staticmethod
+    def _is_trivial_root(expanded: str) -> bool:
+        """True for a filesystem root or pure-separator token ('/', '//', '/..',
+        a bare Windows/volume drive root). These EXIST on disk yet are never a
+        meaningful file link — treating a lone '/' as one is exactly what made a
+        slash used as prose punctuation ('reload / incognito', '#' / '!') pick
+        up a folder icon. Rejected in both validate and reveal (defense in depth
+        alongside the client's filename-segment filter). Real paths UNDER a root
+        ('/Users/…') contain more than separators, so they're unaffected."""
+        if not expanded or not expanded.strip("/\\ \t"):
+            return True                       # empty or only slashes/whitespace
+        try:
+            norm = os.path.normpath(expanded)
+        except (ValueError, TypeError):
+            return False
+        if norm in (os.sep, "/", "//"):       # POSIX root (normpath preserves '//')
+            return True
+        drive, tail = os.path.splitdrive(norm)
+        if drive and tail in ("", os.sep, "/", "\\"):   # bare drive root 'C:\'
+            return True
+        return False
 
     def _resolve_existing(self, raw: str) -> Optional[str]:
         """Return the expanded on-disk target for `raw`, or None if it doesn't
-        exist. Tries the candidate as-is first, then with a trailing :line[:col]
-        (editor/grep/Claude-Code form) stripped — so both validate and reveal
-        agree on what a `path:line` token resolves to. Uses lexists so broken
-        symlinks (still revealable) count. Never raises (a NUL/bad path is just
-        'not found')."""
+        exist (or is a trivial root — see _is_trivial_root). Tries the candidate
+        as-is first, then with a trailing :line[:col] (editor/grep/Claude-Code
+        form) stripped — so both validate and reveal agree on what a `path:line`
+        token resolves to. Uses lexists so broken symlinks (still revealable)
+        count. Never raises (a NUL/bad path is just 'not found')."""
         for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
             expanded = self._expand_path(cand)
+            if self._is_trivial_root(expanded):
+                continue                      # '/' & bare roots are not linkable
             try:
                 if expanded and os.path.lexists(expanded):
                     return expanded
@@ -4786,6 +4812,16 @@ INDEX_HTML = r"""<!doctype html>
       let tok = m[0];
       const start = m.index;
       if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Require a real FILENAME SEGMENT, not just separators: a candidate must
+      // carry at least one name character ([A-Za-z0-9_]). This rejects a BARE
+      // '/' (and pure-punctuation runs like '//', './', '-/-') that a slash used
+      // as prose punctuation produces — "reload / incognito", "high / low",
+      // "#" / "!". Those would otherwise validate against on-disk roots ('/'
+      // exists!) and wrongly pick up a folder link. Slash-joined WORDS ('and/or',
+      // 'high/medium/low') still pass here but are gated by real existence, so
+      // they only link if they genuinely resolve. (Server rejects roots too —
+      // defense in depth.)
+      if (!/[A-Za-z0-9_]/.test(tok)) continue;
       // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
       // ".." tail. Trailing trim only, so the start offset stays valid.
       tok = tok.replace(/([^.\/])\.$/, '$1');
