@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel
+from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel, can_see, parse_recipients
 
 
 # ───────── Config ─────────
@@ -641,6 +641,10 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
         ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
         ("messages", "reply_to",  "INTEGER"),
+        # real-DMs: recipient/visibility column (see nth_server.get_db). The web
+        # dashboard may run against a DB the MCP server hasn't migrated yet, so
+        # we own the forward-compat ALTER here too. '[]'/NULL = broadcast.
+        ("messages", "recipients", "TEXT NOT NULL DEFAULT '[]'"),
         ("messages", "retracted_at", "TEXT"),
         ("messages", "retracted_by", "TEXT"),
         ("messages", "retraction_reason", "TEXT"),

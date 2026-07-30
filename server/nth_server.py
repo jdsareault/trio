@@ -27,7 +27,7 @@ from pathlib import Path
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS
+from nth_constants import SLEEPING_KEYWORDS, can_see, is_all_seeing, parse_recipients
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -315,6 +315,13 @@ def get_db() -> sqlite3.Connection:
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
         ("messenger_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
         ("watchdog_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
+        # real-DMs: recipient/visibility column. Empty JSON array '[]' (or NULL
+        # on rows that predate the column) = broadcast = visible to everyone —
+        # today's behavior, unchanged. A DM stores a JSON array of recipient
+        # member_ids; the visibility predicate (nth_constants.can_see) withholds
+        # its bytes from non-recipients at every message read path. Additive and
+        # forward-compatible, exactly like mentions/refs/bangs above.
+        ("recipients", "messages", "TEXT NOT NULL DEFAULT '[]'"),
         # v6: provenance + retraction on messages
         ("author_session", "messages", "TEXT"),
         ("retracted_at", "messages", "TEXT"),

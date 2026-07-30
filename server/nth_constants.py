@@ -1,7 +1,82 @@
 # Shared constants for the nth MCP server and event monitor.
 # Both nth_server.py and nth_monitor.py import from here.
 
+import json
+
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
+
+# ── Real DMs: the member-aware visibility predicate ───────────────────
+# Lives here, in the module every side (nth_server, nth_web, nth_monitor)
+# already imports, so the "can this reader see this message" decision is
+# made in EXACTLY ONE place. Copy-pasting subtly-different filters into
+# each read path is how a DM leaks — so every message read path routes
+# through can_see() (or its recipients parse) instead.
+
+# Operator/human member ids are prefixed with this. Kept in sync with
+# nth_web.OPERATOR_MEMBER_ID_PREFIX; duplicated (not imported) because
+# nth_constants is the leaf module everything else imports.
+OPERATOR_MEMBER_ID_PREFIX = "_op_"
+
+
+def is_all_seeing(reader_id, reader_kind) -> bool:
+    """True if this reader sees every message regardless of addressing.
+
+    The human operator is all-seeing so the audit trail stays complete
+    (design decision: DMs are withheld from non-recipient *agents*, never
+    from the operator). A reader is all-seeing when its member id is an
+    operator id (``_op_`` prefix) OR its members.kind is anything other
+    than 'agent' (humans join the dashboard as kind='human'). kind may be
+    None on an un-migrated row — treat that as an agent (the safe default:
+    an agent wrongly treated as all-seeing would leak, the reverse only
+    over-withholds)."""
+    if reader_id and str(reader_id).startswith(OPERATOR_MEMBER_ID_PREFIX):
+        return True
+    if reader_kind is not None and reader_kind != "agent":
+        return True
+    return False
+
+
+def parse_recipients(raw) -> list:
+    """Parse a messages.recipients column value into a list of member_ids.
+
+    Empty / NULL / '' / '[]' all mean "broadcast" and return []. Anything
+    unparseable also returns [] (fail OPEN to broadcast — a corrupt
+    recipients value must never silently hide a message from everyone;
+    [] is treated as broadcast by can_see, which matches today's
+    every-member-sees-everything behavior). Accepts a raw JSON array
+    string or an already-decoded list."""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw]
+    try:
+        v = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    return []
+
+
+def can_see(reader_id, reader_kind, sender_id, recipients_raw) -> bool:
+    """THE visibility predicate. A reader R may see message M iff ANY of:
+
+      • M is a broadcast (recipients empty/NULL), OR
+      • R is the sender (M.member_id == R), OR
+      • R is in M.recipients, OR
+      • R is all-seeing (operator / human — see is_all_seeing).
+
+    recipients_raw is the raw messages.recipients column (JSON array string,
+    or NULL/'' on pre-migration rows). Broadcasts (the common case) stay
+    visible to everyone, so existing non-DM traffic is unaffected."""
+    if is_all_seeing(reader_id, reader_kind):
+        return True
+    recips = parse_recipients(recipients_raw)
+    if not recips:
+        return True  # broadcast — unchanged legacy behavior
+    if reader_id is not None and reader_id == sender_id:
+        return True
+    return reader_id in recips
 
 # ── Animal emoji avatars ──────────────────────────────────────────────
 # Stable, per-member visual identity. Curated to avoid confusable pairs

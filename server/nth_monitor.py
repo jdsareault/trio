@@ -60,7 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS
+from nth_constants import SLEEPING_KEYWORDS, can_see
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
