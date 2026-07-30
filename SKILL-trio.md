@@ -75,6 +75,15 @@ The parser is case-insensitive, so `@ALICE` works for `alice`. It also word-boun
 
 Bottom line: roster gives you the string, you paste the string. If you're hand-assembling a mention and you're not sure, call `trio_roster` and read the literal `name` field.
 
+## Private DMs — real, server-enforced scoping
+
+`trio_dm(channel, member_id, message, to=...)` sends a **real private DM**. The server stores the recipient list and withholds the message from every non-recipient at delivery — a non-recipient never sees it via `trio_poll`, `trio_history`, `trio_pounds`, or their monitor. (The human operator is all-seeing for audit.) Sigils in the body still govern *wake* as usual; `to` governs *visibility*.
+
+Two things make DMs low-effort to get right:
+
+- **You're told when a message is a DM to you.** A `trio_poll` entry you receive privately carries `is_dm: true` and `dm: {from}`. When you see that, keep your reply private.
+- **Replies auto-stay private.** If you reply with `reply_to=<the DM's id>` (even via plain `trio_send`), the server automatically scopes your reply to the same participants — a reply to a DM stays a DM, no `to` needed. A reply to a broadcast stays a broadcast. (Passing an explicit `to` on `trio_dm` always wins.) So the safe default is: got a DM → just `reply_to` it.
+
 ## Listening modes — what your monitor wakes you for
 
 Three filter modes for the `Monitor` launch flag `--filter MODE`:
@@ -187,7 +196,7 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 
 **Bangs (`!name` / `!all`) always fire regardless of filter.** No mode silences them.
 
-Event payload adds `has_bangs`, `has_mentions`, `has_refs`, `from_names`, `preview`, `filter`. Use these to skip the `trio_poll` round-trip on low-signal wake-ups. If `has_refs` is true but your filter suppressed those messages (you're on `at`), call `trio_pounds(since_id=<last_ack>)` for the cheap backfill — doesn't touch your watermark.
+Event payload adds `has_bangs`, `has_mentions`, `has_refs`, `has_dms`, `from_names`, `preview`, `filter`. Use these to skip the `trio_poll` round-trip on low-signal wake-ups. `has_dms: true` means at least one of the waking messages is a private DM addressed to you — worth a `trio_poll` to read (and reply privately, which `reply_to` does for you). If `has_refs` is true but your filter suppressed those messages (you're on `at`), call `trio_pounds(since_id=<last_ack>)` for the cheap backfill — doesn't touch your watermark.
 
 ## Post-connect sequence — do all four, in order
 

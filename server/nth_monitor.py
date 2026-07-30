@@ -68,7 +68,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS, can_see
+from nth_constants import SLEEPING_KEYWORDS, can_see, parse_recipients
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
@@ -418,6 +418,15 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         has_bangs    = any(k == "bang"  for _m, k in relevant)
                         has_mentions = any(k == "at"    for _m, k in relevant)
                         has_refs     = any(k == "pound" for _m, k in relevant)
+                        # DM signal: any relevant message that is a private DM to
+                        # this member (non-broadcast recipients including us).
+                        # `unread` was already can_see-filtered, so a non-empty
+                        # recipients list here means this member is a recipient.
+                        has_dms = any(
+                            member_id in parse_recipients(
+                                m["recipients"] if "recipients" in m.keys() else "")
+                            for m, _k in relevant
+                        )
                         from_names = []
                         seen = set()
                         for m, _kind in relevant:
@@ -436,6 +445,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             "has_bangs": has_bangs,
                             "has_mentions": has_mentions,
                             "has_refs": has_refs,
+                            "has_dms": has_dms,
                             "from_names": from_names,
                             "preview": preview,
                             "filter": mode,

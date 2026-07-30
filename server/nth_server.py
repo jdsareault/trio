@@ -1125,6 +1125,11 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
     and leaves a breadcrumb bob can read on wake. "!all channel closing in
     60s" wakes every member unconditionally.
 
+    DM auto-scope: if reply_to points at a private DM you participate in, this
+    reply is automatically kept private to the SAME people — a reply to a DM
+    stays a DM, no recipient list needed. A reply to a broadcast stays a
+    broadcast. Use trio_dm (with `to`) to start a new DM or override scope.
+
     Set task=True to simultaneously post the message as a claimable task.
     Set pin=True to pin this message as the channel objective (shown in
     nth_status and nth_connect for new joiners). Only one pin per channel.
@@ -1204,6 +1209,17 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             if not target:
                 return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
 
+        # Auto-scope DM replies: a reply to a DM STAYS a DM to the same people
+        # (code-enforced, participant-gated — see _inherited_dm_recipients).
+        # trio_send never takes explicit recipients, so this is the only way a
+        # trio_send reply becomes private, and it only ever narrows scope.
+        reader_kind = member["kind"] if "kind" in member.keys() else "agent"
+        # allow_all_seeing=False: member_id is unauthenticated on this MCP path,
+        # so a forged operator id must not be trusted as an all-seeing
+        # participant (see _inherited_dm_recipients).
+        recipients_json = _inherited_dm_recipients(
+            db, channel, reply_to, member_id, reader_kind, allow_all_seeing=False)
+
         now = now_iso()
         task_id = None
 
@@ -1273,15 +1289,23 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
         # Detect @pings, #pounds, and !bangs against the roster (shared helper).
         mention_ids, ref_ids, bang_ids = _parse_sigils(db, channel, content)
+        # If this reply inherited a DM scope, auto-wake its recipients (mirror
+        # trio_dm): they CAN see it, so add them to the ping set even if the
+        # replier didn't @them. Visibility stays governed by `recipients`.
+        if recipients_json is not None:
+            for rid in json.loads(recipients_json):
+                if rid not in mention_ids:
+                    mention_ids.append(rid)
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
         bangs_json = json.dumps(bang_ids) if bang_ids else ""
 
         cur = db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
-            "author_session, reply_to, confidence, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "recipients, author_session, reply_to, confidence, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
+             recipients_json if recipients_json is not None else "[]",
              author_session, reply_to, confidence_val, now),
         )
         msg_id = cur.lastrowid
@@ -1384,6 +1408,71 @@ def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
         elif rid not in recipient_ids:
             recipient_ids.append(rid)
     return recipient_ids, unresolved
+
+
+def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
+                             sender_kind: str = "agent", allow_all_seeing: bool = False):
+    """Auto-scope a reply so a reply to a DM STAYS a DM to the same people.
+
+    Returns a JSON recipients string to stamp on the reply, or None to leave it
+    a broadcast (the caller's default). The rule, code-enforced so a member's
+    reply can never accidentally leak a private thread:
+
+      • reply_to points at a BROADCAST (empty recipients) → None (a reply to a
+        broadcast stays a broadcast — no change).
+      • reply_to points at a DM (non-empty recipients) AND the replier is a
+        PARTICIPANT of that DM — i.e. can_see() admits the replier to the
+        original — → inherit the ORIGINAL participant set {original_sender} ∪
+        recipients, minus the replier itself (the sender always sees their own
+        posts via can_see), so exactly the same people can read the reply.
+        Never empty: a self-addressed thread falls back to the full participant
+        set rather than degrading to a broadcast (a privacy inversion).
+      • the replier is NOT a participant → None. A non-participant must not be
+        able to widen or narrow a thread they were never in; their reply is
+        treated as an ordinary broadcast of their own words (it carries none of
+        the DM's content), so nothing leaks.
+
+    The participant guard is THE shared visibility predicate can_see() — "you
+    may inherit a thread's scope only if you could see it" — so this can never
+    drift from the read paths. allow_all_seeing mirrors can_see: the agent-facing
+    MCP path (nth_send) passes False because it identifies its caller only by an
+    UNAUTHENTICATED, caller-supplied member_id — a forged operator id
+    (`_op_l_…`) must NOT be trusted as an all-seeing participant and auto-scoped
+    into arbitrary DMs. All-seeing inheritance is reserved for an authenticated
+    surface (the web operator, which anyway sends explicit recipients).
+
+    Inheritance only ever NARROWS visibility (broadcast→scoped); it can never
+    turn a DM into a broadcast. Callers that pass explicit recipients (trio_dm's
+    `to`, the web DM tab) skip this entirely — explicit recipients win.
+    """
+    if reply_to is None:
+        return None
+    try:
+        row = db.execute(
+            "SELECT member_id, recipients FROM messages WHERE id = ? AND channel = ?",
+            (reply_to, channel),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Pre-migration DB with no recipients column — nothing to inherit.
+        return None
+    if not row:
+        return None
+    recips_raw = row["recipients"] if "recipients" in row.keys() else ""
+    recips = parse_recipients(recips_raw)
+    if not recips:
+        return None  # reply to a broadcast stays a broadcast
+    orig_sender = row["member_id"]
+    # Participant guard routed through the ONE visibility predicate: inherit
+    # only if the replier could actually see the original DM.
+    if not can_see(sender_id, sender_kind, orig_sender, recips_raw,
+                   allow_all_seeing=allow_all_seeing):
+        return None
+    # Ordered-unique participant set, then drop the replier (sees own posts).
+    participants = list(dict.fromkeys([orig_sender, *recips]))
+    inherited = [p for p in participants if p != sender_id]
+    if not inherited:
+        inherited = participants  # self-thread: keep private, never broadcast
+    return json.dumps(inherited)
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_dm")
@@ -1838,6 +1927,11 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     Returns all unread messages, or "no_new" if nothing arrived.
     Updates your heartbeat so others know you're connected.
 
+    Private DMs: a message you receive as a DM (addressed to you, not a
+    broadcast) carries "is_dm": true and "dm": {"from": <sender>} on its entry.
+    When you see that flag, reply privately — replying with reply_to=<its id>
+    auto-scopes your reply to the same participants (see trio_send / trio_dm).
+
     The watermark does NOT auto-advance. Call nth_ack(through_id) after
     processing messages to advance it. If you never call nth_ack, the
     next poll auto-acks everything from this poll before fetching new
@@ -1986,10 +2080,12 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 # mentions_only path below — hidden DMs are dropped from the
                 # returned set (`display_msgs`) but `unread` stays raw, so the
                 # watermark advances past them on auto-ack. They never return
-                # AND never sit unread forever. Operators (kind != 'agent') are
-                # all-seeing, so nothing is withheld from them. On a pre-migration
-                # row (no recipients column) can_see treats it as a broadcast —
-                # legacy behavior unchanged.
+                # AND never sit unread forever. NOTE: this is an agent-facing MCP
+                # read path, so all-seeing is DISABLED (allow_all_seeing=False
+                # below) — a caller-supplied member_id is unauthenticated, so
+                # even a real operator id is scoped here (see nth_constants.
+                # is_all_seeing / can_see). On a pre-migration row (no recipients
+                # column) can_see treats it as a broadcast — legacy unchanged.
                 reader_kind = member["kind"] if "kind" in member.keys() else "agent"
                 display_msgs = [
                     m for m in display_msgs
@@ -2080,6 +2176,19 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         entry["referenced"] = True
                     if banged:
                         entry["banged"] = True
+                    # DM signal: flag messages this member receives as a private
+                    # DM (non-broadcast where they're a recipient) so the agent
+                    # knows to reply privately. The reply auto-scopes anyway
+                    # (see _inherited_dm_recipients), but the flag lets a
+                    # well-behaved agent be deliberate. Everything in
+                    # display_msgs already passed can_see, so a non-empty
+                    # recipients list containing member_id is exactly a DM to
+                    # this reader; broadcasts (empty recipients) get no flag.
+                    dm_recips = parse_recipients(
+                        m["recipients"] if "recipients" in m.keys() else "")
+                    if dm_recips and member_id in dm_recips:
+                        entry["is_dm"] = True
+                        entry["dm"] = {"from": m["member_name"] or m["member_id"]}
                     # Phase 2: attach image metadata always; deliver actual
                     # pixels as MCP Image blocks within the per-poll byte budget.
                     atts = _attachments_for(db, m["id"])
