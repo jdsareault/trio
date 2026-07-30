@@ -3143,6 +3143,16 @@ INDEX_HTML = r"""<!doctype html>
                     cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
   .member .rm-btn:hover { background: var(--mention); color: var(--bg);
                           border-color: var(--mention); }
+  .member .fmode-ctl { display: inline-flex; align-items: center; gap: 5px;
+                       font-size: 10px; color: var(--dim); user-select: none;
+                       text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .fmode-select { font: inherit; font-size: 11px; padding: 3px 6px;
+                          border-radius: 4px; background: var(--bg2);
+                          color: var(--fg); border: 1px solid var(--border);
+                          cursor: pointer; text-transform: none;
+                          letter-spacing: normal; }
+  .member .fmode-select:focus { outline: none; border-color: var(--accent); }
+  .member .fmode-select:disabled { opacity: 0.5; cursor: wait; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -5606,6 +5616,30 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Set an agent's wake filter (agent detail dropdown, feature #4). POSTs to
+  // /api/member/<id>/filter — one UPDATE members SET filter_mode. The monitor
+  // reads members.filter_mode each tick, so it takes effect on the next poll
+  // with no restart, and wins over the agent's launch --filter seed. Returns
+  // true on success; the caller restores the previous selection on false.
+  async function setMemberFilter(id, mode) {
+    try {
+      const r = await fetch('/api/member/' + encodeURIComponent(id) + '/filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filter_mode: mode }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('wake-filter change failed: ' + (err.error || r.status));
+        return false;
+      }
+      return true;
+    } catch (e) {
+      alert('wake-filter change failed: ' + e.message);
+      return false;
+    }
+  }
+
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
@@ -5694,6 +5728,47 @@ INDEX_HTML = r"""<!doctype html>
     if (!DM_MODE && m.id !== state.operator.id) {
       const actions = document.createElement('div');
       actions.className = 'member-actions';
+      // Wake-filter dropdown — operator-adjustable per agent (feature #4).
+      // Only agents run a monitor, so skip human/_op_ rows. Posts to
+      // /api/member/<id>/filter; the monitor reads members.filter_mode each
+      // tick, so the change lands on the agent's next poll with no restart.
+      if (isTargetable(m)) {
+        let prevMode = m.filter_mode || 'all';
+        const ctl = document.createElement('label');
+        ctl.className = 'fmode-ctl';
+        ctl.title = 'Wake filter — which messages wake this agent. '
+                  + 'Applies on the next monitor tick (no restart).';
+        ctl.appendChild(document.createTextNode('wakes on'));
+        const sel = document.createElement('select');
+        sel.className = 'fmode-select';
+        for (const [val, label] of [['all', 'all messages'],
+                                    ['about', '@ping + #pound'],
+                                    ['at', '@ping only']]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (prevMode === val) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        // Don't let interacting with the control toggle the row's expand state.
+        sel.addEventListener('click', (e) => e.stopPropagation());
+        sel.addEventListener('change', async (e) => {
+          e.stopPropagation();
+          const chosen = sel.value;
+          sel.disabled = true;
+          const ok = await setMemberFilter(m.id, chosen);
+          sel.disabled = false;
+          if (ok) {
+            // Keep the cached roster coherent until the next SSE snapshot.
+            m.filter_mode = chosen;
+            prevMode = chosen;
+          } else {
+            sel.value = prevMode;  // server rejected it — restore the shown value
+          }
+        });
+        ctl.appendChild(sel);
+        actions.appendChild(ctl);
+      }
       const rm = document.createElement('button');
       rm.type = 'button';
       rm.className = 'rm-btn';
