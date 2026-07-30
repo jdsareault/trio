@@ -54,7 +54,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel
+from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
+                           can_see, is_all_seeing, parse_recipients)
 
 
 # ───────── Config ─────────
@@ -670,6 +671,10 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
         ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
         ("messages", "reply_to",  "INTEGER"),
+        # real-DMs: recipient/visibility column (see nth_server.get_db). The web
+        # dashboard may run against a DB the MCP server hasn't migrated yet, so
+        # we own the forward-compat ALTER here too. '[]'/NULL = broadcast.
+        ("messages", "recipients", "TEXT NOT NULL DEFAULT '[]'"),
         ("messages", "retracted_at", "TEXT"),
         ("messages", "retracted_by", "TEXT"),
         ("messages", "retraction_reason", "TEXT"),
@@ -751,12 +756,35 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
         "reply_to": (r["reply_to"] if "reply_to" in keys else None),
         "confidence": (r["confidence"] if "confidence" in keys else None),
+        # recipients backs the DM tab's real (no longer cosmetic) scoping. The
+        # web dashboard is the OPERATOR view and is all-seeing by design
+        # (operator sees every message, audit preserved), so the feed ships
+        # every row; the client uses recipients to focus the DM tab. Empty
+        # list = broadcast.
+        "recipients": parse_recipients(r["recipients"] if "recipients" in keys else ""),
         "retracted_at": (r["retracted_at"] if "retracted_at" in keys else None),
         "retraction_reason": (r["retraction_reason"] if "retraction_reason" in keys else None),
         "edited_at": (r["edited_at"] if "edited_at" in keys else None),
         "created_at": r["created_at"],
         "attachments": attachments_for_message(db, r["id"]),
     }
+
+
+def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
+                      all_seeing: bool) -> bool:
+    """Whether an SSE event may be delivered to a given viewer. Only 'message'
+    and 'message_update' events carry recipients and can be a DM — everything
+    else (roster, etc.) is always delivered. An all-seeing operator sees all;
+    any other viewer sees a message only if can_see admits it (broadcast, own,
+    or addressed to them). allow_all_seeing is False here so a guest/pending
+    web viewer — a human but NOT the operator — cannot use its identity to see
+    others' DMs on the live feed."""
+    if all_seeing:
+        return True
+    if event.get("type") not in ("message", "message_update"):
+        return True
+    return can_see(viewer_id, None, event.get("member_id"),
+                   event.get("recipients"), allow_all_seeing=False)
 
 
 # ───────── EventHub: polls DB, fans out SSE events ─────────
@@ -768,27 +796,36 @@ class EventHub:
         self.db_path = db_path
         self.channel = channel
         self.last_msg_id = 0
-        self._subs: List[queue.Queue] = []
+        # Each sub is (queue, viewer_id, all_seeing) so the fan-out can scope
+        # per-viewer — an operator sees all; a guest sees only what can_see admits.
+        self._subs: List[Tuple[queue.Queue, Optional[str], bool]] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_roster_snapshot: Optional[str] = None
 
     # ── subscription ──
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, viewer_id: Optional[str] = None, all_seeing: bool = True) -> queue.Queue:
+        """Register an SSE subscriber. viewer_id + all_seeing scope what this
+        connection receives: an all-seeing OPERATOR (loopback/tailscale) gets
+        every message; a guest / pending / any non-operator viewer receives
+        only broadcasts, its own messages, and DMs addressed to it — real DMs
+        are withheld from a guest's live feed, not just hidden client-side.
+        Defaults keep the operator (and existing callers/tests) all-seeing."""
         q: queue.Queue = queue.Queue(maxsize=200)
+        sub = (q, viewer_id, all_seeing)
         with self._lock:
-            self._subs.append(q)
+            self._subs.append(sub)
         # Immediately send a current snapshot so the client renders right away.
-        self._prime_subscriber(q)
+        self._prime_subscriber(q, viewer_id, all_seeing)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
-            if q in self._subs:
-                self._subs.remove(q)
+            self._subs = [s for s in self._subs if s[0] is not q]
 
-    def _prime_subscriber(self, q: queue.Queue) -> None:
+    def _prime_subscriber(self, q: queue.Queue, viewer_id: Optional[str] = None,
+                          all_seeing: bool = True) -> None:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
@@ -803,12 +840,17 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "choices, selection, reply_to, confidence, retracted_at, retraction_reason, edited_at, created_at "
+                "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                q.put_nowait(json.dumps(_message_event(db, r)))
+                ev = _message_event(db, r)
+                # Withhold a non-recipient's DMs from the primed history too —
+                # else a guest sees every past DM on first page load.
+                if not _event_visible_to(ev, viewer_id, all_seeing):
+                    continue
+                q.put_nowait(json.dumps(ev))
         except (sqlite3.Error, queue.Full):
             pass
         finally:
@@ -820,16 +862,23 @@ class EventHub:
 
     # ── broadcast ──
     def _broadcast(self, event: Dict[str, Any]) -> None:
-        payload = json.dumps(event)
+        # Per-subscriber visibility: an all-seeing operator gets the payload;
+        # a scoped viewer only gets messages it may see (broadcasts, its own,
+        # DMs to it). Non-message events (roster) reach everyone. Serialize
+        # once for the common all-seeing case.
+        payload_all = json.dumps(event)
         with self._lock:
             dead = []
-            for q in self._subs:
+            for sub in self._subs:
+                q, viewer_id, all_seeing = sub
                 try:
-                    q.put_nowait(payload)
+                    if all_seeing or _event_visible_to(event, viewer_id, all_seeing):
+                        q.put_nowait(payload_all)
                 except queue.Full:
-                    dead.append(q)
+                    dead.append(sub)
             for d in dead:
-                self._subs.remove(d)
+                if d in self._subs:
+                    self._subs.remove(d)
 
     # ── DB poll ──
     def _fetch_roster(self, db: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -972,7 +1021,7 @@ class EventHub:
                     prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, confidence, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
@@ -986,7 +1035,7 @@ class EventHub:
                     scan_now = now_iso()
                     changed = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, confidence, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id <= ? AND "
                         "((retracted_at IS NOT NULL AND retracted_at > ?) OR "
                         " (edited_at IS NOT NULL AND edited_at > ?)) ORDER BY id",
@@ -1728,6 +1777,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def _serve_sse(self) -> None:
         assert self.hub is not None
+        # Resolve who is watching so the hub can scope the stream: only the
+        # authenticated OPERATOR (loopback/tailscale) is all-seeing; a guest /
+        # pending / any non-operator viewer receives only broadcasts, its own
+        # messages, and DMs addressed to it — real DMs are withheld from a
+        # guest's live feed, not merely hidden client-side.
+        _token, ident, _is_new = self._resolve_identity()
+        viewer_id = ident.member_id
+        viewer_all_seeing = is_all_seeing(viewer_id)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -1735,7 +1792,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = self.hub.subscribe()
+        q = self.hub.subscribe(viewer_id=viewer_id, all_seeing=viewer_all_seeing)
         try:
             last_heartbeat = time.monotonic()
             while True:
@@ -1838,6 +1895,31 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if reply_to is not None and not (type(reply_to) is int and reply_to > 0):
             self._error(400, "invalid reply_to")
             return
+
+        # recipients: when the operator composes in the DM tab the client sends
+        # the DM target's member_id(s) here, making this a REAL private message
+        # — the server stores the recipient list and the agent-facing read
+        # paths withhold it from everyone else. Absent / empty => broadcast
+        # (recipients column stays '[]'), i.e. today's behavior. The operator
+        # (sender) is all-seeing regardless, so their own dashboard still shows
+        # it. Validate: a list of non-empty strings, capped, de-duplicated.
+        raw_recipients = body.get("recipients")
+        recipient_ids: list = []
+        if raw_recipients is not None:
+            if not isinstance(raw_recipients, list):
+                self._error(400, "invalid recipients")
+                return
+            if len(raw_recipients) > 64:
+                self._error(400, "too many recipients (max 64)")
+                return
+            for rid in raw_recipients:
+                if not isinstance(rid, str) or not rid.strip():
+                    self._error(400, "invalid recipients")
+                    return
+                rid = rid.strip()
+                if rid not in recipient_ids:
+                    recipient_ids.append(rid)
+
         raw_sel = body.get("selection")
         selection_json = None
         has_selection = raw_sel is not None
@@ -2027,17 +2109,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
                     db, self.channel, posted_content
                 )
+                # A DM's recipients are auto-added to the ping set so they wake
+                # (they can see it); visibility stays governed by recipients.
+                # Mirrors trio_dm on the MCP side.
+                if recipient_ids:
+                    for rid in recipient_ids:
+                        if rid not in mention_ids:
+                            mention_ids.append(rid)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs, reply_to, selection) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, reply_to, selection, recipients) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
                      reply_to,
-                     selection_json if selection_json else ""),
+                     selection_json if selection_json else "",
+                     json.dumps(recipient_ids) if recipient_ids else "[]"),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
@@ -2214,6 +2304,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
+        # Only the operator is all-seeing; a guest search must not surface
+        # other members' DMs. Scope results with can_see for non-operators.
+        viewer_id = ident.member_id
+        viewer_all_seeing = is_all_seeing(viewer_id)
         # Escape LIKE wildcards so a query like "50%" is a literal substring.
         esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         like = f"%{esc}%"
@@ -2222,16 +2316,28 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at FROM messages "
-                "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
-                "ORDER BY id DESC LIMIT 200",
-                (self.channel, like),
-            ).fetchall()
+            try:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, recipients, created_at FROM messages "
+                    "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                    "ORDER BY id DESC LIMIT 200",
+                    (self.channel, like),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at FROM messages "
+                    "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                    "ORDER BY id DESC LIMIT 200",
+                    (self.channel, like),
+                ).fetchall()
             results = [{"id": r["id"], "member_id": r["member_id"],
                         "member_name": r["member_name"] or r["member_id"],
                         "content": r["content"] or "", "created_at": r["created_at"]}
-                       for r in rows]
+                       for r in rows
+                       if viewer_all_seeing or can_see(
+                           viewer_id, None, r["member_id"],
+                           (r["recipients"] if "recipients" in r.keys() else ""),
+                           allow_all_seeing=False)]
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
             return
@@ -7114,11 +7220,17 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     sendBtn.disabled = true;
+    // DM tab = a REAL private message now. Send the DM target as `recipients`
+    // so the server withholds it from every other agent (the operator, being
+    // all-seeing, still sees it in the main tab). Outside DM mode, recipients
+    // is omitted → broadcast, unchanged.
+    const dmRecipients = state.dmTargetId ? [state.dmTargetId] : undefined;
     try {
       const r = await fetch('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, mentions: mentionIds,
+                               recipients: dmRecipients,
                                attachment_ids: readyAtt.map(a => a.id) }),
       });
       if (!r.ok) {
@@ -7233,12 +7345,19 @@ INDEX_HTML = r"""<!doctype html>
     node.classList.toggle('filtered-out', !hit);
   }
   function isRelevantInDm(m) {
-    // Conversation between operator and DM target:
-    //  • authored by target → must @mention operator
-    //  • authored by operator → must @mention target
-    //  • system notices about this target (e.g. task claims) stay visible
+    // Conversation between operator and DM target. Now backed by REAL
+    // recipients (server-enforced) plus the legacy @mention heuristic so
+    // pre-DM backscroll still surfaces:
+    //  • a real DM addressed to the target (or from the target to us)
+    //  • authored by target → @mentions operator
+    //  • authored by operator → @mentions target
     if (!state.dmTargetId) return true;
     const ms = m.mentions || [];
+    const rc = m.recipients || [];
+    // Real DMs: operator → target, or target → operator.
+    if (m.member_id === state.operator.id && rc.includes(state.dmTargetId)) return true;
+    if (m.member_id === state.dmTargetId && rc.includes(state.operator.id)) return true;
+    // Legacy @mention conversation (broadcasts that pinged the counterpart).
     if (m.member_id === state.dmTargetId && ms.includes(state.operator.id)) return true;
     if (m.member_id === state.operator.id && ms.includes(state.dmTargetId)) return true;
     return false;

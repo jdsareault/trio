@@ -27,7 +27,7 @@ from pathlib import Path
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS
+from nth_constants import SLEEPING_KEYWORDS, can_see, is_all_seeing, parse_recipients
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -315,6 +315,13 @@ def get_db() -> sqlite3.Connection:
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
         ("messenger_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
         ("watchdog_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
+        # real-DMs: recipient/visibility column. Empty JSON array '[]' (or NULL
+        # on rows that predate the column) = broadcast = visible to everyone —
+        # today's behavior, unchanged. A DM stores a JSON array of recipient
+        # member_ids; the visibility predicate (nth_constants.can_see) withholds
+        # its bytes from non-recipients at every message read path. Additive and
+        # forward-compatible, exactly like mentions/refs/bangs above.
+        ("recipients", "messages", "TEXT NOT NULL DEFAULT '[]'"),
         # v6: provenance + retraction on messages
         ("author_session", "messages", "TEXT"),
         ("retracted_at", "messages", "TEXT"),
@@ -446,7 +453,13 @@ CONVERSATIONS_DIR = DB_DIR / "conversations"
 
 
 def export_conversation(db: sqlite3.Connection, channel: str) -> Path | None:
-    """Export a channel's conversation to a markdown file."""
+    """Export a channel's conversation to a markdown file.
+
+    This is an OPERATOR audit artifact: it deliberately includes every message,
+    DMs included (design decision: the operator is all-seeing, audit preserved).
+    It is written to the operator's local ~/.claude/nth/conversations dir and is
+    never delivered to an agent, so it does NOT apply the DM visibility filter.
+    If this export is ever exposed to a non-operator reader, add can_see here."""
     try:
         row = db.execute(
             "SELECT * FROM channels WHERE code = ?", (channel,)
@@ -855,14 +868,33 @@ def nth_connect(
             (channel,),
         ).fetchall()
 
-        recent = db.execute(
-            "SELECT id, member_id, member_name, content, created_at FROM messages "
-            "WHERE channel = ? ORDER BY id DESC LIMIT 10",
-            (channel,),
-        ).fetchall()
+        # The joiner is a fresh agent (kind='agent'); withhold any DMs in the
+        # recent backscroll that aren't addressed to them. In practice a brand-
+        # new member only sees broadcasts here, but filtering keeps this path
+        # honest with every other read path. Degrade gracefully on old schema.
+        try:
+            recent_raw = db.execute(
+                "SELECT id, member_id, member_name, content, recipients, created_at FROM messages "
+                "WHERE channel = ? ORDER BY id DESC LIMIT 30",
+                (channel,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            recent_raw = db.execute(
+                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "WHERE channel = ? ORDER BY id DESC LIMIT 30",
+                (channel,),
+            ).fetchall()
+        recent = [
+            m for m in recent_raw
+            if can_see(member_id, "agent", m["member_id"],
+                       m["recipients"] if "recipients" in m.keys() else "",
+                       allow_all_seeing=False)
+        ][:10]
 
-        # Set watermark to current latest message
-        latest_id = recent[0]["id"] if recent else 0
+        # Set watermark to current latest message. Use the true latest id
+        # (including any hidden DMs) so the joiner's cursor starts past them —
+        # a DM sent before they joined must never surface on their first poll.
+        latest_id = recent_raw[0]["id"] if recent_raw else 0
         db.execute(
             "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
             (latest_id, member_id, channel),
@@ -951,6 +983,125 @@ def nth_connect(
 
     finally:
         db.close()
+
+
+def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
+    """Resolve @pings / #pounds / !bangs in `content` against the channel
+    roster. Returns (mention_ids, ref_ids, bang_ids) — lists of member_ids.
+
+    All three sigils resolve in the same roster pass:
+      @name  → mentions (wakes the target under default filter modes)
+      #name  → refs     (never wakes on any filter; grep via nth_pounds)
+      !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
+    @all / !all both broadcast — @all pings everyone under their filter,
+    !all wakes everyone unconditionally. There is no #all.
+
+    Sigils govern WAKE, not visibility — a DM's recipients are set
+    separately. Shared by nth_send and nth_dm so both carry identical wake
+    semantics; mirrors nth_web._parse_sigils_against_roster on the web side."""
+    mention_ids: list = []
+    ref_ids: list = []
+    bang_ids: list = []
+    if "@" in content or "#" in content or "!" in content:
+        all_members = db.execute(
+            "SELECT id, name FROM members WHERE channel = ?",
+            (channel,),
+        ).fetchall()
+        content_lower = content.lower()
+        all_ids = [m["id"] for m in all_members]
+        # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
+        # doesn't broadcast; "@all" or "@all " or "@all," does.
+        at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
+        bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
+        if at_all:
+            mention_ids = list(all_ids)
+        if bang_all:
+            bang_ids = list(all_ids)
+        hit_at: set = set()
+        hit_ref: set = set()
+        hit_bang: set = set()
+        literal_names_lower: set = set()
+        for m in all_members:
+            name_stripped = (m["name"] or "").strip()
+            mid = m["id"]
+            # Direct-id mention path: @<member_id> routes regardless of
+            # name. Agents that cache the id from nth_connect survive
+            # renames and don't need to re-parse the roster on every send.
+            id_esc = re.escape(mid)
+            if not at_all:
+                if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    if mid not in hit_at:
+                        mention_ids.append(mid)
+                        hit_at.add(mid)
+            if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                if mid not in hit_ref:
+                    ref_ids.append(mid)
+                    hit_ref.add(mid)
+            if not bang_all:
+                if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    if mid not in hit_bang:
+                        bang_ids.append(mid)
+                        hit_bang.add(mid)
+            # Skip a member named literally "all" — the @all/!all shortcuts
+            # already handle that keyword; matching it as a regular name
+            # would double-count. "all" is also a reserved display name
+            # we refuse during identity registration on the web side.
+            if name_stripped.lower() == "all" or not name_stripped:
+                continue
+            literal_names_lower.add(name_stripped.lower())
+            name_esc = re.escape(name_stripped)
+            if not at_all and mid not in hit_at:
+                at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                if at_pat.search(content):
+                    mention_ids.append(mid)
+                    hit_at.add(mid)
+            if mid not in hit_ref:
+                hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                if hash_pat.search(content):
+                    ref_ids.append(mid)
+                    hit_ref.add(mid)
+            if not bang_all and mid not in hit_bang:
+                bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                if bang_pat.search(content):
+                    bang_ids.append(mid)
+                    hit_bang.add(mid)
+
+        # Guest-stem fallback: if the roster has `gabe-guest` (or the
+        # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
+        # the guest — the `-guest` tag is a trust label, not part of
+        # the handle. Skip when the stem collides with a real member's
+        # literal name (trust favors the non-guest identity), or when
+        # multiple guests share a stem (ambiguous — force literal).
+        guest_by_stem: dict = {}
+        for m in all_members:
+            stem = _guest_stem(m["name"] or "")
+            if not stem:
+                continue
+            guest_by_stem.setdefault(stem.lower(), []).append(m)
+        _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
+        for stem_lower, guests in guest_by_stem.items():
+            if stem_lower in _RESERVED_STEMS:
+                continue  # never let a stem fight the @all/!all broadcast shortcut
+            if stem_lower in literal_names_lower:
+                continue
+            if len(guests) != 1:
+                continue
+            g = guests[0]
+            stem = _guest_stem(g["name"] or "") or ""
+            if not stem:
+                continue
+            stem_esc = re.escape(stem)
+            gid = g["id"]
+            if not at_all and gid not in hit_at:
+                if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    mention_ids.append(gid)
+            if gid not in hit_ref:
+                if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    ref_ids.append(gid)
+            if not bang_all and gid not in hit_bang:
+                if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    bang_ids.append(gid)
+    return mention_ids, ref_ids, bang_ids
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_send")
@@ -1120,116 +1271,8 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         else:
             content = message
 
-        # Detect @pings, #pounds, and !bangs in content. All three resolve
-        # against member names against the same roster pass:
-        #   @name  → mentions (wakes target under default filter modes)
-        #   #name  → refs     (never wakes on any filter; grep via nth_pounds)
-        #   !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
-        # @all / !all both broadcast — @all pings everyone under their filter,
-        # !all wakes everyone unconditionally. There is no #all (a reference
-        # to every member is just noise).
-        mention_ids: list[str] = []
-        ref_ids: list[str] = []
-        bang_ids: list[str] = []
-        if "@" in content or "#" in content or "!" in content:
-            all_members = db.execute(
-                "SELECT id, name FROM members WHERE channel = ?",
-                (channel,),
-            ).fetchall()
-            content_lower = content.lower()
-            all_ids = [m["id"] for m in all_members]
-            # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
-            # doesn't broadcast; "@all" or "@all " or "@all," does.
-            at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
-            bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
-            if at_all:
-                mention_ids = list(all_ids)
-            if bang_all:
-                bang_ids = list(all_ids)
-            hit_at: set = set()
-            hit_ref: set = set()
-            hit_bang: set = set()
-            literal_names_lower: set = set()
-            for m in all_members:
-                name_stripped = (m["name"] or "").strip()
-                mid = m["id"]
-                # Direct-id mention path: @<member_id> routes regardless of
-                # name. Agents that cache the id from nth_connect survive
-                # renames and don't need to re-parse the roster on every send.
-                id_esc = re.escape(mid)
-                if not at_all:
-                    if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        if mid not in hit_at:
-                            mention_ids.append(mid)
-                            hit_at.add(mid)
-                if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    if mid not in hit_ref:
-                        ref_ids.append(mid)
-                        hit_ref.add(mid)
-                if not bang_all:
-                    if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        if mid not in hit_bang:
-                            bang_ids.append(mid)
-                            hit_bang.add(mid)
-                # Skip a member named literally "all" — the @all/!all shortcuts
-                # already handle that keyword; matching it as a regular name
-                # would double-count. "all" is also a reserved display name
-                # we refuse during identity registration on the web side.
-                if name_stripped.lower() == "all" or not name_stripped:
-                    continue
-                literal_names_lower.add(name_stripped.lower())
-                name_esc = re.escape(name_stripped)
-                if not at_all and mid not in hit_at:
-                    at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if at_pat.search(content):
-                        mention_ids.append(mid)
-                        hit_at.add(mid)
-                if mid not in hit_ref:
-                    hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if hash_pat.search(content):
-                        ref_ids.append(mid)
-                        hit_ref.add(mid)
-                if not bang_all and mid not in hit_bang:
-                    bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if bang_pat.search(content):
-                        bang_ids.append(mid)
-                        hit_bang.add(mid)
-
-            # Guest-stem fallback: if the roster has `gabe-guest` (or the
-            # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
-            # the guest — the `-guest` tag is a trust label, not part of
-            # the handle. Skip when the stem collides with a real member's
-            # literal name (trust favors the non-guest identity), or when
-            # multiple guests share a stem (ambiguous — force literal).
-            guest_by_stem: dict[str, list] = {}
-            for m in all_members:
-                stem = _guest_stem(m["name"] or "")
-                if not stem:
-                    continue
-                guest_by_stem.setdefault(stem.lower(), []).append(m)
-            _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
-            for stem_lower, guests in guest_by_stem.items():
-                if stem_lower in _RESERVED_STEMS:
-                    continue  # never let a stem fight the @all/!all broadcast shortcut
-                if stem_lower in literal_names_lower:
-                    continue
-                if len(guests) != 1:
-                    continue
-                g = guests[0]
-                stem = _guest_stem(g["name"] or "") or ""
-                if not stem:
-                    continue
-                stem_esc = re.escape(stem)
-                gid = g["id"]
-                if not at_all and gid not in hit_at:
-                    if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        mention_ids.append(gid)
-                if gid not in hit_ref:
-                    if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        ref_ids.append(gid)
-                if not bang_all and gid not in hit_bang:
-                    if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                        bang_ids.append(gid)
+        # Detect @pings, #pounds, and !bangs against the roster (shared helper).
+        mention_ids, ref_ids, bang_ids = _parse_sigils(db, channel, content)
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
         bangs_json = json.dumps(bang_ids) if bang_ids else ""
@@ -1304,6 +1347,199 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             result["task_id"] = task_id
         if pin:
             result["pinned"] = True
+        return json.dumps(result)
+    finally:
+        db.close()
+
+
+def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
+    """Resolve a comma-separated `to` string of names and/or member_ids to a
+    de-duplicated list of recipient member_ids. Returns (recipient_ids,
+    unresolved_tokens). Matching is by exact member_id first, then
+    case-insensitive display name; a leading '@' the caller may have typed is
+    tolerated. Names that collide keep the first roster match."""
+    roster = db.execute(
+        "SELECT id, name FROM members WHERE channel = ?", (channel,)
+    ).fetchall()
+    by_id = {r["id"] for r in roster}
+    by_name: dict = {}
+    for r in roster:
+        nm = (r["name"] or "").strip().lower()
+        if nm:
+            by_name.setdefault(nm, r["id"])
+    recipient_ids: list = []
+    unresolved: list = []
+    for tok in (to or "").split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        cand = t.lstrip("@").strip()
+        rid = None
+        if cand in by_id:
+            rid = cand
+        elif cand.lower() in by_name:
+            rid = by_name[cand.lower()]
+        if rid is None:
+            unresolved.append(t)
+        elif rid not in recipient_ids:
+            recipient_ids.append(rid)
+    return recipient_ids, unresolved
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_dm")
+def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: str = "", reply_to: int | None = None) -> str:
+    """Send a PRIVATE direct message to specific member(s) — a REAL DM.
+
+    Unlike trio_send (which broadcasts to the whole channel), trio_dm is
+    addressed: the server stores the recipient list and WITHHOLDS the message
+    from every non-recipient at delivery time. Only the sender, the named
+    recipients, and the human operator (all-seeing, for audit) will ever see
+    it via trio_poll / trio_history / trio_pounds / the dashboard / the
+    monitor. Other agents' polls never return it.
+
+    Boundary strength depends on deployment (see FUTURE_IMPROVEMENTS #9):
+    against a well-behaved agent — which only ever touches the channel through
+    these tools — the withholding is real. Locally the DB is a plaintext
+    SQLite file the agents share, so this is soft scoping, NOT encryption; a
+    determined local agent could read the file directly. For remote quartet
+    spokes (no filesystem access to the hub) it is a genuine boundary.
+
+    Sigils vs. recipients:
+      • `to` governs VISIBILITY — who may read the message.
+      • @/#/! sigils in `message` govern WAKE as usual. Recipients are also
+        auto-woken (added to the ping set) so a DM actually reaches them even
+        if you forget to @them. @-mentioning a NON-recipient is inert: they
+        are woken by nothing they can see, so their monitor stays quiet.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (from trio_connect)
+        message: The private message (max 4000 chars). @/#/! sigils still parse.
+        to: Comma-separated recipient names and/or member_ids
+            (e.g. "Reviewer, x1y2z3"). Names match case-insensitively.
+        session_token: Your session token (same capability check as trio_send).
+        reply_to: Optional id of a message this replies to (must be in-channel).
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    if not message or not message.strip():
+        return json.dumps({"error": "Message cannot be empty."})
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return json.dumps({"error": f"Message too long ({len(message)} > {MAX_MESSAGE_LENGTH})."})
+    if not to or not to.strip():
+        return json.dumps({"error": "trio_dm requires `to` (comma-separated recipient names/ids)."})
+
+    db = get_db()
+    try:
+        ch = _get_channel(db, channel)
+        if not ch:
+            return json.dumps({"error": f'Channel "{channel}" not found.'})
+        if ch["status"] == "ended":
+            return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        # Same session-token capability check as nth_send: a provided token
+        # must be valid, match member_id, and be a 'primary' (not read_only) role.
+        author_session = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            if sess["role"] != "primary":
+                return json.dumps({"error": f"session_token role '{sess['role']}' cannot send. Use a primary token."})
+            author_session = session_token
+
+        # Resolve recipients against the roster BEFORE inserting. A DM with no
+        # resolvable recipient must be rejected — storing '[]' would silently
+        # turn it into a broadcast (a privacy inversion / leak).
+        recipient_ids, unresolved = _resolve_recipients(db, channel, to)
+        if unresolved:
+            return json.dumps({"error": f"Unknown recipient(s): {', '.join(unresolved)}. "
+                                        "Use names or member_ids from the roster (trio_roster)."})
+        if not recipient_ids:
+            return json.dumps({"error": "trio_dm requires at least one recipient in `to`."})
+
+        # Validate reply_to (must reference an existing in-channel message).
+        if reply_to is not None:
+            target = db.execute(
+                "SELECT id FROM messages WHERE id = ? AND channel = ?",
+                (reply_to, channel),
+            ).fetchone()
+            if not target:
+                return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
+
+        now = now_iso()
+        content = message
+
+        # Wake semantics: parse sigils as usual, then auto-add recipients to
+        # the ping set so a DM actually wakes its recipients (they CAN see it).
+        # Visibility is governed by `recipients`, independent of these sigils.
+        mention_ids, ref_ids, bang_ids = _parse_sigils(db, channel, content)
+        for rid in recipient_ids:
+            if rid not in mention_ids:
+                mention_ids.append(rid)
+
+        mentions_json = json.dumps(mention_ids) if mention_ids else ""
+        refs_json = json.dumps(ref_ids) if ref_ids else ""
+        bangs_json = json.dumps(bang_ids) if bang_ids else ""
+        recipients_json = json.dumps(recipient_ids)
+
+        cur = db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
+            "recipients, author_session, reply_to, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
+             recipients_json, author_session, reply_to, now),
+        )
+        msg_id = cur.lastrowid
+
+        if author_session:
+            db.execute(
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now, author_session),
+            )
+
+        # Mirror nth_send: refresh heartbeat / clear sleeping status, bump channel.
+        current_status = member["status_text"] if "status_text" in member.keys() else ""
+        if current_status and any(kw in current_status.lower() for kw in SLEEPING_KEYWORDS):
+            db.execute(
+                "UPDATE members SET last_seen = ?, status_text = '', status_changed_at = ? "
+                "WHERE id = ? AND channel = ?",
+                (now, now, member_id, channel),
+            )
+        else:
+            db.execute(
+                "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                (now, member_id, channel),
+            )
+        db.execute("UPDATE channels SET updated_at = ? WHERE code = ?", (now, channel))
+        db.commit()
+
+        # Resolve recipient names for the console + response (audit-friendly).
+        recipient_names = []
+        for rid in recipient_ids:
+            rm = _get_member(db, channel, rid)
+            recipient_names.append(rm["name"] if rm and rm["name"] else rid)
+        _console("🔒", channel, f"{member['name']} → {', '.join(recipient_names)} (DM): {content}", 35)
+
+        result = {
+            "ok": True,
+            "channel": channel,
+            "message_id": msg_id,
+            "recipients": recipient_ids,
+            "recipient_names": recipient_names,
+            "private": True,
+        }
+        nag = _sentinel_nag(member)
+        if nag:
+            result["footer"] = nag
         return json.dumps(result)
     finally:
         db.close()
@@ -1667,12 +1903,28 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             if not ch:
                 return json.dumps({"event": "channel_gone"})
             if ch["status"] == "ended":
-                # Return any unread messages before reporting end
-                unread = db.execute(
-                    "SELECT id, member_id, member_name, content, created_at "
-                    "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
-                    (channel, current_watermark),
-                ).fetchall()
+                # Return any unread messages before reporting end. Apply the DM
+                # visibility filter — a channel ending must not dump DMs this
+                # member was never allowed to see. `member` is fetched above.
+                try:
+                    unread = db.execute(
+                        "SELECT id, member_id, member_name, content, recipients, created_at "
+                        "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
+                        (channel, current_watermark),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    unread = db.execute(
+                        "SELECT id, member_id, member_name, content, created_at "
+                        "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
+                        (channel, current_watermark),
+                    ).fetchall()
+                reader_kind = member["kind"] if "kind" in member.keys() else "agent"
+                unread = [
+                    m for m in unread
+                    if can_see(member_id, reader_kind, m["member_id"],
+                               m["recipients"] if "recipients" in m.keys() else "",
+                               allow_all_seeing=False)
+                ]
                 # Resolve ended_by member_id to display name
                 ended_by_name = ch["ended_by"]
                 if ch["ended_by"]:
@@ -1703,7 +1955,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             # 'banged'. Fall back progressively on older schemas.
             try:
                 unread = db.execute(
-                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, recipients, created_at "
                     "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
                     (channel, current_watermark, member_id),
                 ).fetchall()
@@ -1728,6 +1980,23 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     display_msgs = filtered
                 else:
                     display_msgs = unread
+
+                # DM visibility filter: withhold messages this member isn't
+                # allowed to see (a DM addressed to others). EXACTLY like the
+                # mentions_only path below — hidden DMs are dropped from the
+                # returned set (`display_msgs`) but `unread` stays raw, so the
+                # watermark advances past them on auto-ack. They never return
+                # AND never sit unread forever. Operators (kind != 'agent') are
+                # all-seeing, so nothing is withheld from them. On a pre-migration
+                # row (no recipients column) can_see treats it as a broadcast —
+                # legacy behavior unchanged.
+                reader_kind = member["kind"] if "kind" in member.keys() else "agent"
+                display_msgs = [
+                    m for m in display_msgs
+                    if can_see(member_id, reader_kind, m["member_id"],
+                               m["recipients"] if "recipients" in m.keys() else "",
+                               allow_all_seeing=False)
+                ]
 
                 # Apply mentions_only filter: keep broadcasts (empty mentions)
                 # and messages that mention this member. Hidden messages still
@@ -2030,17 +2299,23 @@ def nth_retract(channel: str, member_id: str, message_id: int, reason: str = "",
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_history")
-def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> str:
-    """Replay recent messages from a channel. Does NOT require member_id or
-    advance any read watermark — purely read-only.
+def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, member_id: str = "") -> str:
+    """Replay recent messages from a channel. Does NOT advance any read
+    watermark — purely read-only.
 
     Use this to catch up on messages you missed during a long poll, or to
     review the conversation history.
+
+    Pass your member_id so private DMs addressed to you are included and
+    everyone else's DMs stay hidden. WITHOUT member_id, history returns only
+    broadcast (non-DM) messages — a DM never leaks to an unidentified caller.
 
     Args:
         channel: Channel code
         last_n: Number of most recent messages to return (default 20, max 100)
         from_id: If given, return messages with id >= from_id (overrides last_n)
+        member_id: Your member ID (from trio_connect). Optional; when supplied,
+                   DMs you sent or received are included and others' are withheld.
     """
     err = validate_channel_code(channel)
     if err:
@@ -2054,21 +2329,56 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> s
         if not ch:
             return json.dumps({"error": f"Channel '{channel}' not found."})
 
-        if from_id is not None:
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at, "
-                "retracted_at, retracted_by, retraction_reason, reply_to "
-                "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
-                (channel, from_id),
-            ).fetchall()
-        else:
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at, "
-                "retracted_at, retracted_by, retraction_reason, reply_to "
-                "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
-                (channel, last_n),
-            ).fetchall()
-            rows = list(reversed(rows))
+        # Reader identity for the DM visibility filter. An unknown / omitted
+        # member_id resolves to reader_id=None, reader_kind=None -> can_see
+        # admits broadcasts only (DMs withheld). A real member gets their kind
+        # so operators (kind != 'agent') stay all-seeing.
+        reader_kind = None
+        reader_id = member_id or None
+        if reader_id:
+            rdr = _get_member(db, channel, reader_id)
+            reader_kind = (rdr["kind"] if rdr and "kind" in rdr.keys() else "agent")
+
+        # recipients is pulled for the filter; degrade gracefully on old schema.
+        try:
+            if from_id is not None:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to, recipients "
+                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
+                    (channel, from_id),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to, recipients "
+                    "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
+                    (channel, last_n),
+                ).fetchall()
+                rows = list(reversed(rows))
+        except sqlite3.OperationalError:
+            if from_id is not None:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to "
+                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
+                    (channel, from_id),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to "
+                    "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
+                    (channel, last_n),
+                ).fetchall()
+                rows = list(reversed(rows))
+
+        rows = [
+            m for m in rows
+            if can_see(reader_id, reader_kind, m["member_id"],
+                       m["recipients"] if "recipients" in m.keys() else "",
+                       allow_all_seeing=False)
+        ]
 
         messages = []
         retracted_ids = []
@@ -2152,16 +2462,32 @@ def nth_pounds(channel: str, member_id: str, since_id: int = 0, limit: int = 50)
         # [a-z0-9] so false-positives in content are vanishingly unlikely;
         # we still re-parse refs in Python to be sure.
         like_token = f'%"{member_id}"%'
-        rows = db.execute(
-            "SELECT id, member_id, member_name, content, mentions, refs, created_at "
-            "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
-            "AND retracted_at IS NULL "
-            "ORDER BY id DESC LIMIT ?",
-            (channel, since_id, like_token, limit),
-        ).fetchall()
+        try:
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, mentions, refs, recipients, created_at "
+                "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
+                "AND retracted_at IS NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (channel, since_id, like_token, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, mentions, refs, created_at "
+                "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
+                "AND retracted_at IS NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (channel, since_id, like_token, limit),
+            ).fetchall()
 
+        reader_kind = member["kind"] if "kind" in member.keys() else "agent"
         out = []
         for m in reversed(rows):
+            # DM visibility: a member #referenced inside a DM they are NOT a
+            # recipient of must not see it here either. Operators stay all-seeing.
+            if not can_see(member_id, reader_kind, m["member_id"],
+                           m["recipients"] if "recipients" in m.keys() else "",
+                           allow_all_seeing=False):
+                continue
             try:
                 ref_list = json.loads(m["refs"]) if m["refs"] else []
             except (json.JSONDecodeError, TypeError):
