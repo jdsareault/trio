@@ -323,6 +323,11 @@ def get_db() -> sqlite3.Connection:
         ("reply_to", "messages", "INTEGER"),
         # fork: timestamp of the last author edit (web dashboard edit feature).
         ("edited_at", "messages", "TEXT"),
+        # Structured confidence — an agent's self-rated confidence in a post,
+        # one of 'high'/'medium'/'low'. Nullable: absent means no confidence
+        # was declared (renders no badge). Supersedes the older text-suffix
+        # convention (appending the word to the message) — that still works.
+        ("confidence", "messages", "TEXT"),
         # v6: task lease with session heartbeat
         ("claimed_by_session", "tasks", "TEXT"),
         ("lease_expires_at", "tasks", "TEXT"),

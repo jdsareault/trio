@@ -645,6 +645,7 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "retracted_by", "TEXT"),
         ("messages", "retraction_reason", "TEXT"),
         ("messages", "edited_at",  "TEXT"),
+        ("messages", "confidence", "TEXT"),
     ):
         try:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
