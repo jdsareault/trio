@@ -365,6 +365,31 @@ check('rememberColors: overflow (>8) member falls back to its hash pick', () => 
   assert.strictEqual(new Set(firstEight).size, 8, 'first 8 sorted ids stay distinct');
 });
 
+// ── chimeScopeAllows: mention-scoped chime predicate (feature #7) ─────────────
+// The chime's scope gate. Pure, and independent of notifyScope: 'all' chimes on
+// every peer message; 'mention' only when the operator is @'d.
+check("chimeScopeAllows: 'all' chimes regardless of mention", () => {
+  assert.strictEqual(H.chimeScopeAllows('all', false), true);
+  assert.strictEqual(H.chimeScopeAllows('all', true), true);
+});
+check("chimeScopeAllows: 'mention' gates on the mention predicate", () => {
+  assert.strictEqual(H.chimeScopeAllows('mention', true), true);
+  assert.strictEqual(H.chimeScopeAllows('mention', false), false);
+});
+check('chimeScopeAllows: mention flag is coerced to a real boolean', () => {
+  // appendMessage passes `(m.mentions || []).includes(id)` — already boolean —
+  // but the helper must not leak a truthy/undefined value through.
+  assert.strictEqual(H.chimeScopeAllows('mention', undefined), false);
+  assert.strictEqual(H.chimeScopeAllows('mention', 0), false);
+});
+check('chimeScopeAllows: unknown/absent scope falls through to mention-gated', () => {
+  // Only 'all' opens the gate unconditionally; any other/absent value defers to
+  // the mention predicate rather than chiming on everything.
+  assert.strictEqual(H.chimeScopeAllows('', true), true);
+  assert.strictEqual(H.chimeScopeAllows('', false), false);
+  assert.strictEqual(H.chimeScopeAllows(undefined, false), false);
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
