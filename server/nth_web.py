@@ -721,6 +721,7 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
         "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
         "reply_to": (r["reply_to"] if "reply_to" in keys else None),
+        "confidence": (r["confidence"] if "confidence" in keys else None),
         "retracted_at": (r["retracted_at"] if "retracted_at" in keys else None),
         "retraction_reason": (r["retraction_reason"] if "retraction_reason" in keys else None),
         "edited_at": (r["edited_at"] if "edited_at" in keys else None),
@@ -773,7 +774,7 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                "choices, selection, reply_to, confidence, retracted_at, retraction_reason, edited_at, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -925,7 +926,7 @@ class EventHub:
                     prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, confidence, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
@@ -939,7 +940,7 @@ class EventHub:
                     scan_now = now_iso()
                     changed = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, confidence, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id <= ? AND "
                         "((retracted_at IS NOT NULL AND retracted_at > ?) OR "
                         " (edited_at IS NOT NULL AND edited_at > ?)) ORDER BY id",
