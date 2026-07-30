@@ -373,11 +373,18 @@ def _iso_secs(iso: Optional[str]) -> Optional[float]:
 
 def member_status(last_seen_iso: Optional[str], status_text: str,
                   session_activity_iso: Optional[str] = None,
-                  last_turn_end_iso: Optional[str] = None) -> str:
+                  last_turn_end_iso: Optional[str] = None,
+                  blocked_since_iso: Optional[str] = None) -> str:
     """Classify a member for the roster dot.
 
-    States: working / active / idle / stale / dead.
+    States: blocked / working / active / idle / stale / dead.
       dead    — no heartbeat for DEAD_SECONDS (process gone).
+      blocked — frozen on an interactive host prompt (AskUserQuestion/
+                ExitPlanMode): the activity hook set sessions.blocked_since and
+                nothing has cleared it. Checked BEFORE stale — a blocked wait
+                can outlast STALE_SECONDS (last_seen freezes at block start), and
+                a silently-stalled room is exactly what this state must shout
+                about; DEAD is the ultimate backstop if the process died blocked.
       stale   — heartbeat aging (> STALE_SECONDS).
       idle    — alive, but its last turn has ended (nothing since) or it set a
                 sleeping status_text: "done / waiting on you".
@@ -400,6 +407,12 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
     age = datetime.now(timezone.utc).timestamp() - ls
     if age > DEAD_SECONDS:
         return "dead"
+    # Blocked outranks stale/idle/working (but not dead): a host prompt can stall
+    # the room longer than STALE_SECONDS, and the whole point is to be loud.
+    # blocked_since is cleared by PostToolUse / a new prompt / any non-blocking
+    # tool, so it self-heals; DEAD is the backstop if the session died blocked.
+    if blocked_since_iso and _iso_secs(blocked_since_iso) is not None:
+        return "blocked"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
@@ -818,7 +831,8 @@ class EventHub:
                 "MAX(s.last_turn_end) AS session_last_turn_end, "
                 "MAX(s.last_tool_name) AS last_tool_name, "
                 "MAX(s.last_tool_target) AS last_tool_target, "
-                "MAX(s.last_tool_at) AS last_tool_at "
+                "MAX(s.last_tool_at) AS last_tool_at, "
+                "MAX(s.blocked_since) AS blocked_since "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -870,6 +884,7 @@ class EventHub:
             last_tool_name = (r["last_tool_name"] if "last_tool_name" in keys else None) or ""
             last_tool_target = (r["last_tool_target"] if "last_tool_target" in keys else None) or ""
             last_tool_at = (r["last_tool_at"] if "last_tool_at" in keys else None) or None
+            blocked_since = (r["blocked_since"] if "blocked_since" in keys else None) or None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -889,12 +904,14 @@ class EventHub:
                 "status": member_status(
                     effective_last_seen, r["status_text"] or "",
                     session_activity_iso=(r["session_last_seen"] or None),
-                    last_turn_end_iso=s_turn_end),
+                    last_turn_end_iso=s_turn_end,
+                    blocked_since_iso=blocked_since),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
                 "last_tool_name": last_tool_name,
                 "last_tool_target": last_tool_target,
                 "last_tool_at": last_tool_at,
+                "blocked_since": blocked_since,
             })
         return out
 
@@ -3176,6 +3193,16 @@ INDEX_HTML = r"""<!doctype html>
     100% { opacity: 1;    transform: scale(1); }
   }
   @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
+  /* blocked = frozen on a host prompt, silently stalling the room. Loud on
+     purpose: a fast red pulse so it can't be missed in a crowded roster. */
+  .dot.blocked { background: var(--err); animation: blockpulse 0.9s ease-in-out infinite;
+                 box-shadow: 0 0 0 0 var(--err); }
+  @keyframes blockpulse {
+    0%   { opacity: 1;   transform: scale(1);    box-shadow: 0 0 0 0 rgba(255,80,80,0.55); }
+    70%  { opacity: 0.5; transform: scale(1.15); box-shadow: 0 0 0 5px rgba(255,80,80,0); }
+    100% { opacity: 1;   transform: scale(1);    box-shadow: 0 0 0 0 rgba(255,80,80,0); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.blocked { animation: none; } }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
@@ -5490,11 +5517,19 @@ INDEX_HTML = r"""<!doctype html>
     // Reconcile state.members — and detect name changes so the chat can
     // retroactively re-label past messages from the renamed member.
     const rename_from = new Map();  // id → old member_name for messages
+    let blockedOnset = false;       // any member just transitioned INTO blocked?
     for (const m of members) {
       const old = state.members.get(m.id);
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
+      // #6: audible/visible alert on the EDGE into blocked (not every refresh
+      // while blocked), and only for peers — never your own session.
+      if (m.status === 'blocked' && (!old || old.status !== 'blocked')
+          && m.id !== state.operator.id) {
+        blockedOnset = true;
+      }
     }
+    if (blockedOnset) alertBlocked();
     // The roster event is a full snapshot — prune anyone no longer in it (e.g.
     // culled). Without this, state.members is set-not-cleared, so a removed
     // member ghosts in ack badges, watermark pins, and @-mention autocomplete
@@ -5516,7 +5551,8 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     const sorted = members.slice().sort((a, b) => {
-      const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+      // blocked floats to the very top — it needs a human's eyes now.
+      const order = { blocked: -1, active: 0, idle: 1, stale: 2, dead: 3 };
       if (a.id === state.operator.id) return 1;
       if (b.id === state.operator.id) return -1;
       const oa = order[a.status] ?? 4;
@@ -6768,6 +6804,35 @@ INDEX_HTML = r"""<!doctype html>
         osc.connect(gain);
         osc.start(now + t);
         osc.stop(now + t + 0.28);
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  // #6: a distinct, urgent low-high beep when a peer transitions into `blocked`
+  // (frozen on a host prompt). Deliberately different from the message chime so
+  // it reads as "someone is stuck and needs you", and only when sound is on.
+  function alertBlocked() {
+    if (!state.soundEnabled) return;
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
+    const vol = Math.max(0, Math.min(1, state.chimeVolume));
+    if (vol <= 0) return;
+    try {
+      const now = ctx.currentTime;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(vol, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
+      gain.connect(ctx.destination);
+      // urgent two-note fall A5 -> D5 on a square wave — cuts through.
+      [[880.0, 0], [587.33, 0.16]].forEach(([freq, t]) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'square';
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        osc.start(now + t);
+        osc.stop(now + t + 0.30);
       });
     } catch (_) { /* ignore */ }
   }
