@@ -1640,6 +1640,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_edit()
         elif parsed.path == "/api/delete":
             self._handle_delete()
+        elif parsed.path == "/api/path/validate":
+            self._handle_path_validate()
+        elif parsed.path == "/api/reveal":
+            self._handle_reveal()
         else:
             self._error(404, "not found")
 
@@ -1707,7 +1711,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError guards against a deeply-nested-JSON DoS (json.loads
+            # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
 
@@ -2326,6 +2332,134 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "id": mid})
 
+    # ── file-path validate / reveal ──
+    # The client detects path-LIKE tokens in message bodies broadly, then asks
+    # the server which ones actually exist on disk; only real files get linked
+    # (validation, not pattern-matching, gates linkification). A linked path can
+    # then be revealed in Finder. There is NO access gating on these endpoints
+    # (operator's explicit choice), so injection-safety is enforced structurally:
+    # reveal never runs a shell and never plain-`open`s a file (which would
+    # launch its default app) — it only `open -R` (reveal/select in Finder).
+    _PATH_VALIDATE_CAP = 200          # max candidates per validate request
+    _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
+
+    @staticmethod
+    def _expand_path(candidate: str) -> str:
+        """Expand a leading ~ (and ~user). No other transformation — existence
+        is checked as-is, so a relative candidate resolves against the server's
+        current working directory (best-effort; if it doesn't resolve there it
+        simply won't be linked, which is the intended validation behavior)."""
+        return os.path.expanduser(candidate)
+
+    def _resolve_existing(self, raw: str) -> Optional[str]:
+        """Return the expanded on-disk target for `raw`, or None if it doesn't
+        exist. Tries the candidate as-is first, then with a trailing :line[:col]
+        (editor/grep/Claude-Code form) stripped — so both validate and reveal
+        agree on what a `path:line` token resolves to. Uses lexists so broken
+        symlinks (still revealable) count. Never raises (a NUL/bad path is just
+        'not found')."""
+        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
+            expanded = self._expand_path(cand)
+            try:
+                if expanded and os.path.lexists(expanded):
+                    return expanded
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def _handle_path_validate(self) -> None:
+        """POST /api/path/validate — body {"paths": [...]}. Returns
+        {"exists": {candidate: bool}} keyed by the ORIGINAL candidate string
+        (so client cache keys line up). A `path:line[:col]` token counts as
+        existing when the bare file exists. Capped at _PATH_VALIDATE_CAP."""
+        # Bodies can carry up to 200 paths; allow a generous cap over the default.
+        body = self._read_json_body(max_bytes=256 * 1024)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            self._error(400, "paths must be a list")
+            return
+        exists: Dict[str, bool] = {}
+        for cand in paths[: self._PATH_VALIDATE_CAP]:
+            if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
+                continue
+            if cand in exists:
+                continue
+            exists[cand] = self._resolve_existing(cand) is not None
+        self._json({"exists": exists})
+
+    def _handle_reveal(self) -> None:
+        """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
+        Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
+        `open` (which would launch the default app), and a leading `--` so a
+        path beginning with `-` can't be read as a flag. Existence is verified
+        first (404 otherwise), so a bogus/injection-style value never reaches a
+        launch. A `path:line[:col]` suffix (Claude-Code form) is stripped so the
+        file itself is revealed."""
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        raw = body.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            self._error(400, "path required")
+            return
+        raw = raw.strip()
+        if len(raw) > self._PATH_MAX_LEN:
+            self._error(400, "path too long")
+            return
+
+        # Resolve to an existing target (as-is, else with a :line[:col] suffix
+        # stripped). Same resolver validate uses, so the UI and the reveal agree.
+        target = self._resolve_existing(raw)
+        if target is None:
+            self._error(404, "path not found on disk")
+            return
+
+        abspath = os.path.abspath(target)
+        plat = sys.platform
+        try:
+            if plat == "darwin":
+                # Reveal (select) in Finder. ARG LIST + `--`: no shell, no flag
+                # injection. `-R` reveals; it never launches the file's app.
+                cp = subprocess.run(
+                    ["open", "-R", "--", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("linux"):
+                # Best-effort: open the containing folder (no reliable "select").
+                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                cp = subprocess.run(
+                    ["xdg-open", "--", folder],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("win"):
+                cp = subprocess.run(
+                    ["explorer", "/select,", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                self._json({"ok": False, "error": f"unsupported platform: {plat}"},
+                           status=501)
+                return
+        except FileNotFoundError:
+            self._json({"ok": False, "error": "reveal tool not available"}, status=501)
+            return
+        except subprocess.TimeoutExpired:
+            self._error(504, "reveal timed out")
+            return
+        if cp.returncode != 0:
+            msg = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
+            self._error(502, f"reveal failed: {msg}")
+            return
+        self._json({"ok": True, "path": abspath})
+
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
         validate by magic bytes, store on disk, and create an unlinked
@@ -2794,6 +2928,21 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body em { font-style: italic; }
   .msg .body del { opacity: 0.7; }
   .msg .body a { color: var(--accent2); text-decoration: underline; }
+  /* Validated file paths — clickable "reveal in Finder" links. Distinct from
+     plain links: code-tinted chip + a subtle 📁 affordance, dotted underline. */
+  .msg .body a.file-link {
+    color: var(--accent); text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 2px; cursor: pointer;
+    background: rgba(var(--ov),0.06); border-radius: 3px; padding: 0 3px;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .msg .body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
+  .msg .body a.file-link:hover { background: rgba(var(--ov),0.12); }
+  .msg .body a.file-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .msg .body a.file-link.file-link-ok  { background: rgba(var(--ok-rgb, 80,200,120),0.22); }
+  .msg .body a.file-link.file-link-err {
+    color: var(--err); background: rgba(var(--ov),0.10); text-decoration-style: wavy;
+  }
   .msg .body h1, .msg .body h2, .msg .body h3,
   .msg .body h4, .msg .body h5, .msg .body h6 {
     margin: 8px 0 4px; font-weight: 700; line-height: 1.25; }
@@ -4209,6 +4358,153 @@ INDEX_HTML = r"""<!doctype html>
     decorateInlineSigil(root, '!', 'inline-bang',    bangIds);
   }
 
+  // ── Clickable file paths (reveal in Finder) ──
+  // Agents reference file paths constantly. Detection here is deliberately
+  // BROAD — it only produces CANDIDATES; a token is linkified ONLY after the
+  // server confirms it exists on disk (POST /api/path/validate). This avoids
+  // false positives from anything that merely looks path-like. Matches:
+  // absolute (/…), home (~/…), explicit relative (./… ../…), a bare relative
+  // dir/file, and any of those with a trailing :line[:col] (Claude-Code form).
+  // A single character-class run + optional :line[:col] — a flat quantifier
+  // (no nested `(…+…)+`), so it scans in LINEAR time and can't be driven into
+  // catastrophic/quadratic backtracking (ReDoS) by a long slash-free blob.
+  // Candidates are then post-filtered: a real path must contain a '/'.
+  const FILE_PATH_RUN_RE = /[A-Za-z0-9_.~/-]+(?::\d+(?::\d+)?)?/g;
+  const FILE_PATH_MAX_LEN = 4096;
+  // Per-path validation cache (path token → exists bool). Shared across every
+  // message so re-renders and repeated paths never re-hit the endpoint.
+  const filePathCache = new Map();
+
+  function detectFilePathCandidates(text) {
+    const out = [];
+    if (!text) return out;
+    FILE_PATH_RUN_RE.lastIndex = 0;
+    let m;
+    while ((m = FILE_PATH_RUN_RE.exec(text)) !== null) {
+      let tok = m[0];
+      const start = m.index;
+      if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
+      // ".." tail. Trailing trim only, so the start offset stays valid.
+      tok = tok.replace(/([^.\/])\.$/, '$1');
+      if (!tok || tok.length > FILE_PATH_MAX_LEN) continue;
+      out.push({ start, end: start + tok.length, token: tok });
+    }
+    return out;
+  }
+
+  // Wrap candidate tokens the caller marks valid (isValid(token) === true) in a
+  // .file-link. Skips code/pre/existing links, the @/#/! sigil spans, and
+  // already-linkified paths, so we never double-wrap or touch literal code.
+  // onClick (optional) is attached to each created link.
+  function linkifyValidatedPaths(root, isValid, onClick) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      if (detectFilePathCandidates(node.nodeValue || '').some(c => isValid(c.token)))
+        nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const cands = detectFilePathCandidates(text).filter(c => isValid(c.token));
+      if (!cands.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const c of cands) {
+        if (c.start < cursor) continue;   // defensive: skip any overlap
+        frag.appendChild(document.createTextNode(text.slice(cursor, c.start)));
+        const link = document.createElement('a');
+        link.className = 'file-link';
+        link.textContent = c.token;
+        link.dataset.path = c.token;
+        link.setAttribute('role', 'button');
+        link.setAttribute('tabindex', '0');
+        link.title = 'Reveal in Finder';
+        if (typeof onClick === 'function') {
+          link.addEventListener('click', (e) => { e.preventDefault(); onClick(c.token, link); });
+          link.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(c.token, link); }
+          });
+        }
+        frag.appendChild(link);
+        cursor = c.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  // Brief inline state on a file link after a reveal attempt (no navigation,
+  // no modal). Success/failure both auto-revert; failures surface the reason
+  // in the tooltip.
+  function flashFileLink(link, ok, msg) {
+    if (!link || !link.classList) return;
+    const cls = ok ? 'file-link-ok' : 'file-link-err';
+    link.classList.add(cls);
+    if (msg) link.title = msg;
+    setTimeout(() => {
+      link.classList.remove(cls);
+      link.title = 'Reveal in Finder';
+    }, 1500);
+  }
+
+  async function revealPath(path, link) {
+    if (typeof fetch !== 'function') return;
+    try {
+      const r = await fetch('/api/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data && data.ok) flashFileLink(link, true);
+      else flashFileLink(link, false, (data && data.error) || ('reveal failed (' + r.status + ')'));
+    } catch (e) {
+      flashFileLink(link, false, 'reveal failed: ' + e.message);
+    }
+  }
+
+  // Detect candidate paths in a rendered message body, validate the uncached
+  // ones against the server (batched into one request per message), then
+  // linkify only those confirmed to exist. Fire-and-forget from paintBody.
+  // Relative candidates are resolved by the server against ITS cwd (best
+  // effort); if they don't resolve there, they simply stay unlinked.
+  async function decorateFilePaths(root) {
+    if (!root || typeof fetch !== 'function') return;
+    const tokens = new Set();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      for (const c of detectFilePathCandidates(node.nodeValue || '')) tokens.add(c.token);
+    }
+    if (!tokens.size) return;
+    const need = [...tokens].filter(t => !filePathCache.has(t));
+    // Validate in chunks (server caps at 200/req); cache each verdict so this
+    // path is never re-validated on a later render.
+    for (let i = 0; i < need.length; i += 200) {
+      const chunk = need.slice(i, i + 200);
+      try {
+        const r = await fetch('/api/path/validate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: chunk }),
+        });
+        if (r.ok) {
+          const data = await r.json().catch(() => ({}));
+          const ex = (data && data.exists) || {};
+          for (const t of chunk) filePathCache.set(t, ex[t] === true);
+        }
+      } catch (e) { /* leave uncached — just won't linkify this pass */ }
+    }
+    linkifyValidatedPaths(root, (t) => filePathCache.get(t) === true, revealPath);
+  }
+
   function renderComposerMentionHighlights() {
     if (!inputHighlight) return;
     const text = input.value || '';
@@ -4832,6 +5128,10 @@ INDEX_HTML = r"""<!doctype html>
       body.classList.remove('plain');
       body.innerHTML = renderMarkdown(m.content || '');
       decorateInlineMentions(body, m.mentions || [], m.refs || [], m.bangs || []);
+      // Async: validate path-like tokens with the server and linkify the real
+      // ones (reveal-in-Finder). Runs after mention decoration so it skips
+      // those spans; fire-and-forget so paint stays synchronous.
+      decorateFilePaths(body);
     }
     if (m.edited_at) {
       const tag = document.createElement('span');
@@ -7480,6 +7780,8 @@ INDEX_HTML = r"""<!doctype html>
       state,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
       paintBody, applyTargetBars, formatTime,
+      detectFilePathCandidates, linkifyValidatedPaths, decorateFilePaths,
+      revealPath, filePathCache,
       isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
       taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
