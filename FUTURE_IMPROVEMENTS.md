@@ -43,6 +43,10 @@ specific calls. Keeps trio's interface clean by default but lets you drill in.
   tool-activity ever reaches the hub, or if this signal is effectively
   trio-only. (The existing "working" dot likely shares this limitation.)
 
+**Consider bundling with #6** (blocked/awaiting-input state): it reuses this
+exact tool-name capture, so building the two together avoids opening the
+activity hook twice.
+
 ---
 
 ## 2. Sub-agent visibility (extension of #1)
@@ -195,3 +199,51 @@ every member reads everything.
 - **Soft scoping, not security:** all agents share one SQLite DB, so "can see"
   governs what the *server hands each member* at delivery time, not
   cryptographic isolation. Don't present it as a trust boundary.
+
+---
+
+## 6. "Blocked / awaiting input" indicator state (bundle with #1)
+
+**What:** A distinct dashboard state — `blocked` (awaiting user input) — shown
+when an agent is frozen on a host-native interactive prompt (`AskUserQuestion`,
+`ExitPlanMode`) or a permission gate. Render it **loudly** — red pulse + an
+optional audio beep — because a blocked host prompt silently stalls the whole
+room.
+
+**Why the current indicator can't show it:** the "working" dot keys on
+`last_seen` freshness. `PreToolUse` bumps `last_seen` when the prompt starts →
+**green**; then no further tools run → `last_seen` goes stale → flips to
+**idle**. Neither green nor idle means "waiting on you." It needs an explicit
+third state.
+
+**Substrate / detection:**
+- The `PreToolUse` → `PostToolUse` bracket *is* the blocked window: `PreToolUse`
+  fires as `AskUserQuestion` / `ExitPlanMode` starts blocking; `PostToolUse`
+  fires only after the user answers.
+- `PreToolUse` already flows through `nth_activity_hook.py` — just start reading
+  `tool_name` (same capture as #1).
+
+**What's new:**
+- Extend the activity hook: on `PreToolUse` where `tool_name` is an
+  interactive-blocking tool (`AskUserQuestion`, `ExitPlanMode`), mark the member
+  `blocked`.
+- **Add a `PostToolUse` hook** (none exists today) to clear the flag when the
+  answer lands. Stop/StopFailure + staleness are backstops if the session dies
+  while still blocked and `PostToolUse` never fires.
+- Optionally wire the **`Notification` hook** to also catch permission-gate
+  blocking (Claude Code's dedicated "needs attention" event).
+- New render state in `member_status()` + a red/pulse style; audio beep on the
+  transition *into* `blocked` (trivial in the web dashboard).
+
+**Open question:**
+- Confirm whether `AskUserQuestion` specifically trips the `Notification` hook —
+  it varies by Claude Code version. The PreToolUse/PostToolUse bracket does
+  **not** depend on it (that's the reliable path); `Notification` is additive
+  for permission gates. Verify its payload against current docs before relying
+  on it.
+
+**Design note:** trio already discourages agents from using host-native blocking
+prompts when a human is in the channel (ask via `@operator` through `trio_send`
+instead). So this state doubles as a **detector for an agent that ignored that
+guidance and is now silently blocking the room** — which is the argument for
+making it loud.
