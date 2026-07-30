@@ -3114,6 +3114,44 @@ INDEX_HTML = r"""<!doctype html>
   #settings-panel select:focus { outline: none; border-color: var(--accent); }
   #settings-panel input[type="range"] { width: 130px; cursor: pointer; accent-color: var(--accent); }
 
+  /* ── DM inbox: header button + unread bubble + panel ── */
+  /* The unread-DM count bubble rides on the header DM button. */
+  #btn-dm { position: relative; }
+  #btn-dm .dm-badge {
+    position: absolute; top: -6px; right: -6px; min-width: 16px; height: 16px;
+    padding: 0 4px; border-radius: 8px; background: var(--accent); color: #061019;
+    font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+    box-shadow: 0 0 0 1px var(--bg); pointer-events: none; }
+  #btn-dm .dm-badge[hidden] { display: none; }
+  #btn-dm.has-unread { border-color: var(--accent); color: var(--accent); }
+  body.dm-mode #btn-dm { display: none; }  /* already inside a DM tab */
+
+  /* DM inbox panel — mirrors the settings drawer. */
+  #dm-panel {
+    position: fixed; top: 46px; right: 10px; z-index: 30;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; min-width: 260px; max-width: 340px;
+    max-height: 70vh; overflow-y: auto;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column; gap: 8px; }
+  #dm-panel[hidden] { display: none; }
+  #dm-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
+                 letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
+  #dm-panel .dm-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
+  .dm-thread { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+               border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
+  .dm-thread:hover { background: var(--hover); border-color: var(--border); }
+  .dm-thread .dm-av { font-size: 15px; flex: 0 0 auto; }
+  .dm-thread .dm-meta { flex: 1 1 auto; min-width: 0; }
+  .dm-thread .dm-name { font-size: 12px; color: var(--fg); font-weight: 600;
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dm-thread .dm-prev { font-size: 11px; color: var(--dim);
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dm-thread .dm-unread { flex: 0 0 auto; min-width: 16px; height: 16px; padding: 0 4px;
+                          border-radius: 8px; background: var(--accent); color: #061019;
+                          font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
+  .dm-thread .dm-unread[hidden] { display: none; }
+
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
@@ -4009,6 +4047,7 @@ INDEX_HTML = r"""<!doctype html>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill pill-icon" id="btn-search" title="search the full channel history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span class="lbl">search</span></span>
+    <span class="pill pill-icon" id="btn-dm" title="direct messages addressed to you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H5.2L4 17.2z"/></svg><span class="lbl">DMs</span><span class="dm-badge" id="dm-count" hidden>0</span></span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
@@ -4019,6 +4058,10 @@ INDEX_HTML = r"""<!doctype html>
   </header>
   <div id="settings-panel" hidden>
     <h3>Settings</h3>
+  </div>
+  <div id="dm-panel" hidden>
+    <h3>Direct messages</h3>
+    <div id="dm-list"></div>
   </div>
 
   <div id="chat-wrap">
@@ -4214,6 +4257,9 @@ INDEX_HTML = r"""<!doctype html>
     // Ordered list of target ids as rendered in the bar — index → id,
     // so Alt+1..9 maps to the Nth pill.
     targetOrder: [],
+    // DM inbox read-state: counterparty id → highest DM id the operator has
+    // opened. Drives the unread bubble; persisted per-channel in localStorage.
+    dmRead: new Map(),
   };
   const PALETTE = ['#62d7ef','#d070d7','#7ede7e','#e5d35e',
                    '#8eb9ff','#ff8470','#9ef0f0','#f79fea'];
@@ -5914,6 +5960,15 @@ INDEX_HTML = r"""<!doctype html>
     // versa. Reuses the same mentionsOperator predicate the notify block uses.
     if (state.soundEnabled && !isMine && !isSystem &&
         chimeScopeAllows(state.soundScope, mentionsOperator)) playChime();
+
+    // DM inbox: when a message in one of the operator's OWN DM threads arrives,
+    // refresh the unread bubble (and the inbox if it's open). Gated on the
+    // message actually being the operator's DM so ordinary broadcast traffic
+    // doesn't trigger a recompute.
+    if (!DM_MODE && dmCounterparty(m, state.operator.id)) {
+      refreshDmBadge();
+      if (dmPanel && !dmPanel.hasAttribute('hidden')) renderDmInbox();
+    }
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -7435,6 +7490,155 @@ INDEX_HTML = r"""<!doctype html>
       if (m) applyDmFilterToNode(dom, m);
     }
   }
+
+  // ── DM inbox: unread bubble + thread list ─────────────────────────────
+  // Pure helpers (unit-tested via the harness). They operate ONLY on messages
+  // the operator is a participant of — a DM strictly between other members is
+  // shipped to the all-seeing operator feed but is NOT the operator's DM, so it
+  // is excluded here. That keeps the unread count and inbox derived from the
+  // operator's OWN conversations, never from DMs they merely audit.
+  function dmCounterparty(m, operatorId) {
+    if (!m || !operatorId) return null;
+    const rc = m.recipients || [];
+    if (!rc.length) return null;                  // broadcast — not a DM
+    if (m.member_id === operatorId) {             // operator → someone
+      const other = rc.find((x) => x !== operatorId);
+      return other || null;
+    }
+    if (rc.includes(operatorId)) return m.member_id;  // someone → operator
+    return null;                                   // a DM we merely audit
+  }
+  // Group DMs into threads keyed by counterparty. `messages` is any iterable of
+  // message objects (e.g. state.messages.values()). unread = messages FROM the
+  // counterparty with id above the per-thread read watermark.
+  function dmThreadsFor(messages, operatorId, readMap) {
+    const byCp = new Map();
+    for (const m of messages) {
+      const cp = dmCounterparty(m, operatorId);
+      if (!cp) continue;
+      let t = byCp.get(cp);
+      if (!t) { t = { counterparty: cp, lastId: 0, lastMsg: null, unread: 0 }; byCp.set(cp, t); }
+      if (m.id > t.lastId) { t.lastId = m.id; t.lastMsg = m; }
+      const readId = (readMap && readMap.get(cp)) || 0;
+      if (m.member_id === cp && m.id > readId) t.unread++;
+    }
+    return [...byCp.values()].sort((a, b) => b.lastId - a.lastId);
+  }
+  function unreadDmCount(messages, operatorId, readMap) {
+    let n = 0;
+    for (const t of dmThreadsFor(messages, operatorId, readMap)) n += t.unread;
+    return n;
+  }
+
+  const btnDm = document.getElementById('btn-dm');
+  const dmPanel = document.getElementById('dm-panel');
+  const dmListEl = document.getElementById('dm-list');
+  const dmCountEl = document.getElementById('dm-count');
+
+  function dmReadKey() { return 'trio.dmRead.' + (state.channel || ''); }
+  function loadDmRead() {
+    try {
+      const o = JSON.parse(localStorage.getItem(dmReadKey()) || '{}');
+      state.dmRead = new Map(Object.entries(o).map(([k, v]) => [k, +v || 0]));
+    } catch (_) { state.dmRead = new Map(); }
+  }
+  function saveDmRead() {
+    try { localStorage.setItem(dmReadKey(), JSON.stringify(Object.fromEntries(state.dmRead))); }
+    catch (_) {}
+  }
+  function markDmRead(cp) {
+    const t = dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead)
+      .find((x) => x.counterparty === cp);
+    if (t) { state.dmRead.set(cp, t.lastId); saveDmRead(); }
+  }
+
+  function refreshDmBadge() {
+    if (DM_MODE || !dmCountEl || !btnDm) return;
+    const n = unreadDmCount(state.messages.values(), state.operator.id, state.dmRead);
+    if (n > 0) {
+      dmCountEl.textContent = n > 99 ? '99+' : String(n);
+      dmCountEl.hidden = false;
+      btnDm.classList.add('has-unread');
+    } else {
+      dmCountEl.hidden = true;
+      btnDm.classList.remove('has-unread');
+    }
+  }
+
+  function openDmTab(cp) {
+    markDmRead(cp);
+    refreshDmBadge();
+    if (dmPanel.hasAttribute('hidden') === false) renderDmInbox();
+    window.open('/?dm=' + encodeURIComponent(cp), '_blank');
+  }
+
+  function renderDmInbox() {
+    if (!dmListEl) return;
+    dmListEl.textContent = '';
+    const threads = dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead);
+    if (!threads.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.textContent = 'No direct messages yet.';
+      dmListEl.appendChild(empty);
+      return;
+    }
+    for (const t of threads) {
+      const mem = state.members.get(t.counterparty);
+      const nm = mem ? mem.name : t.counterparty;
+      const anim = animalFor(mem || { id: t.counterparty });
+      const row = document.createElement('div');
+      row.className = 'dm-thread';
+      row.title = 'Open DM with ' + nm;
+
+      const av = document.createElement('span');
+      av.className = 'dm-av';
+      av.textContent = anim.emoji;
+      row.appendChild(av);
+
+      const meta = document.createElement('div');
+      meta.className = 'dm-meta';
+      const name = document.createElement('div');
+      name.className = 'dm-name';
+      name.textContent = nm;
+      meta.appendChild(name);
+      const prev = document.createElement('div');
+      prev.className = 'dm-prev';
+      const last = t.lastMsg || {};
+      const who = last.member_id === state.operator.id ? 'You: ' : '';
+      prev.textContent = who + humanizeIdSigils((last.content || '').replace(/\s+/g, ' ')).slice(0, 60);
+      meta.appendChild(prev);
+      row.appendChild(meta);
+
+      const badge = document.createElement('span');
+      badge.className = 'dm-unread';
+      if (t.unread > 0) { badge.textContent = t.unread > 99 ? '99+' : String(t.unread); }
+      else { badge.hidden = true; }
+      row.appendChild(badge);
+
+      row.addEventListener('click', () => openDmTab(t.counterparty));
+      dmListEl.appendChild(row);
+    }
+  }
+
+  function toggleDmPanel(force) {
+    if (!dmPanel) return;
+    const show = (force !== undefined) ? force : dmPanel.hasAttribute('hidden');
+    if (show) { renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on'); }
+    else { dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
+  }
+  if (btnDm && !DM_MODE) {
+    btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
+    document.addEventListener('click', (e) => {
+      if (dmPanel.hasAttribute('hidden')) return;
+      if (dmPanel.contains(e.target) || btnDm.contains(e.target)) return;
+      toggleDmPanel(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !dmPanel.hasAttribute('hidden')) toggleDmPanel(false);
+    });
+  }
+
   filterEl.addEventListener('input', () => setFilter(filterEl.value));
   filterBanner.addEventListener('click', () => setFilter(''));
 
@@ -8410,6 +8614,7 @@ INDEX_HTML = r"""<!doctype html>
       const meta = await r.json();
       state.channel = meta.channel;
       state.server_host = meta.server_host;
+      loadDmRead();
       loadPersistedTargets();
       renderComposerTargets();
       hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
@@ -8433,6 +8638,7 @@ INDEX_HTML = r"""<!doctype html>
     updatePreview();
     updateChanStats();
     refreshTasks();
+    refreshDmBadge();
   }
 
   // __TRIO_TEST_HOOK_START__
@@ -8457,6 +8663,8 @@ INDEX_HTML = r"""<!doctype html>
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
       colorFor, rememberColors, chimeScopeAllows,
+      dmCounterparty, dmThreadsFor, unreadDmCount,
+      renderDmInbox, refreshDmBadge, dmListEl, dmCountEl,
     };
   }
   // __TRIO_TEST_HOOK_END__
