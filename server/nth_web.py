@@ -4786,6 +4786,16 @@ INDEX_HTML = r"""<!doctype html>
       let tok = m[0];
       const start = m.index;
       if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Require a real FILENAME SEGMENT, not just separators: a candidate must
+      // carry at least one name character ([A-Za-z0-9_]). This rejects a BARE
+      // '/' (and pure-punctuation runs like '//', './', '-/-') that a slash used
+      // as prose punctuation produces — "reload / incognito", "high / low",
+      // "#" / "!". Those would otherwise validate against on-disk roots ('/'
+      // exists!) and wrongly pick up a folder link. Slash-joined WORDS ('and/or',
+      // 'high/medium/low') still pass here but are gated by real existence, so
+      // they only link if they genuinely resolve. (Server rejects roots too —
+      // defense in depth.)
+      if (!/[A-Za-z0-9_]/.test(tok)) continue;
       // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
       // ".." tail. Trailing trim only, so the start offset stays valid.
       tok = tok.replace(/([^.\/])\.$/, '$1');

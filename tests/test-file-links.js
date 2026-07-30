@@ -64,6 +64,26 @@ check('detect: plain prose yields nothing', () => {
 check('detect: a lone word is not a path', () => {
   assert.deepStrictEqual(tokens('README'), []);
 });
+check('detect: a BARE slash is not a candidate', () => {
+  // '/' exists on disk (root), so if it were emitted it would wrongly validate
+  // and pick up a folder link. A slash used as punctuation must be inert.
+  assert.deepStrictEqual(tokens('press # / ! to reload'), []);
+  assert.deepStrictEqual(tokens('reload / incognito'), []);
+  assert.deepStrictEqual(tokens('/'), []);
+});
+check('detect: space-padded slash separators yield nothing', () => {
+  assert.deepStrictEqual(tokens('rank is high / medium / low'), []);
+});
+check('detect: pure-separator runs are not candidates', () => {
+  // '//', './', '../', '-/-' — slashes/punctuation only, no filename segment.
+  assert.deepStrictEqual(tokens('a // b ./ c ../ d -/- e'), []);
+});
+check('detect: slash-joined WORDS are candidates (gated by validation)', () => {
+  // These carry a filename segment so they ARE candidates, but they only link
+  // if they genuinely resolve on disk — 'and/or' / 'high/medium/low' won't.
+  assert.deepStrictEqual(tokens('and/or maybe'), ['and/or']);
+  assert.deepStrictEqual(tokens('rank high/medium/low here'), ['high/medium/low']);
+});
 check('detect: long slash-free blob is linear-time (no ReDoS freeze)', () => {
   // A long run of path-charset chars with no '/', terminated by a disallowed
   // char — the classic quadratic-backtracking trigger. The linear scan must
@@ -98,6 +118,16 @@ check('linkify: a NON-validated look-alike stays plain text', () => {
   assert.strictEqual(body.querySelectorAll('.file-link').length, 0, body.innerHTML);
 });
 
+check('linkify: a BARE slash is never linked (not even if "valid")', () => {
+  // Even if the server somehow claimed '/' exists, the candidate detector never
+  // emits it, so a slash used as punctuation stays plain text.
+  const body = linkify('press / to reload', new Set(['/']));
+  assert.strictEqual(body.querySelectorAll('.file-link').length, 0, body.innerHTML);
+});
+check('linkify: slash-separator words stay plain when not validated', () => {
+  const body = linkify('rank is high/medium/low here', new Set());
+  assert.strictEqual(body.querySelectorAll('.file-link').length, 0, body.innerHTML);
+});
 check('linkify: mixed — only the validated one is linked', () => {
   const body = linkify('/yes/a.py vs /no/b.py', new Set(['/yes/a.py']));
   const links = body.querySelectorAll('.file-link');
