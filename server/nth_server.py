@@ -847,7 +847,8 @@ def nth_connect(
         recent = [
             m for m in recent_raw
             if can_see(member_id, "agent", m["member_id"],
-                       m["recipients"] if "recipients" in m.keys() else "")
+                       m["recipients"] if "recipients" in m.keys() else "",
+                       allow_all_seeing=False)
         ][:10]
 
         # Set watermark to current latest message. Use the true latest id
@@ -1864,7 +1865,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 unread = [
                     m for m in unread
                     if can_see(member_id, reader_kind, m["member_id"],
-                               m["recipients"] if "recipients" in m.keys() else "")
+                               m["recipients"] if "recipients" in m.keys() else "",
+                               allow_all_seeing=False)
                 ]
                 # Resolve ended_by member_id to display name
                 ended_by_name = ch["ended_by"]
@@ -1935,7 +1937,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 display_msgs = [
                     m for m in display_msgs
                     if can_see(member_id, reader_kind, m["member_id"],
-                               m["recipients"] if "recipients" in m.keys() else "")
+                               m["recipients"] if "recipients" in m.keys() else "",
+                               allow_all_seeing=False)
                 ]
 
                 # Apply mentions_only filter: keep broadcasts (empty mentions)
@@ -2316,7 +2319,8 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
         rows = [
             m for m in rows
             if can_see(reader_id, reader_kind, m["member_id"],
-                       m["recipients"] if "recipients" in m.keys() else "")
+                       m["recipients"] if "recipients" in m.keys() else "",
+                       allow_all_seeing=False)
         ]
 
         messages = []
@@ -2424,7 +2428,8 @@ def nth_pounds(channel: str, member_id: str, since_id: int = 0, limit: int = 50)
             # DM visibility: a member #referenced inside a DM they are NOT a
             # recipient of must not see it here either. Operators stay all-seeing.
             if not can_see(member_id, reader_kind, m["member_id"],
-                           m["recipients"] if "recipients" in m.keys() else ""):
+                           m["recipients"] if "recipients" in m.keys() else "",
+                           allow_all_seeing=False):
                 continue
             try:
                 ref_list = json.loads(m["refs"]) if m["refs"] else []

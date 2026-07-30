@@ -355,7 +355,8 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         m for m in unread
                         if can_see(member_id, "agent",
                                    (m["member_id"] if "member_id" in m.keys() else None),
-                                   (m["recipients"] if "recipients" in m.keys() else ""))
+                                   (m["recipients"] if "recipients" in m.keys() else ""),
+                                   allow_all_seeing=False)
                     ]
 
                     mode = filter_mode if filter_mode in FILTER_MODES else "all"

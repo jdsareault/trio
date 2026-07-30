@@ -58,18 +58,29 @@ def parse_recipients(raw) -> list:
     return []
 
 
-def can_see(reader_id, reader_kind, sender_id, recipients_raw) -> bool:
+def can_see(reader_id, reader_kind, sender_id, recipients_raw, allow_all_seeing=True) -> bool:
     """THE visibility predicate. A reader R may see message M iff ANY of:
 
       • M is a broadcast (recipients empty/NULL), OR
       • R is the sender (M.member_id == R), OR
       • R is in M.recipients, OR
-      • R is all-seeing (operator / human — see is_all_seeing).
+      • R is all-seeing (operator / human — see is_all_seeing), IF permitted.
 
     recipients_raw is the raw messages.recipients column (JSON array string,
     or NULL/'' on pre-migration rows). Broadcasts (the common case) stay
-    visible to everyone, so existing non-DM traffic is unaffected."""
-    if is_all_seeing(reader_id, reader_kind):
+    visible to everyone, so existing non-DM traffic is unaffected.
+
+    allow_all_seeing: when False, the operator/human all-seeing branch is NOT
+    applied — R sees only broadcasts, its own messages, and DMs addressed to
+    it. The agent-facing MCP read paths (trio_poll / trio_history /
+    trio_pounds / trio_connect) and the monitor pass False, because they
+    identify their caller ONLY by a caller-supplied member_id they cannot
+    authenticate. Without this, a forged operator/human id (a bare "_op_",
+    or any real operator id — those are handed to every agent in the
+    trio_connect roster) would satisfy is_all_seeing and let an agent harvest
+    EVERY DM in one call. All-seeing is a property of the AUTHENTICATED
+    web-dashboard operator surface, which leaves this True."""
+    if allow_all_seeing and is_all_seeing(reader_id, reader_kind):
         return True
     recips = parse_recipients(recipients_raw)
     if not recips:

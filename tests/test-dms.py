@@ -167,7 +167,9 @@ def monitor_visible(member_id):
 check("(b) monitor query hides DM from non-recipient", DM_ID not in monitor_visible(carol))
 check("(b) monitor query shows DM to recipient", DM_ID in monitor_visible(bob))
 
-# (c) operator is all-seeing — sees every DM
+# (c) operator is all-seeing — but ONLY on the authenticated web-dashboard
+#     surface (allow_all_seeing=True, the default the web uses). The predicate
+#     admits every DM for an operator/human identity there.
 now = srv.now_iso()
 db = srv.get_db()
 try:
@@ -178,13 +180,23 @@ try:
     db.commit()
 finally:
     db.close()
-op_hist = history_ids("_op_test")
-check("(c) operator sees DM #1 via history", DM_ID in op_hist)
-check("(c) operator sees DM #2 via history", DM2_ID in op_hist)
-check("(c) operator predicate is all-seeing (kind=human)",
-      can_see("_op_test", "human", alice, json.dumps([bob])) is True)
-check("(c) operator predicate is all-seeing (_op_ id, kind absent)",
-      can_see("_op_anything", None, alice, json.dumps([bob])) is True)
+check("(c) operator all-seeing on web surface (kind=human)",
+      can_see("_op_test", "human", alice, json.dumps([bob]), allow_all_seeing=True) is True)
+check("(c) operator all-seeing on web surface (_op_ id, kind absent)",
+      can_see("_op_anything", None, alice, json.dumps([bob]), allow_all_seeing=True) is True)
+
+# (c-SECURITY) the agent-facing MCP paths must NOT grant all-seeing from a
+# caller-supplied operator/human member_id — otherwise any agent forges an
+# operator id (a bare "_op_", or a real one from the trio_connect roster) and
+# harvests EVERY DM in one call. All MCP read paths pass allow_all_seeing=False.
+check("(c-sec) forged bare _op_ gets NO DMs via history", DM_ID not in history_ids("_op_"))
+check("(c-sec) forged nonexistent _op_ id gets NO DMs via history", DM_ID not in history_ids("_op_bogus"))
+check("(c-sec) real operator id via MCP history is NOT all-seeing (leak closed)",
+      DM_ID not in history_ids("_op_test"))
+check("(c-sec) spoofing operator id via MCP poll yields NO DM (leak closed)",
+      DM_ID not in poll_ids("_op_test")[0])
+check("(c-sec) predicate with allow_all_seeing=False hides DM from operator id",
+      can_see("_op_test", "human", alice, json.dumps([bob]), allow_all_seeing=False) is False)
 
 # (d) broadcasts still reach everyone (no regression)
 bc = json.loads(srv.nth_send(channel=CH, member_id=alice, message="hello everyone"))
@@ -217,6 +229,20 @@ try:
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     time.sleep(0.2)
+
+    # (c) operator dashboard is all-seeing on the WEB SSE feed: the hub primes
+    #     every row (incl. the private DM) to any subscriber (the operator).
+    q = hub.subscribe()
+    primed = []
+    try:
+        while True:
+            primed.append(json.loads(q.get_nowait()))
+    except Exception:
+        pass
+    hub.unsubscribe(q)
+    dm_events = [e for e in primed if e.get("type") == "message" and e.get("id") == DM_ID]
+    check("(c) operator SSE feed ships the DM (all-seeing web surface)", len(dm_events) == 1)
+    check("(c) operator SSE DM carries recipients", dm_events and dm_events[0].get("recipients") == [bob])
 
     data = json.dumps({"content": "web dm to bob", "recipients": [bob]}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/send", data=data, method="POST")
