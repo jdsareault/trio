@@ -3615,7 +3615,7 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill pill-icon" id="btn-notify" title="desktop notifications on @you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="lbl">off</span></span>
-    <span class="pill pill-icon" id="btn-sound" title="play a chime on any new message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
+    <span class="pill pill-icon" id="btn-sound" title="play a chime on new messages (scope in settings when on)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
     <span class="pill pill-icon" id="btn-settings" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">settings</span></span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
@@ -3793,6 +3793,10 @@ INDEX_HTML = r"""<!doctype html>
     notifyEnabled: false,
     soundEnabled: false,
     chimeVolume: 0.33,
+    soundScope: 'all',        // 'mention' | 'all' — chime scope, INDEPENDENT of
+                              // notifyScope. Defaults to 'all' to preserve the
+                              // historical "chime on any new message" behavior
+                              // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     initialLoad: true,        // pin to newest until the history burst settles
@@ -5466,8 +5470,12 @@ INDEX_HTML = r"""<!doctype html>
       } catch (e) { /* ignore */ }
     }
 
-    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
-    if (state.soundEnabled && !isMine && !isSystem) playChime();
+    // In-page chime for a new peer message (opt-in, focus-agnostic). The scope
+    // (soundScope) is kept independent of the desktop-notify scope, so a quiet
+    // chime on all messages can coexist with a popup only on @mentions, or vice
+    // versa. Reuses the same mentionsOperator predicate the notify block uses.
+    if (state.soundEnabled && !isMine && !isSystem &&
+        chimeScopeAllows(state.soundScope, mentionsOperator)) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -6886,6 +6894,15 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { _audioCtx = null; }
     return _audioCtx;
   }
+  // Does a peer message qualify for the chime under the current scope?
+  //   'all'     → every peer message chimes.
+  //   'mention' → only messages that @mention the operator chime.
+  // Pure (no DOM/state) so it can be unit-tested via the harness hook. The
+  // on/off master is state.soundEnabled + the btn-sound pill; this only refines
+  // an already-enabled chime, and stays independent of notifyScope.
+  function chimeScopeAllows(scope, mentionsOperator) {
+    return scope === 'all' ? true : !!mentionsOperator;
+  }
   function playChime() {
     const ctx = ensureAudio();
     if (!ctx) return;
@@ -6911,7 +6928,8 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { /* ignore */ }
   }
 
-  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  // ── Sound (chime) toggle — off by default; the pill is the on/off master and
+  //    state.soundScope (settings drawer) refines which peer messages chime. ──
   btnSound.addEventListener('click', () => {
     state.soundEnabled = !state.soundEnabled;
     btnSound.querySelector('.lbl').textContent = state.soundEnabled ? 'on' : 'off';
@@ -7009,6 +7027,36 @@ INDEX_HTML = r"""<!doctype html>
     return row;
   }
 
+  // Build a <select> preloaded with `options` ([value, label] pairs) and the
+  // `current` value pre-selected. Shared by the chime + notification prefs.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+
+  // Chime scope — off is the btn-sound pill; this refines an enabled chime to
+  // fire on every message or only @mentions. Independent of the notify scope.
+  try {
+    const ss = localStorage.getItem('trio.soundScope'); if (ss) state.soundScope = ss;
+  } catch (_) {}
+  // Wording ('all messages' / '@mentions only') and the mention-first vs
+  // all-first default are matched to the notify-scope select so the two read as
+  // siblings; the title spells out that they're independent controls.
+  const soundScopeSel = prefSelect(
+    [['all', 'all messages'], ['mention', '@mentions only']], state.soundScope);
+  soundScopeSel.title = 'Chime scope — independent of desktop notifications';
+  soundScopeSel.addEventListener('change', () => {
+    state.soundScope = soundScopeSel.value;
+    try { localStorage.setItem('trio.soundScope', state.soundScope); } catch (_) {}
+  });
+  const soundScopeRow = addSettingRow('Chime for', soundScopeSel);
+
   // Chime volume slider — drives state.chimeVolume; previews on release.
   try {
     const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
@@ -7025,17 +7073,7 @@ INDEX_HTML = r"""<!doctype html>
   volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
   const chimeVolRow = addSettingRow('Chime volume', volSlider);
 
-  // Notification preference dropdowns.
-  function prefSelect(options, current) {
-    const sel = document.createElement('select');
-    options.forEach(([val, label]) => {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      if (val === current) o.selected = true;
-      sel.appendChild(o);
-    });
-    return sel;
-  }
+  // Notification preference dropdowns (reuse prefSelect defined above).
   try {
     const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
     const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
@@ -7228,6 +7266,7 @@ INDEX_HTML = r"""<!doctype html>
 
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
+    if (soundScopeRow) soundScopeRow.hidden = !state.soundEnabled;
     if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
     if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
     if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
@@ -7786,7 +7825,7 @@ INDEX_HTML = r"""<!doctype html>
       taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
-      colorFor, rememberColors,
+      colorFor, rememberColors, chimeScopeAllows,
     };
   }
   // __TRIO_TEST_HOOK_END__
