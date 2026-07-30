@@ -323,6 +323,11 @@ def get_db() -> sqlite3.Connection:
         ("reply_to", "messages", "INTEGER"),
         # fork: timestamp of the last author edit (web dashboard edit feature).
         ("edited_at", "messages", "TEXT"),
+        # Structured confidence — an agent's self-rated confidence in a post,
+        # one of 'high'/'medium'/'low'. Nullable: absent means no confidence
+        # was declared (renders no badge). Supersedes the older text-suffix
+        # convention (appending the word to the message) — that still works.
+        ("confidence", "messages", "TEXT"),
         # v6: task lease with session heartbeat
         ("claimed_by_session", "tasks", "TEXT"),
         ("lease_expires_at", "tasks", "TEXT"),
@@ -914,7 +919,7 @@ def nth_connect(
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_send")
-def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None) -> str:
+def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None, confidence: str | None = None) -> str:
     """Send a message to the channel. No turns — send anytime.
 
     All members will see this message on their next poll.
@@ -950,6 +955,13 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         task: If True, also create a claimable task from this message
         pin: If True, pin this message as the channel objective
         blocked_by: Comma-separated task IDs this task depends on (requires task=True)
+        confidence: Optional self-rated confidence in this post — one of
+            "high", "medium", or "low" (case-insensitive). Preferred over the
+            older habit of tacking the word onto the end of the message text:
+            it renders as a color-coded badge in the dashboard and lets the
+            channel flag low-confidence posts. Omit (None) when you have no
+            confidence to declare — no badge is shown. The text-suffix
+            convention still works and is unaffected.
     """
     err = validate_channel_code(channel)
     if err:
@@ -959,6 +971,16 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         return json.dumps({"error": "Message cannot be empty."})
     if len(message) > MAX_MESSAGE_LENGTH:
         return json.dumps({"error": f"Message too long ({len(message)} > {MAX_MESSAGE_LENGTH})."})
+
+    # Structured confidence (optional). Nullable — a blank/None value declares
+    # no confidence and stores NULL (no badge). Normalize to lowercase so
+    # "High"/"HIGH" all land as "high". Reject anything outside the enum rather
+    # than silently dropping it, so a typo surfaces instead of vanishing.
+    confidence_val = None
+    if confidence is not None and str(confidence).strip():
+        confidence_val = str(confidence).strip().lower()
+        if confidence_val not in ("high", "medium", "low"):
+            return json.dumps({"error": 'confidence must be "high", "medium", or "low".'})
 
     db = get_db()
     try:
@@ -1179,10 +1201,10 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
         cur = db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
-            "author_session, reply_to, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "author_session, reply_to, confidence, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
-             author_session, reply_to, now),
+             author_session, reply_to, confidence_val, now),
         )
         msg_id = cur.lastrowid
 
