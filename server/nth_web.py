@@ -2769,6 +2769,34 @@ INDEX_HTML = r"""<!doctype html>
   }
   .msg.compact .body::after { content: ""; }
   .msg.system .body { color: var(--dim); font-style: italic; }
+
+  /* ── In-chat task lifecycle cards ── */
+  .msg.task-event .task-event-card { display: flex; align-items: baseline;
+      flex-wrap: wrap; gap: 6px; padding: 4px 8px; border-radius: 5px;
+      background: var(--bg2); border: 1px solid var(--border);
+      border-left: 3px solid var(--border); font-style: normal; }
+  .msg.task-event.te-open      .task-event-card { border-left-color: #7cc0f0; }
+  .msg.task-event.te-claimed   .task-event-card { border-left-color: #f0c060; }
+  .msg.task-event.te-completed .task-event-card { border-left-color: #7ede9e; }
+  .msg.task-event.te-released  .task-event-card { border-left-color: var(--dim); }
+  .msg.task-event.te-cancelled .task-event-card { border-left-color: var(--dimmer); }
+  .task-event-badge { font-size: 9px; padding: 1px 6px; border-radius: 3px;
+      text-transform: uppercase; letter-spacing: 0.5px; user-select: none;
+      flex-shrink: 0; border: 1px solid transparent; }
+  .task-event-badge.open      { color: #7cc0f0; background: rgba(124, 192, 240, 0.12);
+                                border-color: rgba(124, 192, 240, 0.3); }
+  .task-event-badge.claimed   { color: #f0c060; background: rgba(240, 192, 96, 0.12);
+                                border-color: rgba(240, 192, 96, 0.3); }
+  .task-event-badge.completed { color: #7ede9e; background: rgba(126, 222, 158, 0.12);
+                                border-color: rgba(126, 222, 158, 0.3); }
+  .task-event-badge.released,
+  .task-event-badge.cancelled { color: var(--dim); background: var(--bg);
+                                border-color: var(--border); }
+  .task-event-chip { font-size: 10px; font-weight: 600; color: var(--dim);
+      background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+      padding: 0 5px; flex-shrink: 0; }
+  .task-event-text { color: var(--fg); font-size: 12px; min-width: 0;
+      overflow-wrap: anywhere; }
   .msg.mine .author { color: var(--accent2); }
   .msg.targeted { background: rgba(var(--mention-rgb), 0.09); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
@@ -3896,6 +3924,55 @@ INDEX_HTML = r"""<!doctype html>
     return !!m && SYSTEM_WORDS.has(m[1]);
   }
 
+  // Task lifecycle events are ordinary chat messages tagged with a leading
+  // marker ("[task #7] …", "[claimed #7] by X", "[done #7] …", "[released
+  // #7] …", "[cancelled #7] …" — posted by nth_server.py). We special-case
+  // them into a compact status card, the same way isSystemContent muting
+  // special-cases the plain "[word] …" notices.
+  //
+  // BRITTLE (v1): this keys on the text prefix, so renaming a marker server-
+  // side silently drops the styling and a user typing "[done #3]" would be
+  // mis-styled. The durable fix is a structured kind/task_id column on the
+  // messages row so the client keys on data, not a string prefix (same
+  // additive-ALTER pattern the tasks table already uses) — intentionally NOT
+  // added here.
+  const TASK_VERBS = {
+    task:      { label: 'posted',    cls: 'open' },
+    claimed:   { label: 'claimed',   cls: 'claimed' },
+    done:      { label: 'done',      cls: 'completed' },
+    released:  { label: 'released',  cls: 'released' },
+    cancelled: { label: 'cancelled', cls: 'cancelled' },
+  };
+  function taskEventInfo(s) {
+    const m = /^\[(task|claimed|done|released|cancelled) #?(\d+)\]\s*(.*)$/s.exec(s || '');
+    if (!m) return null;
+    const meta = TASK_VERBS[m[1]];
+    return { verb: m[1], label: meta.label, cls: meta.cls,
+             id: m[2], rest: (m[3] || '').trim() };
+  }
+  function renderTaskEventCard(evt) {
+    const card = document.createElement('div');
+    card.className = 'task-event-card';
+    const badge = document.createElement('span');
+    badge.className = 'task-event-badge ' + evt.cls;
+    badge.textContent = evt.label;
+    card.appendChild(badge);
+    const chip = document.createElement('span');
+    chip.className = 'task-event-chip';
+    chip.textContent = '#' + evt.id;
+    chip.title = 'task #' + evt.id;
+    card.appendChild(chip);
+    if (evt.rest) {
+      const txt = document.createElement('span');
+      txt.className = 'task-event-text';
+      // Humanize any @<member_id> sigils the same way message bodies do, then
+      // render as plain text (no markdown — these are short status lines).
+      txt.textContent = humanizeIdSigils(evt.rest);
+      card.appendChild(txt);
+    }
+    return card;
+  }
+
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
   // input (the server-side parser routes it correctly) but ugly to read;
@@ -4746,12 +4823,17 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     const isMine = m.member_id === state.operator.id;
-    const isSystem = isSystemContent(m.content || '');
+    // Task lifecycle lines render as compact status cards (see taskEventInfo);
+    // treat them as system so the author/bars/edit chrome is suppressed the
+    // same way it is for the muted "[word] …" notices.
+    const taskEvt = taskEventInfo(m.content || '');
+    const isSystem = isSystemContent(m.content || '') || !!taskEvt;
     const isAsk = !isSystem && isAskChoices(m.choices);
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
+                  + (taskEvt ? ' task-event te-' + taskEvt.cls : '')
                   + (mentionsOperator ? ' targeted' : '');
     div.dataset.msgId = String(m.id);
     div.dataset.search = (m.content || '').toLowerCase() + ' '
@@ -4806,7 +4888,11 @@ INDEX_HTML = r"""<!doctype html>
       div.appendChild(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
     }
 
-    if (isAsk) {
+    if (taskEvt) {
+      // Task lifecycle: a compact status card (badge + #id chip + short text)
+      // in place of the raw "[done #7] …" prose.
+      div.appendChild(renderTaskEventCard(taskEvt));
+    } else if (isAsk) {
       // trio_ask multiple-choice question: render the interactive picker
       // instead of the plain body (the body text is only a transcript for
       // non-web readers). Stop clicks from toggling compact/expand on the msg.
@@ -7244,6 +7330,7 @@ INDEX_HTML = r"""<!doctype html>
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
       paintBody, applyTargetBars, formatTime,
       isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
+      taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
     };
