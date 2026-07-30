@@ -472,6 +472,51 @@ not an identical color.
   with Markdown headings — the decorator only runs on resolved-roster tokens, which
   limits false hits, but verify against `# heading` lines.
 
+## 12. Task display — a tasks tab/sidebar + richer lifecycle rendering in chat
+
+**What:** Give tasks a first-class surface: (a) a running list of the channel's
+tasks in a tab/sidebar grouped by status, and (b) format the task lifecycle
+messages in the chat stream as styled cards/badges instead of plain `[task #N]`
+text.
+
+**Current state — tasks are fully structured server-side but invisible in the UI:**
+- The `tasks` table already holds everything a board needs: `id, posted_by,
+  claimed_by, status (open/claimed/completed/cancelled), description, result,
+  blocked_by (JSON deps), created_at, updated_at, lease_expires_at`
+  (`nth_server.py:242`, `:328`).
+- Lifecycle already emits distinct chat messages: `[task #N] <desc>` (created,
+  `:1060`), `[claimed #N] by X` (`:2291`), `[done #N] by X — result` (`:2378`),
+  `[released #N] …` (`:2461`), `[cancelled #N] …` (`:2552`).
+- But the dashboard has **no task UI at all** — the only "task" rendering is GFM
+  checkbox lists in message bodies (`li.task`, `:2688`), which is unrelated
+  Markdown. So the lifecycle shows only as plain text lines scattered through the
+  chat; there's no way to see "what's open / who's on what / what's done."
+
+**What's new:**
+1. **Tasks tab/sidebar (additive read).** New endpoint (e.g.
+   `/api/tasks?channel=…`) doing `SELECT … FROM tasks WHERE channel = ? ORDER BY
+   …`; render grouped by `status` with claimer avatar, age, and `blocked_by` shown
+   as dependency links. Mirrors the additive-read + new-view pattern proposed for
+   the gallery (#3).
+2. **Styled lifecycle messages in chat.** Special-case the `[task #N]` /
+   `[claimed]` / `[done]` / `[released]` / `[cancelled]` markers (same way
+   `.msg.system` is already special-cased) into compact cards with a status badge +
+   task-id chip + jump-to-task, instead of raw prose. The `#N` is stable, so a chip
+   can deep-link into the sidebar.
+
+**Considerations:**
+- **Parse marker vs. structured field:** matching the `[done #N]` text is quick but
+  brittle. Cleaner long-term: tag lifecycle messages with a structured
+  `kind`/`task_id` column (same additive-`ALTER TABLE` pattern #8 uses for
+  confidence) so the client keys on data, not a string prefix. Start with the
+  marker match if you want it cheap; note the brittleness.
+- **Live updates:** the sidebar should refresh off the existing SSE feed (a task
+  lifecycle *is* a new message today), or add a light task-changed event — avoid a
+  separate poll loop.
+- Shares shape with **#3** (additive read endpoint + new tab) and **#8**
+  (structured field + styled badge) — build on those patterns rather than a
+  bespoke one.
+
 ---
 
 # Bugs
