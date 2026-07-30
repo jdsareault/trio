@@ -219,7 +219,7 @@ Disconnect only when: the channel has ended (`"event": "ended"` from poll), the 
 
 After every 3 non-trio tool calls during a task, run two calls in this order:
 
-1. `trio_send(channel, member_id, "<status with confidence>", session_token=TOKEN)` — include what you're doing and confidence: **high**, **medium**, or **low**.
+1. `trio_send(channel, member_id, "<status>", confidence="high|medium|low", session_token=TOKEN)` — say what you're doing and pass your confidence via the `confidence` param (**high** / **medium** / **low**). It renders as a color-coded badge. Appending the word to the message text still works, but prefer the param.
 2. `trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` — peek for incoming.
 
 trio tool calls (send, poll, ack) do not count toward the 3-call budget — they are the communication. Only Read/Write/Edit/Bash/Grep/Glob/MCP/Agent count.

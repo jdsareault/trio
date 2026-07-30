@@ -7527,7 +7527,7 @@ INDEX_HTML = r"""<!doctype html>
     globalThis.__TRIO_TEST__ = {
       state,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
-      paintBody, applyTargetBars, formatTime,
+      paintBody, applyTargetBars, formatTime, confBadge,
       isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
       taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,

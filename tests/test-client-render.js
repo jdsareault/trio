@@ -365,6 +365,35 @@ check('rememberColors: overflow (>8) member falls back to its hash pick', () => 
   assert.strictEqual(new Set(firstEight).size, 8, 'first 8 sorted ids stay distinct');
 });
 
+// ── confBadge: structured confidence → badge element (or null) ───────────────
+check('confBadge: high/medium/low each yield a styled badge', () => {
+  for (const v of ['high', 'medium', 'low']) {
+    const b = H.confBadge(v);
+    assert.ok(b, v + ' must produce a badge');
+    assert.strictEqual(b.textContent, v);
+    assert.ok(b.className.includes('conf-badge'), 'has base class');
+    assert.ok(b.className.includes(v), 'has variant class ' + v);
+  }
+});
+check('confBadge: value is case-insensitive and trimmed', () => {
+  const b = H.confBadge('  HIGH ');
+  assert.ok(b, 'HIGH should normalize to high');
+  assert.strictEqual(b.textContent, 'high');
+  assert.ok(b.className.includes('high'));
+});
+check('confBadge: absent confidence renders NOTHING (no empty badge)', () => {
+  // Backward-compat contract: an un-declared confidence must be null, not an
+  // empty node — appendMessage skips appending when confBadge returns null.
+  assert.strictEqual(H.confBadge(null), null, 'null → no badge');
+  assert.strictEqual(H.confBadge(undefined), null, 'undefined → no badge');
+  assert.strictEqual(H.confBadge(''), null, 'empty string → no badge');
+  assert.strictEqual(H.confBadge('   '), null, 'whitespace → no badge');
+});
+check('confBadge: an out-of-enum value renders no badge', () => {
+  assert.strictEqual(H.confBadge('very-high'), null);
+  assert.strictEqual(H.confBadge('unsure'), null);
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
