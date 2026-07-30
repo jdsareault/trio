@@ -433,6 +433,45 @@ Observed live: 5 "pink" members in a channel of 8.
   and shift a color. Fine for avatars today; if color stickiness matters more,
   persist an assigned index on the member row at join.
 
+## 11. Inline `#` / `!` formatting parity with `@`
+
+**What:** Render `#pound` and `!bang` references inline in the message body the
+same way `@mentions` already are — a member-colored chip/dot in the prose —
+instead of leaving them as plain (name-only) text. Keep their distinct semantics
+(# = "about", ! = "alert") in the styling; "same way" means the same *mechanism*,
+not an identical color.
+
+**Current state (asymmetric):**
+- `@`: gets a member-colored inline chip + dot in the body (`.inline-mention`,
+  `nth_web.py:2650`), applied by `decorateInlineMentions` → `collectMentionMatches`
+  whose regex matches **only `@`** (`nth_web.py:3825`) — *plus* a routing chip in
+  the mentions-bar above.
+- `#` and `!`: get a routing-bar chip above the message (`.refs-bar` muted green,
+  `.bangs-bar` loud coral; `nth_web.py:2612` / `:2628`) and are name-humanized in
+  the body (`humanizeIdSigils`, `:3791`) — but the body occurrence itself stays
+  **unstyled**. So the "who" pop `@` gets inline is missing for `#`/`!`.
+
+**Substrate that already exists:**
+- Every message already carries parsed `mentions` / `refs` / `bangs` id arrays
+  (server-side `_parse_sigils_against_roster`), so the client already knows which
+  body tokens are `#`'d and `!`'d — no new parsing.
+- `decorateInlineMentions` + `colorFor` are ready to generalize: accept the sigil
+  char + a per-sigil style, reusing the member color for the dot.
+
+**What's new:**
+- Generalize the inline decorator to also match `#`/`!` and wrap them in a styled
+  inline span. Give `#` the muted "about" treatment and `!` the loud "alert" one
+  (reuse the bar palettes: green `#9ccf9c` / coral `#ff8470`) so the three sigils
+  stay *distinguishable* while all getting the member-colored dot.
+
+**Considerations:**
+- The differentiation is deliberate (# quieter than @, ! louder) — preserve it;
+  don't flatten all three to the `@` look.
+- Carry over the code/pre/link exclusions already in `decorateInlineMentions`
+  (`:3854`) so `#`/`!` inside code spans aren't decorated. `#` especially collides
+  with Markdown headings — the decorator only runs on resolved-roster tokens, which
+  limits false hits, but verify against `# heading` lines.
+
 ---
 
 # Bugs
