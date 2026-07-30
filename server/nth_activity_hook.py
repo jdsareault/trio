@@ -60,10 +60,16 @@ WHERE fingerprint = session_id.
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# A leading `NAME=value` shell env-assignment (e.g. `AWS_SECRET=... aws ...`,
+# `TOKEN=... curl ...`) — the most common way a secret rides on a command line.
+# We skip these when picking the program name so a secret is never stored.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
 
@@ -108,11 +114,20 @@ def _summarize_target(tool_name: str, tool_input) -> str:
         return ""
     try:
         if tool_name == "Bash":
-            # Program name ONLY — the first shell token. Args/flags/env come
-            # after and are exactly where secrets live (`mysql -pPASS`,
-            # `curl ...?token=`), so they are never stored.
+            # Program name ONLY. Args/flags come after the program and are where
+            # secrets live (`mysql -pPASS`, `curl ...?token=`); leading
+            # `NAME=value` env-assignments come BEFORE it and are also secret
+            # carriers. Skip the assignments, take the program, and as a
+            # belt-and-braces check refuse anything that still smells of a value.
             cmd = (tool_input.get("command") or "").strip()
-            head = cmd.split(None, 1)[0] if cmd else ""
+            head = ""
+            for tok in cmd.split():
+                if _ENV_ASSIGN_RE.match(tok):
+                    continue  # env assignment — never the program, may be secret
+                head = tok
+                break
+            if "=" in head:
+                return ""  # unexpected shape — store nothing rather than risk it
             return _cap(os.path.basename(head), 40)
         if tool_name in ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit"):
             fp = (tool_input.get("file_path")
@@ -120,7 +135,10 @@ def _summarize_target(tool_name: str, tool_input) -> str:
             return _cap(os.path.basename(fp))
         if tool_name in ("Glob", "Grep"):
             # A search pattern / path the agent chose — not file content.
-            return _cap(tool_input.get("pattern") or tool_input.get("path") or "")
+            # Residual risk (accepted, documented): an agent grepping FOR a
+            # literal secret value would surface it here. Narrow (requires
+            # searching for secret-shaped text) and capped short to limit it.
+            return _cap(tool_input.get("pattern") or tool_input.get("path") or "", 48)
         if tool_name in ("Task", "Agent"):
             st = _cap(tool_input.get("subagent_type") or "", 32)
             desc = tool_input.get("description") or ""
@@ -249,10 +267,17 @@ def main() -> int:
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         try:
             _apply(conn, event, session_id, tool_name, target, now)
-        except sqlite3.OperationalError:
-            # Un-migrated DB (missing column / tool_events table). Roll back the
-            # aborted txn, migrate once, retry. Only hits the transitional
-            # window before nth_server init has run against this DB.
+        except sqlite3.OperationalError as e:
+            # Distinguish a SCHEMA mismatch (missing column/table — the
+            # transitional case _migrate handles) from a LOCK/BUSY timeout,
+            # which raises the SAME exception type. A busy timeout is exactly
+            # the contention this hook must fail FAST on — migrating + retrying
+            # there would trade the 500ms give-up for a multi-second DDL+retry
+            # storm under the very load we're protecting. So only migrate on a
+            # genuine schema error; otherwise give up (the next tool re-stamps).
+            msg = str(e).lower()
+            if "no such column" not in msg and "no such table" not in msg:
+                return 0  # locked/busy — fail fast, don't compound contention
             try:
                 conn.execute("ROLLBACK")
             except Exception:

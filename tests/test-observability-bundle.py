@@ -99,6 +99,14 @@ check("Bash target does NOT leak the password",
       "SUPERSECRET" not in (sess("last_tool_target") or ""))
 
 fire({"session_id": "obs-sid-1", "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {"command": "AWS_SECRET_ACCESS_KEY=AKIAHUNTER2 aws s3 ls"}})
+check("Bash skips leading env-assignment, keeps program name",
+      sess("last_tool_target") == "aws")
+check("Bash env-assignment secret not stored",
+      "AKIA" not in (sess("last_tool_target") or ""))
+
+fire({"session_id": "obs-sid-1", "hook_event_name": "PreToolUse",
       "tool_name": "Read", "tool_input": {"file_path": "/home/x/.env"}})
 check("Read keeps a basename", sess("last_tool_target") == ".env")
 
@@ -114,7 +122,7 @@ check("Task does NOT store the prompt body",
 # ── #2 tool_events ring: contents + cap + no orphans ─────────────────────────
 ev = events()
 check("tool_events recorded the calls in order",
-      [e["tool_name"] for e in ev] == ["Bash", "Read", "Task"])
+      [e["tool_name"] for e in ev] == ["Bash", "Bash", "Read", "Task"])
 check("Task spawn is in the ring (sub-agent surface)",
       any(e["tool_name"] == "Task" for e in ev))
 
@@ -173,6 +181,12 @@ check("dead beats blocked",
 check("no block, aged -> stale (not blocked)",
       web.member_status(iso(-400), "", session_activity_iso=iso(-400),
                         last_turn_end_iso=iso(-500)) == "stale")
+# Sauron self-heal: activity AFTER the block (session_last_seen past blocked_since)
+# clears the blocked render even if the clearing write was dropped — e.g. the
+# agent resumed via a trio RPC that bumped last_seen but not blocked_since.
+check("activity past blocked_since clears blocked (self-heal)",
+      web.member_status(iso(-2), "", session_activity_iso=iso(-2),
+                        last_turn_end_iso=iso(-30), blocked_since_iso=iso(-10)) == "working")
 
 # ── roster surfaces the chip fields + blocked status ─────────────────────────
 hub = web.EventHub(srv.DB_PATH, CH)
@@ -205,7 +219,12 @@ check("acting member reads working (chip-visible)", m and m["status"] == "workin
 
 c = raw()
 try:
-    c.execute("UPDATE sessions SET blocked_since=? WHERE fingerprint=?", (iso(0), "obs-sid-1"))
+    # Model a real block: the hook stamps last_seen AND blocked_since to the same
+    # instant, and nothing runs during the freeze.
+    t = iso(0)
+    c.execute("UPDATE sessions SET last_seen=?, blocked_since=? WHERE fingerprint=?",
+              (t, t, "obs-sid-1"))
+    c.execute("UPDATE members SET last_seen=? WHERE channel=? AND id=?", (t, CH, agent))
 finally:
     c.close()
 m = member_row()

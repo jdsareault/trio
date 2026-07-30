@@ -409,10 +409,22 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
         return "dead"
     # Blocked outranks stale/idle/working (but not dead): a host prompt can stall
     # the room longer than STALE_SECONDS, and the whole point is to be loud.
-    # blocked_since is cleared by PostToolUse / a new prompt / any non-blocking
-    # tool, so it self-heals; DEAD is the backstop if the session died blocked.
-    if blocked_since_iso and _iso_secs(blocked_since_iso) is not None:
-        return "blocked"
+    #
+    # A block is only real while the session's OWN activity has NOT advanced past
+    # blocked_since. At a genuine block the activity hook stamps last_seen and
+    # blocked_since to the same instant, and nothing runs during the host-prompt
+    # freeze, so session_last_seen stays == blocked_since → blocked. The moment
+    # ANY later activity lands — the clearing PostToolUse, a new prompt, another
+    # tool, OR a trio RPC that only bumps last_seen (nth_send/nth_poll don't
+    # touch blocked_since) — session_last_seen advances past blocked_since and we
+    # stop reporting blocked. This makes the "self-heals on next activity"
+    # guarantee hold even when the clearing write was dropped under contention.
+    # (Uses the session's raw last_seen, not the monitor-inflated value.)
+    bs = _iso_secs(blocked_since_iso)
+    if bs is not None:
+        act = _iso_secs(session_activity_iso)
+        if act is None or act <= bs:
+            return "blocked"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
@@ -5794,6 +5806,14 @@ INDEX_HTML = r"""<!doctype html>
     const tool = (m.last_tool_name || '').trim();
     if (!tool) return '';
     if (!(m.status === 'working' || m.status === 'active' || m.status === 'blocked')) return '';
+    // Freshness gate: last_tool_* is the last tool that STARTED and isn't cleared
+    // on a new turn, so a member that resumed via a prompt/RPC without running a
+    // tool yet would otherwise advertise last turn's tool. Only show it if it
+    // started recently.
+    if (m.last_tool_at) {
+      const toolAge = (Date.now() - new Date(m.last_tool_at).getTime()) / 1000;
+      if (!(toolAge >= 0 && toolAge < 180)) return '';
+    }
     const tgt = (m.last_tool_target || '').trim();
     // A Task spawn reads as a sub-agent rather than a bare tool.
     if (tool === 'Task' || tool === 'Agent') {
