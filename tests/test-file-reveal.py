@@ -108,6 +108,22 @@ try:
     check("validate: path:line token exists=true", ex.get(real_file + ":42") is True)
     check("validate: path:line:col token exists=true", ex.get(real_file + ":42:7") is True)
 
+    # A bare '/' (and other trivial roots / pure-separator tokens) EXIST on disk
+    # but must never validate as linkable — otherwise a slash used as prose
+    # punctuation ("reload / incognito") picks up a folder link. Defense in depth
+    # behind the client's filename-segment candidate filter.
+    roots = ["/", "//", "/..", "   "]
+    st, resp = http(port, "/api/path/validate", {"paths": roots})
+    ex = resp.get("exists", {})
+    check("validate: bare '/' exists=false", ex.get("/") is False)
+    check("validate: '//' exists=false", ex.get("//") is False)
+    check("validate: '/..' (root) exists=false", ex.get("/..") is False)
+    # A real path UNDER the root still validates (rejection is roots-only).
+    st, resp = http(port, "/api/path/validate", {"paths": ["/", real_file]})
+    ex = resp.get("exists", {})
+    check("validate: real path under root still exists=true",
+          ex.get("/") is False and ex.get(real_file) is True)
+
     # Injection-style tokens are just non-existent strings — never executed.
     inj = ['"; rm -rf ~"', "--flag", "-R", "$(whoami)", "a\x00b"]
     st, resp = http(port, "/api/path/validate", {"paths": inj})
@@ -162,6 +178,14 @@ try:
     st, resp = http(port, "/api/reveal", {"path": missing})
     check("reveal: missing path -> 404", st == 404)
     check("reveal: missing path never invokes open", not reveal_calls)
+
+    # A bare '/' (and pure-separator roots) exist on disk but must be REFUSED —
+    # never revealed — so a slash-as-punctuation link can't open the root folder.
+    for root in ["/", "//", "/.."]:
+        reveal_calls.clear()
+        st, _ = http(port, "/api/reveal", {"path": root})
+        check(f"reveal: trivial root {root!r} -> 404, no exec",
+              st == 404 and not reveal_calls)
 
     # A leading-dash / injection value that doesn't exist → 404, open untouched.
     for bad in ["--flag", "-R", '"; rm -rf ~"', "$(whoami)"]:
