@@ -290,10 +290,14 @@ print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries rem
 #   nth_stall_hook    (StopFailure)              -> records a stall for the watchdog.
 #   nth_turn_hook     (Stop + StopFailure)       -> stamps last_turn_end so the
 #                                                   dashboard shows working vs. idle.
-#   nth_activity_hook (PreToolUse + UserPromptSubmit) -> stamps last_seen on every
-#                                                   tool/prompt so 'working' spans
-#                                                   the whole turn, not just from
-#                                                   the first trio call.
+#   nth_activity_hook (PreToolUse + PostToolUse + UserPromptSubmit) -> stamps
+#                                                   last_seen on every tool/prompt
+#                                                   so 'working' spans the whole
+#                                                   turn; also records the tool-use
+#                                                   chip summary and sets/clears the
+#                                                   'blocked' flag (PostToolUse
+#                                                   clears it when a prompt is
+#                                                   answered).
 # Idempotent per (event, script) — re-running setup.sh never duplicates.
 native_path() {  # native_path <posix-path>
     if [ "$PLATFORM" = "windows" ]; then
@@ -368,9 +372,12 @@ changed |= register('Stop',        'nth_turn_hook.py',  turn_cmd)
 changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd)
 # The activity hook stamps sessions.last_seen on every tool call and prompt so
 # the dashboard shows 'working' for the whole active turn (not just from the
-# agent's first trio call). Matcher-less on both events — every tool/prompt is
-# activity, regardless of kind.
+# agent's first trio call). It also records a short tool summary (the tool-use /
+# sub-agent chips) and flips the 'blocked' flag for interactive host prompts.
+# Matcher-less on all three events — every tool/prompt is activity, regardless
+# of kind. PostToolUse is what CLEARS 'blocked' when the prompt is answered.
 changed |= register('PreToolUse',       'nth_activity_hook.py', activity_cmd)
+changed |= register('PostToolUse',      'nth_activity_hook.py', activity_cmd)
 changed |= register('UserPromptSubmit', 'nth_activity_hook.py', activity_cmd)
 
 if not changed:

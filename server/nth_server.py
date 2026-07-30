@@ -364,6 +364,19 @@ def get_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Observability (nth_activity_hook PreToolUse/PostToolUse):
+    #   last_tool_name/last_tool_target/last_tool_at — a SHORT, privacy-safe
+    #     summary of the tool currently running, for the roster's tool-use chip.
+    #   blocked_since — set while a session is frozen on an interactive host
+    #     prompt (AskUserQuestion/ExitPlanMode); cleared by PostToolUse, a new
+    #     prompt, or any non-blocking tool. Drives the loud `blocked` roster dot.
+    # A summary is stored, never raw tool_input (privacy + row size).
+    for col in ("last_tool_name TEXT", "last_tool_target TEXT",
+                "last_tool_at TEXT", "blocked_since TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
@@ -399,6 +412,28 @@ def get_db() -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_stall_events_open
         ON stall_events (resolved_at, created_at)
+    """)
+
+    # tool_events: a CAPPED ring of recent tool calls per session, appended by
+    # nth_activity_hook on PreToolUse — the source for the roster's expandable
+    # "recent calls" list and its spawned-sub-agent view (rows with
+    # tool_name='Task'). Only a SHORT summary is stored (see the hook's privacy
+    # contract), never raw tool_input. The hook prunes to the newest N rows per
+    # session on every insert, so this can never grow unbounded — it is NOT an
+    # audit log. Keyed by session_id (== sessions.fingerprint) so the read
+    # endpoint can resolve it back to a member.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            tool_name   TEXT NOT NULL DEFAULT '',
+            target      TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tool_events_session
+        ON tool_events (session_id, id)
     """)
     conn.commit()
     return conn
