@@ -724,6 +724,12 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
         "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
         "reply_to": (r["reply_to"] if "reply_to" in keys else None),
+        # recipients backs the DM tab's real (no longer cosmetic) scoping. The
+        # web dashboard is the OPERATOR view and is all-seeing by design
+        # (operator sees every message, audit preserved), so the feed ships
+        # every row; the client uses recipients to focus the DM tab. Empty
+        # list = broadcast.
+        "recipients": parse_recipients(r["recipients"] if "recipients" in keys else ""),
         "retracted_at": (r["retracted_at"] if "retracted_at" in keys else None),
         "retraction_reason": (r["retraction_reason"] if "retraction_reason" in keys else None),
         "edited_at": (r["edited_at"] if "edited_at" in keys else None),
@@ -776,7 +782,7 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                "choices, selection, reply_to, recipients, retracted_at, retraction_reason, edited_at, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -928,7 +934,7 @@ class EventHub:
                     prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, recipients, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
@@ -942,7 +948,7 @@ class EventHub:
                     scan_now = now_iso()
                     changed = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, recipients, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id <= ? AND "
                         "((retracted_at IS NOT NULL AND retracted_at > ?) OR "
                         " (edited_at IS NOT NULL AND edited_at > ?)) ORDER BY id",
@@ -1783,6 +1789,31 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if reply_to is not None and not (type(reply_to) is int and reply_to > 0):
             self._error(400, "invalid reply_to")
             return
+
+        # recipients: when the operator composes in the DM tab the client sends
+        # the DM target's member_id(s) here, making this a REAL private message
+        # — the server stores the recipient list and the agent-facing read
+        # paths withhold it from everyone else. Absent / empty => broadcast
+        # (recipients column stays '[]'), i.e. today's behavior. The operator
+        # (sender) is all-seeing regardless, so their own dashboard still shows
+        # it. Validate: a list of non-empty strings, capped, de-duplicated.
+        raw_recipients = body.get("recipients")
+        recipient_ids: list = []
+        if raw_recipients is not None:
+            if not isinstance(raw_recipients, list):
+                self._error(400, "invalid recipients")
+                return
+            if len(raw_recipients) > 64:
+                self._error(400, "too many recipients (max 64)")
+                return
+            for rid in raw_recipients:
+                if not isinstance(rid, str) or not rid.strip():
+                    self._error(400, "invalid recipients")
+                    return
+                rid = rid.strip()
+                if rid not in recipient_ids:
+                    recipient_ids.append(rid)
+
         raw_sel = body.get("selection")
         selection_json = None
         has_selection = raw_sel is not None
@@ -1972,17 +2003,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
                     db, self.channel, posted_content
                 )
+                # A DM's recipients are auto-added to the ping set so they wake
+                # (they can see it); visibility stays governed by recipients.
+                # Mirrors trio_dm on the MCP side.
+                if recipient_ids:
+                    for rid in recipient_ids:
+                        if rid not in mention_ids:
+                            mention_ids.append(rid)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs, reply_to, selection) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, reply_to, selection, recipients) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
                      reply_to,
-                     selection_json if selection_json else ""),
+                     selection_json if selection_json else "",
+                     json.dumps(recipient_ids) if recipient_ids else "[]"),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
@@ -6390,11 +6429,17 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     sendBtn.disabled = true;
+    // DM tab = a REAL private message now. Send the DM target as `recipients`
+    // so the server withholds it from every other agent (the operator, being
+    // all-seeing, still sees it in the main tab). Outside DM mode, recipients
+    // is omitted → broadcast, unchanged.
+    const dmRecipients = state.dmTargetId ? [state.dmTargetId] : undefined;
     try {
       const r = await fetch('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, mentions: mentionIds,
+                               recipients: dmRecipients,
                                attachment_ids: readyAtt.map(a => a.id) }),
       });
       if (!r.ok) {
@@ -6509,12 +6554,19 @@ INDEX_HTML = r"""<!doctype html>
     node.classList.toggle('filtered-out', !hit);
   }
   function isRelevantInDm(m) {
-    // Conversation between operator and DM target:
-    //  • authored by target → must @mention operator
-    //  • authored by operator → must @mention target
-    //  • system notices about this target (e.g. task claims) stay visible
+    // Conversation between operator and DM target. Now backed by REAL
+    // recipients (server-enforced) plus the legacy @mention heuristic so
+    // pre-DM backscroll still surfaces:
+    //  • a real DM addressed to the target (or from the target to us)
+    //  • authored by target → @mentions operator
+    //  • authored by operator → @mentions target
     if (!state.dmTargetId) return true;
     const ms = m.mentions || [];
+    const rc = m.recipients || [];
+    // Real DMs: operator → target, or target → operator.
+    if (m.member_id === state.operator.id && rc.includes(state.dmTargetId)) return true;
+    if (m.member_id === state.dmTargetId && rc.includes(state.operator.id)) return true;
+    // Legacy @mention conversation (broadcasts that pinged the counterpart).
     if (m.member_id === state.dmTargetId && ms.includes(state.operator.id)) return true;
     if (m.member_id === state.operator.id && ms.includes(state.dmTargetId)) return true;
     return false;
