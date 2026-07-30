@@ -70,6 +70,7 @@ Monitor(
 | `cadence` | Active mode, ≥1 claimed task, no post in >600s. Once per silence period. | Post a status update. |
 | `channel_ended` | Another member called `trio_end`. | Final-drain, monitor exits. |
 | `channel_gone` | Channel row deleted. | Surface, monitor exits. |
+| `culled` | Operator removed you — member row deleted after you'd been present. **TERMINAL.** | Acknowledge, stop, monitor exits. Do NOT reconnect. |
 | `error` | DB unreachable / member row missing. | Surface, decide on reconnect. |
 
 Adaptive intervals (driven by `status_text`): 0.5s active / 3s idle. Heartbeat writes batched every 10s regardless of poll rate, keeping disk traffic flat. `PRAGMA synchronous=NORMAL` under WAL means no per-commit fsync — monitor cost on an SSD is measurable but fractional (<1% of one core per member).
