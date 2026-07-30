@@ -318,6 +318,62 @@ text, and render it as a small color-coded **badge** attached to the message.
 
 ---
 
+## 9. Real direct messages (private 1:1) — and the "DM implies privacy" gap
+
+**Straddles bug and feature** (operator was unsure which). Two separable pieces:
+a small honesty fix now, and a larger real-DMs feature that extends #5.
+
+**Current state — the DM tab is a cosmetic filter, not a private channel.**
+There is no DM store, no private delivery, and nothing agent-facing: SKILL /
+REFERENCE / PROTOCOLS and the MCP tool docstrings never mention DMs at all — to
+an agent, a "DM" is just an `@mention`. The whole concept lives in the dashboard:
+- **Read side:** opening a DM loads `/?dm=<member_id>` and renders *every* channel
+  message, then hides non-matching ones with a `.dm-hidden { display:none }` CSS
+  class (`nth_web.py:2707`). The predicate `isRelevantInDm` (`nth_web.py:6156-6166`)
+  keeps only the mutual-@mention subset: target→operator @mentions, operator→target
+  @mentions, plus system notices about the target. That's why the tab isn't blank
+  before you've "DMed" — it's surfacing pre-existing main-channel @mentions.
+- **Send side:** posting from a DM tab is an ordinary broadcast send that just
+  auto-@mentions the target and prepends `@name` to the text
+  (`nth_web.py:5998-6009`) — it lands in the shared `messages` table and shows in
+  everyone's main tab.
+- **Server side:** every read path (`trio_poll` / `trio_history` / SSE) is
+  `WHERE channel = ? AND id > ?` with no per-member visibility predicate — every
+  member reads every message (same fact #5 is built on). So DM "privacy" exists
+  only in one browser tab's CSS; another operator tab, the main view, or any
+  agent's `trio_poll` sees the full exchange.
+
+**Piece A — honesty fix (small, do regardless).** The "DM" label promises privacy
+the system doesn't provide — an operator can reasonably type something into a DM
+tab believing only the target sees it. Until real DMs exist, make the affordance
+tell the truth: relabel (e.g. "@mention filter" / "focus view") or add an inline
+note that a DM is a filtered view of the public channel, visible to all members.
+Purely client-side.
+
+**Piece B — real private DMs (feature, larger).** A genuinely private 1:1 requires
+what #5 already scopes plus more:
+- a recipient/visibility column on `messages` (or a separate `dm_messages`
+  table) so a DM is addressed, not broadcast;
+- **member-aware read paths** — `trio_poll`, `trio_history`, SSE, *and* the
+  conversation export must all honor it, or the "private" message leaks (this is
+  exactly #5's "miss one and it leaks" cost);
+- an agent-facing way to send/receive DMs (a `to=` arg or a `trio_dm` tool) —
+  today agents have no DM primitive at all;
+- watermark handling for messages a member can't see (the #5 problem).
+
+**Relationship to #5:** this is a superset of #5's "can see" axis — same predicate,
+same read-path surface, same watermark care. If real DMs are wanted, build them
+*on* #5's visibility engine rather than as a parallel mechanism. Do them together
+or #5 first.
+
+**Hard caveat (same as #5):** all members share one SQLite DB, so server-enforced
+DMs are still **soft scoping** — the server declines to hand a non-recipient the
+bytes; it is not cryptographic isolation. Don't present DMs as a trust boundary.
+Piece A is worth doing on its own precisely because today's DMs aren't even soft
+scoping — they're cosmetic.
+
+---
+
 # Bugs
 
 Distinct from the feature ideas above — these are defects observed in a live
