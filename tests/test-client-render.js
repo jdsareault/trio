@@ -180,6 +180,68 @@ check('paintBody: an @mention inside `code` is NOT decorated', () => {
   assert.strictEqual(body.querySelectorAll('.inline-mention').length, 0,
     'mention inside inline code must be left alone: ' + body.innerHTML);
 });
+check('paintBody: markdown path decorates a roster #ref (.inline-ref)', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  const { div, body } = makeMsgDom();
+  H.paintBody(div, body, { id: 1, content: 'a note about #bob today', refs: ['bob1'] });
+  const spans = body.querySelectorAll('.inline-ref');
+  assert.strictEqual(spans.length, 1, 'expected one decorated ref: ' + body.innerHTML);
+  assert.strictEqual(spans[0].textContent, '#bob');
+  assert.strictEqual(spans[0].dataset.memberId, 'bob1');
+  assert.strictEqual(body.querySelectorAll('.inline-mention').length, 0,
+    '#ref must not be tagged as an @mention: ' + body.innerHTML);
+});
+check('paintBody: markdown path decorates a roster !bang (.inline-bang)', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  const { div, body } = makeMsgDom();
+  H.paintBody(div, body, { id: 1, content: 'heads up !bob now', bangs: ['bob1'] });
+  const spans = body.querySelectorAll('.inline-bang');
+  assert.strictEqual(spans.length, 1, 'expected one decorated bang: ' + body.innerHTML);
+  assert.strictEqual(spans[0].textContent, '!bob');
+  assert.strictEqual(spans[0].dataset.memberId, 'bob1');
+});
+check('paintBody: #/! decorate independently on the same message', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  H.state.members.set('amy1', { id: 'amy1', name: 'amy' });
+  const { div, body } = makeMsgDom();
+  H.paintBody(div, body, { id: 1, content: '#bob please, !amy urgent', refs: ['bob1'], bangs: ['amy1'] });
+  assert.strictEqual(body.querySelectorAll('.inline-ref').length, 1, body.innerHTML);
+  assert.strictEqual(body.querySelectorAll('.inline-bang').length, 1, body.innerHTML);
+  assert.strictEqual(body.querySelector('.inline-ref').textContent, '#bob');
+  assert.strictEqual(body.querySelector('.inline-bang').textContent, '!amy');
+});
+check('paintBody: a #ref inside `code` is NOT decorated', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  const { div, body } = makeMsgDom();
+  H.paintBody(div, body, { id: 1, content: 'see `#bob` here', refs: ['bob1'] });
+  assert.strictEqual(body.querySelectorAll('.inline-ref').length, 0,
+    'ref inside inline code must be left alone: ' + body.innerHTML);
+});
+check('paintBody: a Markdown "# heading" line is not mistaken for a #ref', () => {
+  H.state.members.clear();
+  H.state.members.set('head1', { id: 'head1', name: 'heading' });
+  const { div, body } = makeMsgDom();
+  // "# heading" renders as an <h1> (sigil stripped); even so, refs=['head1']
+  // must not paint the heading word as a #ref.
+  H.paintBody(div, body, { id: 1, content: '# heading\n\nbody text', refs: ['head1'] });
+  assert.strictEqual(body.querySelectorAll('.inline-ref').length, 0,
+    'a markdown heading must not be decorated as a #ref: ' + body.innerHTML);
+});
+check('paintBody: #all is NOT decorated (no every-member analogue)', () => {
+  H.state.members.clear();
+  H.state.members.set('bob1', { id: 'bob1', name: 'bob' });
+  const { div, body } = makeMsgDom();
+  // refs is non-empty (real #bob present) so the # pass runs; #all must still
+  // stay plain since '#all' is noise server-side.
+  H.paintBody(div, body, { id: 1, content: '#bob and #all', refs: ['bob1'] });
+  const refs = body.querySelectorAll('.inline-ref');
+  assert.strictEqual(refs.length, 1, 'only #bob should decorate, not #all: ' + body.innerHTML);
+  assert.strictEqual(refs[0].textContent, '#bob');
+});
 
 // ── applyTargetBars (DOM) ────────────────────────────────────────────────────
 check('applyTargetBars: a retracted message clears its target bars', () => {
