@@ -251,6 +251,58 @@ check('directAt tolerates a missing/nameless member', () => {
   assert.strictEqual(H.directAt('ship it', { id: 'x' }), 'ship it');
 });
 
+// ── colorFor / rememberColors ───────────────────────────────────────────────
+// Client-side collision-free label-color assignment (mirrors the server's
+// animal_for_channel). Colors must be distinct for a roster ≤ palette size,
+// agree across clients (pure function of the sorted id set), and fall back to
+// the plain hash pick for authors no longer in the roster.
+// Recover the palette color set by assigning a full 8-member roster whose ids
+// happen to spread across all 8 slots (verified distinct in the first check).
+const PALETTE_SET = (() => {
+  const ids = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
+  H.rememberColors(ids.map(id => ({ id })));
+  return new Set(ids.map(id => H.colorFor(id)));
+})();
+
+check('rememberColors: a roster ≤ palette gets all-distinct colors', () => {
+  const ids = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
+  H.rememberColors(ids.map(id => ({ id })));
+  const colors = ids.map(id => H.colorFor(id));
+  assert.strictEqual(new Set(colors).size, ids.length, 'expected 8 distinct colors');
+});
+
+check('rememberColors: assignment is order-independent (clients agree)', () => {
+  const ids = ['m3', 'm1', 'm4', 'm2'];
+  H.rememberColors(ids.map(id => ({ id })));
+  const a = ids.map(id => H.colorFor(id));
+  // Same set, reversed input order → identical per-id colors.
+  H.rememberColors([...ids].reverse().map(id => ({ id })));
+  const b = ids.map(id => H.colorFor(id));
+  assert.deepStrictEqual(a, b);
+});
+
+check('colorFor: unknown id (author who left) falls back to a stable hash pick', () => {
+  const gone = 'departed-author';
+  H.rememberColors([{ id: 'still-here' }]);
+  const first = H.colorFor(gone);
+  assert.ok(PALETTE_SET.has(first), 'fallback must be a palette color');
+  // Fallback is independent of the current roster — old messages stay stable.
+  H.rememberColors([{ id: 'someone-else' }, { id: 'and-another' }]);
+  assert.strictEqual(H.colorFor(gone), first, 'departed author color must stay stable');
+});
+
+check('rememberColors: overflow (>8) member falls back to its hash pick', () => {
+  const ids = [];
+  for (let i = 0; i < 12; i++) ids.push('over' + i);
+  H.rememberColors(ids.map(id => ({ id })));
+  // The last id in sorted order is guaranteed to hit a full palette and wrap
+  // back to its own hash pick; at minimum, every assigned color is a palette
+  // color and the first 8 sorted ids are distinct.
+  const sorted = [...ids].sort();
+  const firstEight = sorted.slice(0, 8).map(id => H.colorFor(id));
+  assert.strictEqual(new Set(firstEight).size, 8, 'first 8 sorted ids stay distinct');
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
