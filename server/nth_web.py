@@ -3644,6 +3644,10 @@ INDEX_HTML = r"""<!doctype html>
     notifyEnabled: false,
     soundEnabled: false,
     chimeVolume: 0.33,
+    soundScope: 'all',        // 'mention' | 'all' — chime scope, INDEPENDENT of
+                              // notifyScope. Defaults to 'all' to preserve the
+                              // historical "chime on any new message" behavior
+                              // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     initialLoad: true,        // pin to newest until the history burst settles
@@ -5166,8 +5170,12 @@ INDEX_HTML = r"""<!doctype html>
       } catch (e) { /* ignore */ }
     }
 
-    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
-    if (state.soundEnabled && !isMine && !isSystem) playChime();
+    // In-page chime for a new peer message (opt-in, focus-agnostic). The scope
+    // (soundScope) is kept independent of the desktop-notify scope, so a quiet
+    // chime on all messages can coexist with a popup only on @mentions, or vice
+    // versa. Reuses the same mentionsOperator predicate the notify block uses.
+    if (state.soundEnabled && !isMine && !isSystem &&
+        chimeScopeAllows(state.soundScope, mentionsOperator)) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -6586,6 +6594,15 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { _audioCtx = null; }
     return _audioCtx;
   }
+  // Does a peer message qualify for the chime under the current scope?
+  //   'all'     → every peer message chimes.
+  //   'mention' → only messages that @mention the operator chime.
+  // Pure (no DOM/state) so it can be unit-tested via the harness hook. The
+  // on/off master is state.soundEnabled + the btn-sound pill; this only refines
+  // an already-enabled chime, and stays independent of notifyScope.
+  function chimeScopeAllows(scope, mentionsOperator) {
+    return scope === 'all' ? true : !!mentionsOperator;
+  }
   function playChime() {
     const ctx = ensureAudio();
     if (!ctx) return;
@@ -7484,7 +7501,7 @@ INDEX_HTML = r"""<!doctype html>
       taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
-      colorFor, rememberColors,
+      colorFor, rememberColors, chimeScopeAllows,
     };
   }
   // __TRIO_TEST_HOOK_END__
