@@ -1640,6 +1640,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_edit()
         elif parsed.path == "/api/delete":
             self._handle_delete()
+        elif parsed.path == "/api/path/validate":
+            self._handle_path_validate()
+        elif parsed.path == "/api/reveal":
+            self._handle_reveal()
         else:
             self._error(404, "not found")
 
@@ -2325,6 +2329,130 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "id": mid})
+
+    # ── file-path validate / reveal ──
+    # The client detects path-LIKE tokens in message bodies broadly, then asks
+    # the server which ones actually exist on disk; only real files get linked
+    # (validation, not pattern-matching, gates linkification). A linked path can
+    # then be revealed in Finder. There is NO access gating on these endpoints
+    # (operator's explicit choice), so injection-safety is enforced structurally:
+    # reveal never runs a shell and never plain-`open`s a file (which would
+    # launch its default app) — it only `open -R` (reveal/select in Finder).
+    _PATH_VALIDATE_CAP = 200          # max candidates per validate request
+    _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
+
+    @staticmethod
+    def _expand_path(candidate: str) -> str:
+        """Expand a leading ~ (and ~user). No other transformation — existence
+        is checked as-is, so a relative candidate resolves against the server's
+        current working directory (best-effort; if it doesn't resolve there it
+        simply won't be linked, which is the intended validation behavior)."""
+        return os.path.expanduser(candidate)
+
+    def _handle_path_validate(self) -> None:
+        """POST /api/path/validate — body {"paths": [...]}. Returns
+        {"exists": {candidate: bool}} for each candidate: does it exist on disk?
+        Uses lexists so broken/symlink targets (still revealable in Finder) count.
+        Capped at _PATH_VALIDATE_CAP candidates to avoid abuse."""
+        # Bodies can carry up to 200 paths; allow a generous cap over the default.
+        body = self._read_json_body(max_bytes=256 * 1024)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            self._error(400, "paths must be a list")
+            return
+        exists: Dict[str, bool] = {}
+        for cand in paths[: self._PATH_VALIDATE_CAP]:
+            if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
+                continue
+            if cand in exists:
+                continue
+            try:
+                exists[cand] = os.path.lexists(self._expand_path(cand))
+            except (ValueError, OSError):
+                # e.g. embedded NUL — treat as non-existent, never raise.
+                exists[cand] = False
+        self._json({"exists": exists})
+
+    def _handle_reveal(self) -> None:
+        """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
+        Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
+        `open` (which would launch the default app), and a leading `--` so a
+        path beginning with `-` can't be read as a flag. Existence is verified
+        first (404 otherwise), so a bogus/injection-style value never reaches a
+        launch. A `path:line[:col]` suffix (Claude-Code form) is stripped so the
+        file itself is revealed."""
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        raw = body.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            self._error(400, "path required")
+            return
+        raw = raw.strip()
+        if len(raw) > self._PATH_MAX_LEN:
+            self._error(400, "path too long")
+            return
+
+        # Resolve to an existing target. Prefer the path as-is; if it doesn't
+        # exist, strip a trailing :line[:col] (editor/grep form) and retry.
+        target: Optional[str] = None
+        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
+            expanded = self._expand_path(cand)
+            try:
+                if expanded and os.path.lexists(expanded):
+                    target = expanded
+                    break
+            except (ValueError, OSError):
+                continue
+        if target is None:
+            self._error(404, "path not found on disk")
+            return
+
+        abspath = os.path.abspath(target)
+        plat = sys.platform
+        try:
+            if plat == "darwin":
+                # Reveal (select) in Finder. ARG LIST + `--`: no shell, no flag
+                # injection. `-R` reveals; it never launches the file's app.
+                cp = subprocess.run(
+                    ["open", "-R", "--", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("linux"):
+                # Best-effort: open the containing folder (no reliable "select").
+                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                cp = subprocess.run(
+                    ["xdg-open", "--", folder],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("win"):
+                cp = subprocess.run(
+                    ["explorer", "/select,", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                self._json({"ok": False, "error": f"unsupported platform: {plat}"},
+                           status=501)
+                return
+        except FileNotFoundError:
+            self._json({"ok": False, "error": "reveal tool not available"}, status=501)
+            return
+        except subprocess.TimeoutExpired:
+            self._error(504, "reveal timed out")
+            return
+        if cp.returncode != 0:
+            msg = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
+            self._error(502, f"reveal failed: {msg}")
+            return
+        self._json({"ok": True, "path": abspath})
 
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
