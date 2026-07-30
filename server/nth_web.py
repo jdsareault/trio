@@ -2934,10 +2934,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         (row["message_id"], self.channel),
                     ).fetchone()
                 except sqlite3.OperationalError:
-                    msg = db.execute(
-                        "SELECT member_id FROM messages WHERE id = ? AND channel = ?",
-                        (row["message_id"], self.channel),
-                    ).fetchone()
+                    # Missing recipients column (pre-migration) OR a transient
+                    # busy_timeout. Retry the recipients-less form; if the
+                    # messages table is still unhappy, leave msg=None and fall
+                    # through to the uploader-only fallback rather than letting
+                    # the error bubble to the outer handler and DISCARD a
+                    # successfully-read attachment row (which would 404 a
+                    # servable broadcast image under write contention).
+                    try:
+                        msg = db.execute(
+                            "SELECT member_id FROM messages WHERE id = ? AND channel = ?",
+                            (row["message_id"], self.channel),
+                        ).fetchone()
+                    except sqlite3.Error:
+                        msg = None
         except sqlite3.Error:
             row = None
         finally:
