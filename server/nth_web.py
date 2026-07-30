@@ -3633,7 +3633,11 @@ INDEX_HTML = r"""<!doctype html>
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
   .member .member-actions { display: none; padding: 6px 0 2px 16px; }
-  .member.expanded .member-actions { display: flex; }
+  .member.expanded .member-actions { display: flex; flex-direction: column;
+                                     align-items: flex-start; gap: 8px; }
+  /* "Remove from channel" sits on its own line below the Wakes-on control so
+     it reads as a distinct, deliberate action (not an easy-to-mis-hit inline). */
+  .member.expanded .member-actions .rm-btn { margin-top: 2px; }
   .member .rm-btn { font-size: 11px; line-height: 1.2; padding: 4px 10px; border-radius: 4px;
                     background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
                     cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
