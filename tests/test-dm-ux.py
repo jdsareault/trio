@@ -153,6 +153,33 @@ check("(R5) outsider Dave does NOT see group-DM reply", GREP2 not in poll_ids(da
 for rid in (REP_ID, GREP_ID, GREP2):
     check(f"(R6) DM reply #{rid} never a broadcast", row_recipients(rid) != [])
 
+# (R7) Depth-2 chain: reply to a REPLY. Bob's reply REP_ID is scoped [alice]
+#      (sender Bob, recips [alice]). Alice now replies to REP_ID → the participant
+#      set reconstructs as {Bob} ∪ {alice} minus Alice = {Bob}. This guards the
+#      inductive {sender}∪recips property — a bug that used only `recips` would
+#      drop the original sender at depth 2 and this would fail.
+chain = json.loads(srv.nth_send(channel=CH, member_id=alice, message="chained", reply_to=REP_ID))
+CHAIN_ID = chain["message_id"]
+check("(R7) depth-2 reply reconstructs the full participant set (scoped to Bob)",
+      row_recipients(CHAIN_ID) == [bob])
+for mid in (alice, bob, carol, dave):
+    srv.nth_poll(channel=CH, member_id=mid, wait_seconds=0)
+chain2 = json.loads(srv.nth_send(channel=CH, member_id=alice, message="chained2", reply_to=REP_ID))
+CHAIN2 = chain2["message_id"]
+check("(R7) depth-2 reply reaches original participant Bob", CHAIN2 in poll_ids(bob))
+check("(R7) depth-2 reply still hidden from outsider Carol", CHAIN2 not in poll_ids(carol))
+
+# (R8) Never-broadens with sigils: an @mention of a NON-participant in an
+#      auto-scoped reply widens the wake set (mentions) but NOT visibility
+#      (recipients). Bob replies to the Alice→Bob DM with "@Dave hi".
+davedm = json.loads(srv.nth_send(channel=CH, member_id=bob, message="@Dave look", reply_to=DM_ID))
+DAVEDM = davedm["message_id"]
+check("(R8) @non-participant is added to mentions (wake)", dave in row_mentions(DAVEDM))
+check("(R8) @non-participant is NOT added to recipients (visibility unchanged)",
+      dave not in (row_recipients(DAVEDM) or []))
+check("(R8) @non-participant Dave still cannot see the scoped reply",
+      can_see(dave, "agent", bob, json.dumps(row_recipients(DAVEDM))) is False)
+
 # ── Direct unit checks of _inherited_dm_recipients ──
 db = srv.get_db()
 try:
@@ -165,9 +192,16 @@ try:
     # DM target, non-participant → None
     check("(unit) inherit over DM by non-participant → None",
           srv._inherited_dm_recipients(db, CH, DM_ID, dave, "agent") is None)
-    # operator (all-seeing id) is a participant → inherits full set
-    op_got = srv._inherited_dm_recipients(db, CH, DM_ID, "_op_l_host", "human")
-    check("(unit) all-seeing operator inherits full participant set",
+    # SECURITY: a forged/caller-supplied operator id is NOT trusted as an
+    # all-seeing participant on the unauthenticated MCP path (default
+    # allow_all_seeing=False) — it must NOT auto-scope into a DM it isn't in.
+    check("(unit) forged operator id gets NO inheritance on MCP path (leak closed)",
+          srv._inherited_dm_recipients(db, CH, DM_ID, "_op_l_host", "human") is None)
+    # Only an AUTHENTICATED surface (allow_all_seeing=True) grants the operator
+    # all-seeing participant status — and even then it only narrows scope.
+    op_got = srv._inherited_dm_recipients(db, CH, DM_ID, "_op_l_host", "human",
+                                          allow_all_seeing=True)
+    check("(unit) all-seeing operator inherits full set only when authenticated",
           op_got is not None and set(json.loads(op_got)) == {alice, bob})
     # missing target → None (never crashes)
     check("(unit) inherit over missing reply_to → None",

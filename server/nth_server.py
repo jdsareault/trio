@@ -1214,7 +1214,11 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         # trio_send never takes explicit recipients, so this is the only way a
         # trio_send reply becomes private, and it only ever narrows scope.
         reader_kind = member["kind"] if "kind" in member.keys() else "agent"
-        recipients_json = _inherited_dm_recipients(db, channel, reply_to, member_id, reader_kind)
+        # allow_all_seeing=False: member_id is unauthenticated on this MCP path,
+        # so a forged operator id must not be trusted as an all-seeing
+        # participant (see _inherited_dm_recipients).
+        recipients_json = _inherited_dm_recipients(
+            db, channel, reply_to, member_id, reader_kind, allow_all_seeing=False)
 
         now = now_iso()
         task_id = None
@@ -1407,7 +1411,7 @@ def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
 
 
 def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
-                             sender_kind: str = "agent"):
+                             sender_kind: str = "agent", allow_all_seeing: bool = False):
     """Auto-scope a reply so a reply to a DM STAYS a DM to the same people.
 
     Returns a JSON recipients string to stamp on the reply, or None to leave it
@@ -1417,17 +1421,25 @@ def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
       • reply_to points at a BROADCAST (empty recipients) → None (a reply to a
         broadcast stays a broadcast — no change).
       • reply_to points at a DM (non-empty recipients) AND the replier is a
-        PARTICIPANT of that DM (its original sender, one of its recipients, or
-        the all-seeing operator) → inherit the ORIGINAL participant set
-        {original_sender} ∪ recipients, minus the replier itself (the sender
-        always sees their own posts via can_see), so exactly the same people
-        can read the reply. Never empty: a self-addressed thread falls back to
-        the full participant set rather than degrading to a broadcast (which
-        would be a privacy inversion).
+        PARTICIPANT of that DM — i.e. can_see() admits the replier to the
+        original — → inherit the ORIGINAL participant set {original_sender} ∪
+        recipients, minus the replier itself (the sender always sees their own
+        posts via can_see), so exactly the same people can read the reply.
+        Never empty: a self-addressed thread falls back to the full participant
+        set rather than degrading to a broadcast (a privacy inversion).
       • the replier is NOT a participant → None. A non-participant must not be
         able to widen or narrow a thread they were never in; their reply is
         treated as an ordinary broadcast of their own words (it carries none of
         the DM's content), so nothing leaks.
+
+    The participant guard is THE shared visibility predicate can_see() — "you
+    may inherit a thread's scope only if you could see it" — so this can never
+    drift from the read paths. allow_all_seeing mirrors can_see: the agent-facing
+    MCP path (nth_send) passes False because it identifies its caller only by an
+    UNAUTHENTICATED, caller-supplied member_id — a forged operator id
+    (`_op_l_…`) must NOT be trusted as an all-seeing participant and auto-scoped
+    into arbitrary DMs. All-seeing inheritance is reserved for an authenticated
+    surface (the web operator, which anyway sends explicit recipients).
 
     Inheritance only ever NARROWS visibility (broadcast→scoped); it can never
     turn a DM into a broadcast. Callers that pass explicit recipients (trio_dm's
@@ -1445,17 +1457,15 @@ def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
         return None
     if not row:
         return None
-    recips = parse_recipients(row["recipients"] if "recipients" in row.keys() else "")
+    recips_raw = row["recipients"] if "recipients" in row.keys() else ""
+    recips = parse_recipients(recips_raw)
     if not recips:
         return None  # reply to a broadcast stays a broadcast
     orig_sender = row["member_id"]
-    # Participant guard: only a participant (or the all-seeing operator) inherits.
-    is_participant = (
-        sender_id == orig_sender
-        or sender_id in recips
-        or is_all_seeing(sender_id, sender_kind)
-    )
-    if not is_participant:
+    # Participant guard routed through the ONE visibility predicate: inherit
+    # only if the replier could actually see the original DM.
+    if not can_see(sender_id, sender_kind, orig_sender, recips_raw,
+                   allow_all_seeing=allow_all_seeing):
         return None
     # Ordered-unique participant set, then drop the replier (sees own posts).
     participants = list(dict.fromkeys([orig_sender, *recips]))
@@ -2070,10 +2080,12 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 # mentions_only path below — hidden DMs are dropped from the
                 # returned set (`display_msgs`) but `unread` stays raw, so the
                 # watermark advances past them on auto-ack. They never return
-                # AND never sit unread forever. Operators (kind != 'agent') are
-                # all-seeing, so nothing is withheld from them. On a pre-migration
-                # row (no recipients column) can_see treats it as a broadcast —
-                # legacy behavior unchanged.
+                # AND never sit unread forever. NOTE: this is an agent-facing MCP
+                # read path, so all-seeing is DISABLED (allow_all_seeing=False
+                # below) — a caller-supplied member_id is unauthenticated, so
+                # even a real operator id is scoped here (see nth_constants.
+                # is_all_seeing / can_see). On a pre-migration row (no recipients
+                # column) can_see treats it as a broadcast — legacy unchanged.
                 reader_kind = member["kind"] if "kind" in member.keys() else "agent"
                 display_msgs = [
                     m for m in display_msgs
