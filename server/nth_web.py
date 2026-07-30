@@ -2667,6 +2667,15 @@ INDEX_HTML = r"""<!doctype html>
                display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
+  /* Structured confidence badge — rendered in the head only when a message
+     carries a confidence value. Absent confidence renders NO badge at all
+     (never an empty chip). Colors mirror the task-badge palette. */
+  .conf-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+                text-transform: uppercase; padding: 1px 6px; border-radius: 3px;
+                cursor: help; }
+  .conf-badge.high   { color: #7ede9e; background: rgba(126, 222, 158, 0.14); }
+  .conf-badge.medium { color: #f0c060; background: rgba(240, 192, 96, 0.14); }
+  .conf-badge.low    { color: #f08c8c; background: rgba(240, 140, 140, 0.14); }
   .msg .mentions-bar { font-size: 11px; margin: 2px 0 4px;
                        display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
   .msg .mentions-bar .to-label { color: var(--dim); font-size: 10px;
@@ -4870,6 +4879,7 @@ INDEX_HTML = r"""<!doctype html>
       const body = div.querySelector('.body');
       if (body) paintBody(div, body, m);
       applyTargetBars(div, m);   // sigils may have changed / cleared on delete
+      applyConfBadge(div, Object.assign({}, prev, m));  // keep the badge in sync
     }
     // A retracted message is no longer editable — drop its author controls.
     if (m.retracted_at) {
@@ -4958,6 +4968,35 @@ INDEX_HTML = r"""<!doctype html>
     });
   }
 
+  // Build a confidence badge element for high/medium/low, or null for any
+  // absent/unrecognized value. Returning null (rather than an empty node) is
+  // what guarantees an un-declared confidence renders NOTHING.
+  function confBadge(conf) {
+    const v = (conf == null ? '' : String(conf)).trim().toLowerCase();
+    if (v !== 'high' && v !== 'medium' && v !== 'low') return null;
+    const b = document.createElement('span');
+    b.className = 'conf-badge ' + v;
+    b.textContent = v;
+    b.title = 'self-rated confidence: ' + v;
+    return b;
+  }
+
+  // Refresh a message's confidence badge in place (used by message_update so an
+  // edited message reflects a changed/added/cleared confidence). Removes any
+  // existing badge first, then re-adds only if the current value is valid.
+  function applyConfBadge(div, m) {
+    const head = div.querySelector('.head');
+    if (!head) return;
+    const existing = head.querySelector('.conf-badge');
+    if (existing) existing.remove();
+    if (isSystemContent(m.content || '')) return;
+    const cb = confBadge(m.confidence);
+    if (!cb) return;
+    // Keep the original slot: before the acks span if present, else appended.
+    const acks = head.querySelector('.acks');
+    if (acks) head.insertBefore(cb, acks); else head.appendChild(cb);
+  }
+
   function appendMessage(m) {
     if (state.seenMsgIds.has(m.id)) return;
     state.seenMsgIds.add(m.id);
@@ -5018,6 +5057,13 @@ INDEX_HTML = r"""<!doctype html>
       author.textContent = m.member_name;
       author.style.color = colorFor(m.member_id);
       head.appendChild(author);
+    }
+    // Structured confidence badge — only when a value is present. Absent /
+    // unknown confidence adds nothing (no empty badge). System/task rows carry
+    // no author, so skip the badge there too.
+    if (!isSystem) {
+      const cb = confBadge(m.confidence);
+      if (cb) head.appendChild(cb);
     }
     const acks = document.createElement('span');
     acks.className = 'acks';
