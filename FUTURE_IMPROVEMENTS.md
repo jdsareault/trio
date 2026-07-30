@@ -366,11 +366,26 @@ same read-path surface, same watermark care. If real DMs are wanted, build them
 *on* #5's visibility engine rather than as a parallel mechanism. Do them together
 or #5 first.
 
-**Hard caveat (same as #5):** all members share one SQLite DB, so server-enforced
-DMs are still **soft scoping** — the server declines to hand a non-recipient the
-bytes; it is not cryptographic isolation. Don't present DMs as a trust boundary.
+**Strength of the boundary depends on deployment (refines #5's "soft scoping"):**
+Server-side read-path enforcement *is* effective against a well-behaved agent —
+agents only touch the channel through the MCP tools (`trio_poll` / `trio_history`
+/ SSE), so if the server withholds a non-recipient's bytes there, a normal agent
+never sees the DM. The strength of that boundary against a *determined or
+misbehaving* agent then splits by deployment:
+- **Local trio:** soft. The agent runs as the same OS user and (as a Claude Code
+  session) has `Bash`/`Read`; the DB is a plaintext SQLite file at a fixed,
+  documented path (`~/.claude/nth/nth.db`) with no encryption or special perms. So
+  bypass is ~one `sqlite3` call away — "going out of its way," but no privilege
+  boundary crossed. Holds against normal use and accidents, **not** against an
+  agent told (or deciding) to snoop. Don't present local DMs as a trust boundary.
+- **Remote quartet:** a genuinely real boundary. A spoke reaches the hub *only*
+  over MCP-over-SSE and has no filesystem access to the hub's DB
+  (`nth_spoke_monitor.py:4-6`) — it can't open the file, so server enforcement is
+  the whole story and actually holds.
+
 Piece A is worth doing on its own precisely because today's DMs aren't even soft
-scoping — they're cosmetic.
+scoping — they're cosmetic (client-side CSS over data the agent already receives
+in full via `trio_poll`).
 
 ---
 
