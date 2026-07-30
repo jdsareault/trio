@@ -17,23 +17,34 @@ SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 # nth_constants is the leaf module everything else imports.
 OPERATOR_MEMBER_ID_PREFIX = "_op_"
 
+# All-seeing is OPERATOR-ONLY (operator decision). The web layer mints member
+# ids as `_op_<source>_…`:
+#   _op_l_… loopback  (trusted local OS user)   → OPERATOR, all-seeing
+#   _op_t_… tailscale (trusted tailnet identity) → OPERATOR, all-seeing
+#   _op_g_… guest     (self-declared human)      → NOT all-seeing, scoped like an agent
+#   _op_p_… pending   (unidentified visitor)     → NOT all-seeing, scoped like an agent
+# Being human (kind='human') is NOT sufficient — a guest is a human but not the
+# operator, and must not read other members' DMs. Whitelisting the two operator
+# sub-prefixes is fail-closed: any future non-operator `_op_…` form defaults to
+# scoped, never leaking. (Kept in sync with nth_web resolve_from_loopback /
+# resolve_from_tailscale / register_guest / _resolve_identity.)
+OPERATOR_ALL_SEEING_PREFIXES = ("_op_l_", "_op_t_")
 
-def is_all_seeing(reader_id, reader_kind) -> bool:
-    """True if this reader sees every message regardless of addressing.
 
-    The human operator is all-seeing so the audit trail stays complete
-    (design decision: DMs are withheld from non-recipient *agents*, never
-    from the operator). A reader is all-seeing when its member id is an
-    operator id (``_op_`` prefix) OR its members.kind is anything other
-    than 'agent' (humans join the dashboard as kind='human'). kind may be
-    None on an un-migrated row — treat that as an agent (the safe default:
-    an agent wrongly treated as all-seeing would leak, the reverse only
-    over-withholds)."""
-    if reader_id and str(reader_id).startswith(OPERATOR_MEMBER_ID_PREFIX):
-        return True
-    if reader_kind is not None and reader_kind != "agent":
-        return True
-    return False
+def is_all_seeing(reader_id, reader_kind=None) -> bool:
+    """True ONLY for the authenticated dashboard OPERATOR (loopback/tailscale
+    identity — id prefixed `_op_l_` or `_op_t_`). The operator is all-seeing so
+    the audit trail stays complete.
+
+    Guests (`_op_g_`), pending visitors (`_op_p_`), and agents are NOT
+    all-seeing: they see only broadcasts, their own messages, and DMs addressed
+    to them. `reader_kind` is accepted for signature/back-compat but no longer
+    widens all-seeing — being human is not enough; only the operator identity
+    is. (Previously `kind != 'agent'` also granted all-seeing, which leaked
+    every DM to dashboard guests; removed per operator decision.)"""
+    if not reader_id:
+        return False
+    return str(reader_id).startswith(OPERATOR_ALL_SEEING_PREFIXES)
 
 
 def parse_recipients(raw) -> list:

@@ -26,7 +26,7 @@ SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
 import nth_server as srv          # noqa: E402
 import nth_web as web            # noqa: E402
-from nth_constants import can_see  # noqa: E402
+from nth_constants import can_see, is_all_seeing  # noqa: E402
 
 failures = []
 
@@ -167,36 +167,55 @@ def monitor_visible(member_id):
 check("(b) monitor query hides DM from non-recipient", DM_ID not in monitor_visible(carol))
 check("(b) monitor query shows DM to recipient", DM_ID in monitor_visible(bob))
 
-# (c) operator is all-seeing — but ONLY on the authenticated web-dashboard
-#     surface (allow_all_seeing=True, the default the web uses). The predicate
-#     admits every DM for an operator/human identity there.
+# (c) all-seeing is OPERATOR-ONLY. The operator (authenticated loopback/
+#     tailscale identity, id _op_l_… / _op_t_…) is all-seeing for audit. A
+#     dashboard GUEST (_op_g_…) is a human but NOT the operator and is scoped
+#     exactly like an agent — it must NOT read other members' DMs.
+OP = "_op_l_host_gabe"        # loopback operator (all-seeing)
+GUEST = "_op_g_dave_tok123"   # dashboard guest (human, NOT the operator)
 now = srv.now_iso()
 db = srv.get_db()
 try:
-    db.execute(
-        "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, "
-        "last_read, joined_at, active, kind) VALUES (?,?,?,?,'',?,0,?,1,'human')",
-        ("_op_test", CH, "Operator", "op", now, now))
+    for mid, nm in ((OP, "Operator"), (GUEST, "Dave-guest")):
+        db.execute(
+            "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, "
+            "last_read, joined_at, active, kind) VALUES (?,?,?,?,'',?,0,?,1,'human')",
+            (mid, CH, nm, "human", now, now))
     db.commit()
 finally:
     db.close()
-check("(c) operator all-seeing on web surface (kind=human)",
-      can_see("_op_test", "human", alice, json.dumps([bob]), allow_all_seeing=True) is True)
-check("(c) operator all-seeing on web surface (_op_ id, kind absent)",
-      can_see("_op_anything", None, alice, json.dumps([bob]), allow_all_seeing=True) is True)
+
+check("(c) operator identity IS all-seeing", is_all_seeing(OP) is True)
+check("(c) operator predicate admits any DM (web surface)",
+      can_see(OP, "human", alice, json.dumps([bob]), allow_all_seeing=True) is True)
+check("(c) GUEST identity is NOT all-seeing", is_all_seeing(GUEST) is False)
+check("(c) 'human' kind alone does NOT grant all-seeing (guests scoped)",
+      is_all_seeing("agent123", "human") is False)
+
+# (c-guest) a guest does NOT see other members' DMs — even on the all-seeing
+# web surface (allow_all_seeing=True), because the guest identity itself is not
+# operator. Nor via any agent-facing path.
+check("(c-guest) guest does NOT see others' DM via history", DM_ID not in history_ids(GUEST))
+check("(c-guest) guest does NOT see others' DM via poll", DM_ID not in poll_ids(GUEST)[0])
+check("(c-guest) predicate scopes guest even with allow_all_seeing=True",
+      can_see(GUEST, "human", alice, json.dumps([bob]), allow_all_seeing=True) is False)
+# ...but the guest DOES see a DM addressed TO the guest, and broadcasts.
+gdm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="hi guest", to=GUEST))
+GDM_ID = gdm["message_id"]
+check("(c-guest) DM to guest resolved to guest id", gdm.get("recipients") == [GUEST])
+check("(c-guest) guest DOES see a DM addressed to it via history", GDM_ID in history_ids(GUEST))
 
 # (c-SECURITY) the agent-facing MCP paths must NOT grant all-seeing from a
-# caller-supplied operator/human member_id — otherwise any agent forges an
-# operator id (a bare "_op_", or a real one from the trio_connect roster) and
-# harvests EVERY DM in one call. All MCP read paths pass allow_all_seeing=False.
+# caller-supplied operator id — a forged/real operator id via MCP is scoped
+# (allow_all_seeing=False). This is orthogonal to (c): even the real operator
+# is not all-seeing over MCP; all-seeing is a WEB (authenticated) property.
 check("(c-sec) forged bare _op_ gets NO DMs via history", DM_ID not in history_ids("_op_"))
-check("(c-sec) forged nonexistent _op_ id gets NO DMs via history", DM_ID not in history_ids("_op_bogus"))
-check("(c-sec) real operator id via MCP history is NOT all-seeing (leak closed)",
-      DM_ID not in history_ids("_op_test"))
-check("(c-sec) spoofing operator id via MCP poll yields NO DM (leak closed)",
-      DM_ID not in poll_ids("_op_test")[0])
-check("(c-sec) predicate with allow_all_seeing=False hides DM from operator id",
-      can_see("_op_test", "human", alice, json.dumps([bob]), allow_all_seeing=False) is False)
+check("(c-sec) operator id via MCP history is NOT all-seeing (leak closed)",
+      DM_ID not in history_ids(OP))
+check("(c-sec) operator id via MCP poll is NOT all-seeing (leak closed)",
+      DM_ID not in poll_ids(OP)[0])
+check("(c-sec) predicate allow_all_seeing=False hides DM from operator id",
+      can_see(OP, "human", alice, json.dumps([bob]), allow_all_seeing=False) is False)
 
 # (d) broadcasts still reach everyone (no regression)
 bc = json.loads(srv.nth_send(channel=CH, member_id=alice, message="hello everyone"))
@@ -230,19 +249,41 @@ try:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     time.sleep(0.2)
 
+    def drain_primed(viewer_id, all_seeing):
+        qq = hub.subscribe(viewer_id=viewer_id, all_seeing=all_seeing)
+        got = []
+        try:
+            while True:
+                got.append(json.loads(qq.get_nowait()))
+        except Exception:
+            pass
+        hub.unsubscribe(qq)
+        return [e["id"] for e in got if e.get("type") == "message"]
+
     # (c) operator dashboard is all-seeing on the WEB SSE feed: the hub primes
-    #     every row (incl. the private DM) to any subscriber (the operator).
-    q = hub.subscribe()
-    primed = []
-    try:
-        while True:
-            primed.append(json.loads(q.get_nowait()))
-    except Exception:
-        pass
-    hub.unsubscribe(q)
-    dm_events = [e for e in primed if e.get("type") == "message" and e.get("id") == DM_ID]
-    check("(c) operator SSE feed ships the DM (all-seeing web surface)", len(dm_events) == 1)
-    check("(c) operator SSE DM carries recipients", dm_events and dm_events[0].get("recipients") == [bob])
+    #     every row (incl. the private DM) to the operator subscriber.
+    op_seen = drain_primed(OP, all_seeing=True)
+    check("(c) operator SSE feed ships others' DM (all-seeing web surface)", DM_ID in op_seen)
+
+    # (c-guest) a GUEST subscriber's live feed is scoped: others' DMs are
+    #     withheld from the primed history; broadcasts and DMs to the guest
+    #     still arrive. This is REAL server withholding, not client-side CSS.
+    guest_seen = drain_primed(GUEST, all_seeing=False)
+    check("(c-guest) guest SSE feed WITHHOLDS others' DM", DM_ID not in guest_seen)
+    check("(c-guest) guest SSE feed delivers DM addressed to guest", GDM_ID in guest_seen)
+    check("(c-guest) guest SSE feed delivers broadcasts", BC_ID in guest_seen)
+
+    # Direct unit check of the fan-out visibility gate used by prime + live.
+    dm_ev = {"type": "message", "id": DM_ID, "member_id": alice, "recipients": [bob]}
+    bc_ev = {"type": "message", "id": BC_ID, "member_id": alice, "recipients": []}
+    roster_ev = {"type": "roster", "members": []}
+    check("(c) _event_visible_to: operator sees DM", web._event_visible_to(dm_ev, OP, True) is True)
+    check("(c-guest) _event_visible_to: guest hidden from others' DM",
+          web._event_visible_to(dm_ev, GUEST, False) is False)
+    check("(c-guest) _event_visible_to: guest sees broadcast",
+          web._event_visible_to(bc_ev, GUEST, False) is True)
+    check("(c-guest) _event_visible_to: roster always delivered",
+          web._event_visible_to(roster_ev, GUEST, False) is True)
 
     data = json.dumps({"content": "web dm to bob", "recipients": [bob]}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/send", data=data, method="POST")
