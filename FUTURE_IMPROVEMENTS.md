@@ -387,6 +387,52 @@ Piece A is worth doing on its own precisely because today's DMs aren't even soft
 scoping — they're cosmetic (client-side CSS over data the agent already receives
 in full via `trio_poll`).
 
+## 10. Sequential label colors — kill the hash-collision clustering
+
+**What:** Assign member label colors collision-free (one after another) instead
+of by hash, so a small channel doesn't end up with most members sharing a color.
+Observed live: 5 "pink" members in a channel of 8.
+
+**Current state — colors are hashed, not assigned:**
+- An 8-entry `PALETTE` (`nth_web.py:3457`); `colorFor(id) = PALETTE[hash32(id) %
+  8]` (`:3467`), computed independently on each client with no coordination.
+- So clustering is *expected*, not bad luck: hash-mod-8 is the birthday problem —
+  8 members into 8 buckets come out all-distinct only ~0.24% of the time.
+- The palette also skews: `#d070d7` + `#f79fea` are both pink-family and `#ff8470`
+  is coral (~3 "pink" buckets of 8); `#62d7ef` + `#9ef0f0` are both cyan. Effective
+  hue diversity is ~5–6, which is what makes the pink pile-up so visible.
+
+**Substrate that already exists (the exact mechanism, for avatars):**
+- The server already does collision-free per-channel assignment for animal emojis:
+  `animal_for_channel()` (`nth_constants.py:52`) resolves members in sorted-id
+  order, linear-probes to the next free slot, and only wraps/repeats once the
+  roster exceeds the pool. `animal_emoji` is already delivered on the member
+  payload; the client prefers it and falls back to a local hash for historical
+  authors (`nth_web.py:3475-3480`).
+
+**What's new:**
+- A `color_for_channel()` mirroring `animal_for_channel()` over the palette;
+  deliver a `color` (or color index) on the member payload the way `animal_emoji`
+  is.
+- Client uses `member.color` when present, **falling back to `colorFor(id)`** for
+  message authors no longer in the roster (same pattern as avatars) so history
+  stays stably colored.
+
+**Considerations:**
+- Preserve the two invariants the current pure-hash gives for free: (a) all clients
+  agree on a member's color, (b) departed authors still color consistently.
+  Server-assign + payload-deliver + hash-fallback keeps both.
+- **8 colors < `MAX_MEMBERS` (20):** repeats past 8 members are unavoidable
+  regardless of algorithm. Sequential assignment removes the *clustering* with
+  today's palette; true no-repeat up to a full channel needs a bigger palette
+  (~16–20) that's theme-legible (light + dark) and evenly hue-spaced — de-dupe the
+  double-pinks/double-cyans while doing it. (The `dataviz` skill covers accessible
+  categorical palettes.)
+- Assignment stability on leave/join: `animal_for_channel` re-derives from the
+  member set each render, so a departure can let someone probe into a freed slot
+  and shift a color. Fine for avatars today; if color stickiness matters more,
+  persist an assigned index on the member row at join.
+
 ---
 
 # Bugs
