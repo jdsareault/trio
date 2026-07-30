@@ -99,6 +99,15 @@ try:
     check("validate: missing exists=false", ex.get(missing) is False)
     check("validate: ~ expands and exists=true", ex.get("~") is True)
 
+    # A `path:line[:col]` token (Claude-Code form) must validate true when the
+    # bare file exists — keyed under the ORIGINAL token so the client key lines
+    # up. (Regression guard: validate must strip the suffix like reveal does.)
+    st, resp = http(port, "/api/path/validate",
+                    {"paths": [real_file + ":42", real_file + ":42:7"]})
+    ex = resp.get("exists", {})
+    check("validate: path:line token exists=true", ex.get(real_file + ":42") is True)
+    check("validate: path:line:col token exists=true", ex.get(real_file + ":42:7") is True)
+
     # Injection-style tokens are just non-existent strings — never executed.
     inj = ['"; rm -rf ~"', "--flag", "-R", "$(whoami)", "a\x00b"]
     st, resp = http(port, "/api/path/validate", {"paths": inj})

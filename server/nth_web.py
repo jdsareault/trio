@@ -1711,7 +1711,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError guards against a deeply-nested-JSON DoS (json.loads
+            # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
 
@@ -2349,11 +2351,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
         simply won't be linked, which is the intended validation behavior)."""
         return os.path.expanduser(candidate)
 
+    def _resolve_existing(self, raw: str) -> Optional[str]:
+        """Return the expanded on-disk target for `raw`, or None if it doesn't
+        exist. Tries the candidate as-is first, then with a trailing :line[:col]
+        (editor/grep/Claude-Code form) stripped — so both validate and reveal
+        agree on what a `path:line` token resolves to. Uses lexists so broken
+        symlinks (still revealable) count. Never raises (a NUL/bad path is just
+        'not found')."""
+        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
+            expanded = self._expand_path(cand)
+            try:
+                if expanded and os.path.lexists(expanded):
+                    return expanded
+            except (ValueError, OSError):
+                continue
+        return None
+
     def _handle_path_validate(self) -> None:
         """POST /api/path/validate — body {"paths": [...]}. Returns
-        {"exists": {candidate: bool}} for each candidate: does it exist on disk?
-        Uses lexists so broken/symlink targets (still revealable in Finder) count.
-        Capped at _PATH_VALIDATE_CAP candidates to avoid abuse."""
+        {"exists": {candidate: bool}} keyed by the ORIGINAL candidate string
+        (so client cache keys line up). A `path:line[:col]` token counts as
+        existing when the bare file exists. Capped at _PATH_VALIDATE_CAP."""
         # Bodies can carry up to 200 paths; allow a generous cap over the default.
         body = self._read_json_body(max_bytes=256 * 1024)
         if body is None:
@@ -2371,11 +2389,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 continue
             if cand in exists:
                 continue
-            try:
-                exists[cand] = os.path.lexists(self._expand_path(cand))
-            except (ValueError, OSError):
-                # e.g. embedded NUL — treat as non-existent, never raise.
-                exists[cand] = False
+            exists[cand] = self._resolve_existing(cand) is not None
         self._json({"exists": exists})
 
     def _handle_reveal(self) -> None:
@@ -2401,17 +2415,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "path too long")
             return
 
-        # Resolve to an existing target. Prefer the path as-is; if it doesn't
-        # exist, strip a trailing :line[:col] (editor/grep form) and retry.
-        target: Optional[str] = None
-        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
-            expanded = self._expand_path(cand)
-            try:
-                if expanded and os.path.lexists(expanded):
-                    target = expanded
-                    break
-            except (ValueError, OSError):
-                continue
+        # Resolve to an existing target (as-is, else with a :line[:col] suffix
+        # stripped). Same resolver validate uses, so the UI and the reveal agree.
+        target = self._resolve_existing(raw)
         if target is None:
             self._error(404, "path not found on disk")
             return
@@ -4359,14 +4365,11 @@ INDEX_HTML = r"""<!doctype html>
   // false positives from anything that merely looks path-like. Matches:
   // absolute (/…), home (~/…), explicit relative (./… ../…), a bare relative
   // dir/file, and any of those with a trailing :line[:col] (Claude-Code form).
-  const FILE_PATH_RE = new RegExp(
-    '(' +
-      '(?:~|\\.\\.?)?\\/[A-Za-z0-9_.~\\/-]*[A-Za-z0-9_~\\/-]' +   // /… ~/… ./… ../…
-      '|' +
-      '(?:[A-Za-z0-9_][A-Za-z0-9_.-]*\\/)+[A-Za-z0-9_][A-Za-z0-9_.-]*' + // dir/file
-    ')' +
-    '(?::\\d+(?::\\d+)?)?',                                       // optional :line[:col]
-    'g');
+  // A single character-class run + optional :line[:col] — a flat quantifier
+  // (no nested `(…+…)+`), so it scans in LINEAR time and can't be driven into
+  // catastrophic/quadratic backtracking (ReDoS) by a long slash-free blob.
+  // Candidates are then post-filtered: a real path must contain a '/'.
+  const FILE_PATH_RUN_RE = /[A-Za-z0-9_.~/-]+(?::\d+(?::\d+)?)?/g;
   const FILE_PATH_MAX_LEN = 4096;
   // Per-path validation cache (path token → exists bool). Shared across every
   // message so re-renders and repeated paths never re-hit the endpoint.
@@ -4375,12 +4378,17 @@ INDEX_HTML = r"""<!doctype html>
   function detectFilePathCandidates(text) {
     const out = [];
     if (!text) return out;
-    FILE_PATH_RE.lastIndex = 0;
+    FILE_PATH_RUN_RE.lastIndex = 0;
     let m;
-    while ((m = FILE_PATH_RE.exec(text)) !== null) {
-      const tok = m[0];
-      if (tok.length > FILE_PATH_MAX_LEN) continue;
-      out.push({ start: m.index, end: m.index + tok.length, token: tok });
+    while ((m = FILE_PATH_RUN_RE.exec(text)) !== null) {
+      let tok = m[0];
+      const start = m.index;
+      if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
+      // ".." tail. Trailing trim only, so the start offset stays valid.
+      tok = tok.replace(/([^.\/])\.$/, '$1');
+      if (!tok || tok.length > FILE_PATH_MAX_LEN) continue;
+      out.push({ start, end: start + tok.length, token: tok });
     }
     return out;
   }

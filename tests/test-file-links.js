@@ -64,6 +64,17 @@ check('detect: plain prose yields nothing', () => {
 check('detect: a lone word is not a path', () => {
   assert.deepStrictEqual(tokens('README'), []);
 });
+check('detect: long slash-free blob is linear-time (no ReDoS freeze)', () => {
+  // A long run of path-charset chars with no '/', terminated by a disallowed
+  // char — the classic quadratic-backtracking trigger. The linear scan must
+  // handle it near-instantly and find no candidates.
+  const blob = 'a'.repeat(200000) + '!';
+  const t0 = Date.now();
+  const found = tokens(blob);
+  const dt = Date.now() - t0;
+  assert.deepStrictEqual(found, []);
+  assert.ok(dt < 500, 'detection took ' + dt + 'ms — expected linear/near-instant');
+});
 
 // ── linkifyValidatedPaths: the validation gate ───────────────────────────────
 // A tiny valid-set stands in for the server's verdict.
