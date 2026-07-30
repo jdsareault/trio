@@ -1619,6 +1619,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._json(STT.health())
         elif path == "/api/search":
             self._handle_search(parsed)
+        elif path == "/api/tasks":
+            self._handle_tasks(parsed)
         else:
             self._error(404, "not found")
 
@@ -2111,6 +2113,72 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
+
+    def _handle_tasks(self, parsed) -> None:
+        """Read-only task board: every task in this channel, ordered by status
+        priority (open → claimed → blocked → completed → cancelled) then id.
+        Additive — no schema changes; the tasks table is already fully
+        structured (nth_server.py posts the lifecycle markers into chat, this
+        just surfaces the underlying rows). Mirrors _handle_search's identity
+        gate + short-lived read connection idioms."""
+        # This server instance serves exactly one channel (self.channel); a
+        # ?channel= param is accepted for forward-compat / symmetry with the
+        # documented URL but must match, so one channel's board can't read
+        # another's over a shared DB.
+        qs = parse_qs(parsed.query)
+        want = (qs.get("channel", [""])[0] or "").strip()
+        if want and want != self.channel:
+            self._error(403, "channel mismatch")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Status sort priority: active work first, terminal states last.
+        order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
+                 "WHEN 'blocked' THEN 2 WHEN 'completed' THEN 3 "
+                 "WHEN 'cancelled' THEN 4 ELSE 5 END")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, posted_by, claimed_by, status, description, result, "
+                "blocked_by, created_at, updated_at, lease_expires_at "
+                "FROM tasks WHERE channel = ? "
+                f"ORDER BY {order}, id",
+                (self.channel,),
+            ).fetchall()
+            tasks = []
+            for r in rows:
+                try:
+                    deps = json.loads(r["blocked_by"] or "[]")
+                except (ValueError, TypeError):
+                    deps = []
+                tasks.append({
+                    "id": r["id"],
+                    "posted_by": r["posted_by"],
+                    "claimed_by": r["claimed_by"],
+                    "status": r["status"],
+                    "description": r["description"] or "",
+                    "result": r["result"] or "",
+                    "blocked_by": deps,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "lease_expires_at": r["lease_expires_at"],
+                })
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": self.channel,
+                    "count": len(tasks), "tasks": tasks})
 
     def _edit_target(self, db, mid, ident):
         """Load an operator-editable message row, or (None, error). The caller
