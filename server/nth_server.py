@@ -413,7 +413,13 @@ CONVERSATIONS_DIR = DB_DIR / "conversations"
 
 
 def export_conversation(db: sqlite3.Connection, channel: str) -> Path | None:
-    """Export a channel's conversation to a markdown file."""
+    """Export a channel's conversation to a markdown file.
+
+    This is an OPERATOR audit artifact: it deliberately includes every message,
+    DMs included (design decision: the operator is all-seeing, audit preserved).
+    It is written to the operator's local ~/.claude/nth/conversations dir and is
+    never delivered to an agent, so it does NOT apply the DM visibility filter.
+    If this export is ever exposed to a non-operator reader, add can_see here."""
     try:
         row = db.execute(
             "SELECT * FROM channels WHERE code = ?", (channel,)
@@ -822,14 +828,32 @@ def nth_connect(
             (channel,),
         ).fetchall()
 
-        recent = db.execute(
-            "SELECT id, member_id, member_name, content, created_at FROM messages "
-            "WHERE channel = ? ORDER BY id DESC LIMIT 10",
-            (channel,),
-        ).fetchall()
+        # The joiner is a fresh agent (kind='agent'); withhold any DMs in the
+        # recent backscroll that aren't addressed to them. In practice a brand-
+        # new member only sees broadcasts here, but filtering keeps this path
+        # honest with every other read path. Degrade gracefully on old schema.
+        try:
+            recent_raw = db.execute(
+                "SELECT id, member_id, member_name, content, recipients, created_at FROM messages "
+                "WHERE channel = ? ORDER BY id DESC LIMIT 30",
+                (channel,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            recent_raw = db.execute(
+                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "WHERE channel = ? ORDER BY id DESC LIMIT 30",
+                (channel,),
+            ).fetchall()
+        recent = [
+            m for m in recent_raw
+            if can_see(member_id, "agent", m["member_id"],
+                       m["recipients"] if "recipients" in m.keys() else "")
+        ][:10]
 
-        # Set watermark to current latest message
-        latest_id = recent[0]["id"] if recent else 0
+        # Set watermark to current latest message. Use the true latest id
+        # (including any hidden DMs) so the joiner's cursor starts past them —
+        # a DM sent before they joined must never surface on their first poll.
+        latest_id = recent_raw[0]["id"] if recent_raw else 0
         db.execute(
             "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
             (latest_id, member_id, channel),
@@ -1821,12 +1845,27 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             if not ch:
                 return json.dumps({"event": "channel_gone"})
             if ch["status"] == "ended":
-                # Return any unread messages before reporting end
-                unread = db.execute(
-                    "SELECT id, member_id, member_name, content, created_at "
-                    "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
-                    (channel, current_watermark),
-                ).fetchall()
+                # Return any unread messages before reporting end. Apply the DM
+                # visibility filter — a channel ending must not dump DMs this
+                # member was never allowed to see. `member` is fetched above.
+                try:
+                    unread = db.execute(
+                        "SELECT id, member_id, member_name, content, recipients, created_at "
+                        "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
+                        (channel, current_watermark),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    unread = db.execute(
+                        "SELECT id, member_id, member_name, content, created_at "
+                        "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
+                        (channel, current_watermark),
+                    ).fetchall()
+                reader_kind = member["kind"] if "kind" in member.keys() else "agent"
+                unread = [
+                    m for m in unread
+                    if can_see(member_id, reader_kind, m["member_id"],
+                               m["recipients"] if "recipients" in m.keys() else "")
+                ]
                 # Resolve ended_by member_id to display name
                 ended_by_name = ch["ended_by"]
                 if ch["ended_by"]:
@@ -1857,7 +1896,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             # 'banged'. Fall back progressively on older schemas.
             try:
                 unread = db.execute(
-                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, recipients, created_at "
                     "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
                     (channel, current_watermark, member_id),
                 ).fetchall()
@@ -1882,6 +1921,22 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     display_msgs = filtered
                 else:
                     display_msgs = unread
+
+                # DM visibility filter: withhold messages this member isn't
+                # allowed to see (a DM addressed to others). EXACTLY like the
+                # mentions_only path below — hidden DMs are dropped from the
+                # returned set (`display_msgs`) but `unread` stays raw, so the
+                # watermark advances past them on auto-ack. They never return
+                # AND never sit unread forever. Operators (kind != 'agent') are
+                # all-seeing, so nothing is withheld from them. On a pre-migration
+                # row (no recipients column) can_see treats it as a broadcast —
+                # legacy behavior unchanged.
+                reader_kind = member["kind"] if "kind" in member.keys() else "agent"
+                display_msgs = [
+                    m for m in display_msgs
+                    if can_see(member_id, reader_kind, m["member_id"],
+                               m["recipients"] if "recipients" in m.keys() else "")
+                ]
 
                 # Apply mentions_only filter: keep broadcasts (empty mentions)
                 # and messages that mention this member. Hidden messages still
@@ -2184,17 +2239,23 @@ def nth_retract(channel: str, member_id: str, message_id: int, reason: str = "",
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_history")
-def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> str:
-    """Replay recent messages from a channel. Does NOT require member_id or
-    advance any read watermark — purely read-only.
+def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, member_id: str = "") -> str:
+    """Replay recent messages from a channel. Does NOT advance any read
+    watermark — purely read-only.
 
     Use this to catch up on messages you missed during a long poll, or to
     review the conversation history.
+
+    Pass your member_id so private DMs addressed to you are included and
+    everyone else's DMs stay hidden. WITHOUT member_id, history returns only
+    broadcast (non-DM) messages — a DM never leaks to an unidentified caller.
 
     Args:
         channel: Channel code
         last_n: Number of most recent messages to return (default 20, max 100)
         from_id: If given, return messages with id >= from_id (overrides last_n)
+        member_id: Your member ID (from trio_connect). Optional; when supplied,
+                   DMs you sent or received are included and others' are withheld.
     """
     err = validate_channel_code(channel)
     if err:
@@ -2208,21 +2269,55 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> s
         if not ch:
             return json.dumps({"error": f"Channel '{channel}' not found."})
 
-        if from_id is not None:
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at, "
-                "retracted_at, retracted_by, retraction_reason, reply_to "
-                "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
-                (channel, from_id),
-            ).fetchall()
-        else:
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at, "
-                "retracted_at, retracted_by, retraction_reason, reply_to "
-                "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
-                (channel, last_n),
-            ).fetchall()
-            rows = list(reversed(rows))
+        # Reader identity for the DM visibility filter. An unknown / omitted
+        # member_id resolves to reader_id=None, reader_kind=None -> can_see
+        # admits broadcasts only (DMs withheld). A real member gets their kind
+        # so operators (kind != 'agent') stay all-seeing.
+        reader_kind = None
+        reader_id = member_id or None
+        if reader_id:
+            rdr = _get_member(db, channel, reader_id)
+            reader_kind = (rdr["kind"] if rdr and "kind" in rdr.keys() else "agent")
+
+        # recipients is pulled for the filter; degrade gracefully on old schema.
+        try:
+            if from_id is not None:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to, recipients "
+                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
+                    (channel, from_id),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to, recipients "
+                    "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
+                    (channel, last_n),
+                ).fetchall()
+                rows = list(reversed(rows))
+        except sqlite3.OperationalError:
+            if from_id is not None:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to "
+                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
+                    (channel, from_id),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at, "
+                    "retracted_at, retracted_by, retraction_reason, reply_to "
+                    "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
+                    (channel, last_n),
+                ).fetchall()
+                rows = list(reversed(rows))
+
+        rows = [
+            m for m in rows
+            if can_see(reader_id, reader_kind, m["member_id"],
+                       m["recipients"] if "recipients" in m.keys() else "")
+        ]
 
         messages = []
         retracted_ids = []
@@ -2306,16 +2401,31 @@ def nth_pounds(channel: str, member_id: str, since_id: int = 0, limit: int = 50)
         # [a-z0-9] so false-positives in content are vanishingly unlikely;
         # we still re-parse refs in Python to be sure.
         like_token = f'%"{member_id}"%'
-        rows = db.execute(
-            "SELECT id, member_id, member_name, content, mentions, refs, created_at "
-            "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
-            "AND retracted_at IS NULL "
-            "ORDER BY id DESC LIMIT ?",
-            (channel, since_id, like_token, limit),
-        ).fetchall()
+        try:
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, mentions, refs, recipients, created_at "
+                "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
+                "AND retracted_at IS NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (channel, since_id, like_token, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, mentions, refs, created_at "
+                "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
+                "AND retracted_at IS NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (channel, since_id, like_token, limit),
+            ).fetchall()
 
+        reader_kind = member["kind"] if "kind" in member.keys() else "agent"
         out = []
         for m in reversed(rows):
+            # DM visibility: a member #referenced inside a DM they are NOT a
+            # recipient of must not see it here either. Operators stay all-seeing.
+            if not can_see(member_id, reader_kind, m["member_id"],
+                           m["recipients"] if "recipients" in m.keys() else ""):
+                continue
             try:
                 ref_list = json.loads(m["refs"]) if m["refs"] else []
             except (json.JSONDecodeError, TypeError):
