@@ -815,7 +815,10 @@ class EventHub:
                 "m.filter_mode AS filter_mode, m.model AS model, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen, "
-                "MAX(s.last_turn_end) AS session_last_turn_end "
+                "MAX(s.last_turn_end) AS session_last_turn_end, "
+                "MAX(s.last_tool_name) AS last_tool_name, "
+                "MAX(s.last_tool_target) AS last_tool_target, "
+                "MAX(s.last_tool_at) AS last_tool_at "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -860,6 +863,13 @@ class EventHub:
             fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
             keys = r.keys()
             s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
+            # Tool-use chip (#1/#2). MAX over the member's sessions picks the sole
+            # session's values under trio's one-primary-session-per-member
+            # invariant (same basis as last_seen/last_turn_end above). Absent on
+            # pre-observability schemas (fallback query) — chip simply hidden.
+            last_tool_name = (r["last_tool_name"] if "last_tool_name" in keys else None) or ""
+            last_tool_target = (r["last_tool_target"] if "last_tool_target" in keys else None) or ""
+            last_tool_at = (r["last_tool_at"] if "last_tool_at" in keys else None) or None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -882,6 +892,9 @@ class EventHub:
                     last_turn_end_iso=s_turn_end),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
+                "last_tool_name": last_tool_name,
+                "last_tool_target": last_tool_target,
+                "last_tool_at": last_tool_at,
             })
         return out
 
@@ -1621,6 +1634,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_search(parsed)
         elif path == "/api/tasks":
             self._handle_tasks(parsed)
+        elif path == "/api/tools":
+            self._handle_tools(parsed)
         else:
             self._error(404, "not found")
 
@@ -2179,6 +2194,65 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "channel": self.channel,
                     "count": len(tasks), "tasks": tasks})
+
+    def _handle_tools(self, parsed) -> None:
+        """Read-only expandable detail for the roster tool-use chip (#1/#2):
+        the recent tool calls for one member, newest first, resolved from the
+        capped tool_events ring via sessions.fingerprint. Only SHORT summaries
+        are stored (see nth_activity_hook's privacy contract) so nothing here
+        can leak raw tool_input. Mirrors _handle_tasks' identity gate + short
+        read connection idioms."""
+        qs = parse_qs(parsed.query)
+        want = (qs.get("channel", [""])[0] or "").strip()
+        if want and want != self.channel:
+            self._error(403, "channel mismatch")
+            return
+        member = (qs.get("member", [""])[0] or "").strip()
+        if not member:
+            self._error(400, "member required")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            # Join the event ring to this channel's live sessions for the member.
+            # The ring is already capped per session; LIMIT bounds the response.
+            rows = db.execute(
+                "SELECT te.tool_name AS tool_name, te.target AS target, "
+                "te.created_at AS created_at "
+                "FROM tool_events te "
+                "JOIN sessions s ON s.fingerprint = te.session_id "
+                "WHERE s.channel = ? AND s.member_id = ? AND s.revoked_at IS NULL "
+                "ORDER BY te.id DESC LIMIT 40",
+                (self.channel, member),
+            ).fetchall()
+            events = [{
+                "tool_name": r["tool_name"] or "",
+                "target": r["target"] or "",
+                "created_at": r["created_at"],
+            } for r in rows]
+            # Sub-agents (#2): the Task spawns, surfaced distinctly.
+            subagents = [e for e in events if e["tool_name"] in ("Task", "Agent")]
+        except sqlite3.OperationalError:
+            # Pre-observability schema (no tool_events table): empty, not an error.
+            events, subagents = [], []
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": self.channel, "member": member,
+                    "count": len(events), "events": events,
+                    "subagents": subagents})
 
     def _edit_target(self, db, mid, ident):
         """Load an operator-editable message row, or (None, error). The caller
@@ -3108,6 +3182,24 @@ INDEX_HTML = r"""<!doctype html>
   .member .stext { font-size: 10px; color: var(--dim); margin-top: 2px;
                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                    padding-left: 16px; }
+  /* Tool-use chip (#1/#2): the collapsed "what is it doing right now" cue.
+     Click the row to expand its recent-calls list (fetched from /api/tools). */
+  .member .tool-chip { font-size: 10px; color: var(--dim); margin-top: 2px;
+                       padding-left: 16px; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; }
+  .member .tool-chip .tc-tool { color: var(--accent2); font-weight: 500; }
+  .member .tool-chip .tc-target { color: var(--dimmer); }
+  .member .tool-chip .tc-sub { color: var(--warn); }
+  .member .tool-detail { display: none; padding: 4px 0 2px 16px; font-size: 10px; }
+  .member.expanded .tool-detail { display: block; }
+  .member .tool-detail .td-head { color: var(--dimmer); text-transform: uppercase;
+                                  letter-spacing: 0.04em; font-size: 9px; margin: 4px 0 2px; }
+  .member .tool-detail .td-row { display: flex; gap: 6px; color: var(--dim);
+                                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .member .tool-detail .td-row .td-name { color: var(--accent2); }
+  .member .tool-detail .td-row .td-tgt { color: var(--dimmer); overflow: hidden;
+                                         text-overflow: ellipsis; }
+  .member .tool-detail .td-empty { color: var(--dimmer); font-style: italic; }
 
   .member .stats { display: none; padding: 8px 0 2px 16px;
                    font-size: 10px; color: var(--dim); }
@@ -5606,10 +5698,29 @@ INDEX_HTML = r"""<!doctype html>
       row.appendChild(st);
     }
 
+    // Tool-use chip (#1/#2): collapsed "running <Tool>: <target>" while the
+    // member is mid-turn. Only meaningful when it's actually acting, so gate on
+    // the working/active/blocked states (an idle/stale/dead member's last tool
+    // is stale). Click the row to expand the recent-calls detail below.
+    const chip = toolChipFor(m);
+    if (chip) {
+      const tc = document.createElement('div');
+      tc.className = 'tool-chip';
+      tc.innerHTML = chip;
+      row.appendChild(tc);
+    }
+
     const stats = document.createElement('div');
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Expandable recent-calls detail — filled lazily from /api/tools on expand.
+    const toolDetail = document.createElement('div');
+    toolDetail.className = 'tool-detail';
+    toolDetail.innerHTML = '<div class="td-empty">loading…</div>';
+    row.appendChild(toolDetail);
+    if (state.expandedMembers.has(m.id)) loadToolDetail(m.id, toolDetail);
 
     // Remove control — only revealed when the row is expanded (its details are
     // open), so it can't be mis-clicked from the collapsed roster. Not for
@@ -5637,8 +5748,58 @@ INDEX_HTML = r"""<!doctype html>
       else state.expandedMembers.add(m.id);
       row.classList.toggle('expanded');
       stats.innerHTML = renderMemberStatsHTML(m);
+      if (state.expandedMembers.has(m.id)) loadToolDetail(m.id, toolDetail);
     });
     return row;
+  }
+
+  // Collapsed tool-use chip HTML for a member, or '' if nothing to show.
+  function toolChipFor(m) {
+    const tool = (m.last_tool_name || '').trim();
+    if (!tool) return '';
+    if (!(m.status === 'working' || m.status === 'active' || m.status === 'blocked')) return '';
+    const tgt = (m.last_tool_target || '').trim();
+    // A Task spawn reads as a sub-agent rather than a bare tool.
+    if (tool === 'Task' || tool === 'Agent') {
+      return '🌿 <span class="tc-sub">sub-agent</span>'
+           + (tgt ? ' <span class="tc-target">' + escapeHtml(tgt) + '</span>' : '');
+    }
+    return '🔧 <span class="tc-tool">' + escapeHtml(tool) + '</span>'
+         + (tgt ? ' <span class="tc-target">' + escapeHtml(tgt) + '</span>' : '');
+  }
+
+  // Lazily fetch the recent-calls detail for an expanded member row. Best-effort:
+  // a failure just leaves the placeholder — this is an at-a-glance aid, not a
+  // source of truth.
+  function loadToolDetail(memberId, el) {
+    const url = '/api/tools?member=' + encodeURIComponent(memberId)
+              + '&channel=' + encodeURIComponent(state.channel || '');
+    fetch(url, { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d || !d.ok) { el.innerHTML = '<div class="td-empty">—</div>'; return; }
+        let html = '';
+        if (d.subagents && d.subagents.length) {
+          html += '<div class="td-head">sub-agents (' + d.subagents.length + ')</div>';
+          for (const e of d.subagents.slice(0, 12)) {
+            html += '<div class="td-row"><span class="td-tgt">'
+                 + escapeHtml(e.target || e.tool_name) + '</span></div>';
+          }
+        }
+        html += '<div class="td-head">recent calls</div>';
+        const calls = (d.events || []).filter(e => e.tool_name !== 'Task' && e.tool_name !== 'Agent');
+        if (!calls.length) {
+          html += '<div class="td-empty">no recent tool calls</div>';
+        } else {
+          for (const e of calls.slice(0, 20)) {
+            html += '<div class="td-row"><span class="td-name">' + escapeHtml(e.tool_name || '?') + '</span>'
+                 + (e.target ? '<span class="td-tgt">' + escapeHtml(e.target) + '</span>' : '')
+                 + '</div>';
+          }
+        }
+        el.innerHTML = html;
+      })
+      .catch(() => { el.innerHTML = '<div class="td-empty">—</div>'; });
   }
 
   function renderMemberStatsHTML(m) {
