@@ -100,6 +100,10 @@ IDENTITY_SOURCE_PENDING = "pending"
 # Identity tiers allowed to perform destructive, roster-wide actions (cull).
 # A self-declared guest is deliberately excluded — see _handle_cull.
 CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
+# Valid wake-filter modes for the operator-adjustable filter (feature #4),
+# mirrored from nth_monitor.FILTER_MODES — the monitor reads members.filter_mode
+# each tick, so /api/member/<id>/filter validates against exactly this set.
+FILTER_MODES = ("all", "about", "at")
 # Agents reading the roster can check the member's summary field:
 #   "human — tailnet: knelsonb"       → identity-traceable via Tailscale
 #   "human — local (user: repro)"     → connected via loopback; trust level is
@@ -1636,6 +1640,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_transcribe()
         elif parsed.path == "/api/cull":
             self._handle_cull()
+        elif (parsed.path.startswith("/api/member/")
+              and parsed.path.endswith("/filter")):
+            self._handle_set_filter(parsed)
         elif parsed.path == "/api/edit":
             self._handle_edit()
         elif parsed.path == "/api/delete":
@@ -2071,6 +2078,76 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, **(result or {})})
+
+    def _handle_set_filter(self, parsed) -> None:
+        """Set a member's wake filter (operator-adjustable filter, feature #4).
+        One UPDATE members SET filter_mode = ?. The monitor READS this column
+        every tick, so the change takes effect on its next poll — no restart,
+        and it wins over the agent's launch --filter arg (which only seeds a
+        null column). Mode is validated server-side against FILTER_MODES; an
+        unknown mode is rejected here, and even a bad value that slipped in
+        would fail open (wake on everything) in the monitor's should_wake()."""
+        # Path is /api/member/<id>/filter → ['', 'api', 'member', '<id>', 'filter'].
+        parts = parsed.path.split("/")
+        target_id = unquote(parts[3]).strip() if len(parts) == 5 else ""
+        if not target_id:
+            self._error(400, "member id required")
+            return
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        mode = body.get("filter_mode")
+        if not isinstance(mode, str) or mode not in FILTER_MODES:
+            self._error(400, f"filter_mode must be one of: {', '.join(FILTER_MODES)}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Retuning an agent's wake filter changes how it behaves in the room, so
+        # restrict it to a trusted operator (local shell or Tailscale-verified),
+        # exactly like cull — a weak self-declared guest must not be able to
+        # quiet agents, especially under --tailnet's 0.0.0.0 bind.
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can change wake filters")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            row = db.execute(
+                "SELECT id FROM members WHERE channel = ? AND id = ?",
+                (self.channel, target_id),
+            ).fetchone()
+            if not row:
+                self._error(404, "member not found")
+                return
+            db.execute(
+                "UPDATE members SET filter_mode = ? WHERE channel = ? AND id = ?",
+                (mode, self.channel, target_id),
+            )
+            db.commit()
+        except sqlite3.OperationalError as e:
+            # Pre-v7.2 schemas lack the column; report clearly instead of 500.
+            if "no such column" in str(e) or "filter_mode" in str(e):
+                self._error(409, "wake filters not supported on this database schema")
+                return
+            self._error(500, f"db error: {e}")
+            return
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": target_id, "filter_mode": mode})
 
     def _handle_search(self, parsed) -> None:
         """Full-history search: substring match over this channel's stored
