@@ -3465,6 +3465,13 @@ INDEX_HTML = r"""<!doctype html>
     return h;
   }
   function colorFor(id) {
+    // Prefer the collision-free per-roster assignment (rememberColors) so
+    // a small channel gets maximally distinct label colors. Fall back to
+    // the plain hash pick for message authors no longer in the roster
+    // (historical authors who left) — mirrors animalForId — so old
+    // messages stay stably colored.
+    const assigned = COLOR_BY_ID.get(id);
+    if (assigned) return assigned;
     return PALETTE[hash32(id) % PALETTE.length];
   }
   function animalFor(member) {
@@ -3489,6 +3496,39 @@ INDEX_HTML = r"""<!doctype html>
       if (m && m.id && m.animal_emoji) {
         AVATAR_BY_ID.set(m.id, { name: m.animal_name || '', emoji: m.animal_emoji });
       }
+    }
+  }
+  // Lookup table: member_id → label color for the current roster, computed
+  // collision-free locally (client-only — colors aren't delivered on the
+  // member payload the way animal_emoji is). Mirrors the server's avatar
+  // assignment animal_for_channel() (nth_constants.py): resolve members in
+  // sorted member-id order, hash each to a start slot, then linear-probe to
+  // the next free palette slot. Because it's a pure function of the sorted
+  // roster id set, every client derives the same map. NOTE: PALETTE has only
+  // 8 colors, so a roster of >8 must repeat colors regardless of algorithm —
+  // overflow members wrap to the plain hash pick. A follow-up may expand the
+  // palette / move assignment server-side.
+  const COLOR_BY_ID = new Map();
+  function rememberColors(members) {
+    COLOR_BY_ID.clear();
+    const ids = [];
+    for (const m of (members || [])) {
+      if (m && m.id) ids.push(m.id);
+    }
+    ids.sort();
+    const taken = new Set();
+    for (const id of ids) {
+      const start = hash32(id) % PALETTE.length;
+      let pick = start;
+      // Linear-probe to the next free slot. Once every slot is taken (roster
+      // exceeds the palette) the probe returns to `start` — the plain hash
+      // pick — so overflow members collide, matching animal_for_channel's wrap.
+      for (let n = 0; n < PALETTE.length; n++) {
+        if (!taken.has(pick)) break;
+        pick = (pick + 1) % PALETTE.length;
+      }
+      taken.add(pick);
+      COLOR_BY_ID.set(id, PALETTE[pick]);
     }
   }
   function animalForId(id) {
@@ -5043,6 +5083,10 @@ INDEX_HTML = r"""<!doctype html>
     // authors to the server-assigned collision-free emoji. Must run
     // before any render path that looks up avatars by id.
     rememberAvatars(members);
+    // Refresh the id→color assignment so colorFor() gives current members
+    // collision-free label colors. Same timing constraint as avatars: must
+    // run before any render path that looks up colors by id.
+    rememberColors(members);
 
     // Reconcile state.members — and detect name changes so the chat can
     // retroactively re-label past messages from the renamed member.
@@ -6977,6 +7021,7 @@ INDEX_HTML = r"""<!doctype html>
       paintBody, applyTargetBars, formatTime,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
+      colorFor, rememberColors,
     };
   }
   // __TRIO_TEST_HOOK_END__
