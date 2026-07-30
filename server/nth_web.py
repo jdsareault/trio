@@ -3049,6 +3049,46 @@ INDEX_HTML = r"""<!doctype html>
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
   #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
                letter-spacing: -1px; padding-top: 4px; }
+
+  /* ── Task board (sidebar) ── */
+  #tasks-wrap .task-group { margin-bottom: 8px; }
+  #tasks-wrap .task-group:last-child { margin-bottom: 0; }
+  #tasks-wrap .task-group-head { font-size: 9px; text-transform: uppercase;
+                    letter-spacing: 0.06em; color: var(--dim); font-weight: 600;
+                    margin: 6px 0 4px; display: flex; align-items: center; gap: 6px; }
+  #tasks-wrap .task-group-count { color: var(--dimmer); font-weight: 500; }
+  #tasks-wrap .task-empty { font-size: 10px; color: var(--dimmer); font-style: italic; }
+  .task { padding: 5px 0; border-top: 1px solid var(--border); font-size: 11px; }
+  .task:first-child { border-top: none; }
+  .task .task-row { display: flex; align-items: baseline; gap: 6px; }
+  .task .task-id { color: var(--dimmer); font-weight: 600; flex-shrink: 0; }
+  .task .task-desc { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; }
+  .task.status-completed .task-desc { color: var(--dim); text-decoration: line-through; }
+  .task.status-cancelled .task-desc { color: var(--dimmer); text-decoration: line-through; }
+  .task .task-badge { font-size: 8px; padding: 1px 5px; border-radius: 3px;
+                      flex-shrink: 0; user-select: none; text-transform: uppercase;
+                      letter-spacing: 0.5px; border: 1px solid transparent; }
+  .task .task-badge.open      { color: #7cc0f0; background: rgba(124, 192, 240, 0.1);
+                                border-color: rgba(124, 192, 240, 0.3); }
+  .task .task-badge.claimed   { color: #f0c060; background: rgba(240, 192, 96, 0.1);
+                                border-color: rgba(240, 192, 96, 0.3); }
+  .task .task-badge.blocked   { color: #f08c8c; background: rgba(240, 140, 140, 0.1);
+                                border-color: rgba(240, 140, 140, 0.3); }
+  .task .task-badge.completed { color: #7ede9e; background: rgba(126, 222, 158, 0.1);
+                                border-color: rgba(126, 222, 158, 0.3); }
+  .task .task-badge.cancelled { color: var(--dim); background: var(--bg2);
+                                border-color: var(--border); }
+  .task .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px;
+                     padding-left: 2px; font-size: 10px; color: var(--dim); }
+  .task .task-animal { font-size: 12px; line-height: 1; }
+  .task .task-claimer { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                        max-width: 110px; }
+  .task .task-age { color: var(--dimmer); flex-shrink: 0; }
+  .task .task-deps { color: var(--dimmer); }
+  .task .task-result { color: var(--dim); font-style: italic; padding-left: 2px;
+                       margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; }
   #filter-banner { padding: 4px 8px; background: rgba(var(--mention-rgb), 0.12); color: var(--mention);
                    font-size: 10px; border-radius: 3px; margin-bottom: 6px;
                    display: none; cursor: pointer; }
@@ -3351,6 +3391,10 @@ INDEX_HTML = r"""<!doctype html>
       <h2 id="r-heading">Members</h2>
       <div id="r-list"></div>
     </section>
+    <section id="tasks-wrap">
+      <h2 id="t-heading">Tasks</h2>
+      <div id="t-list"></div>
+    </section>
     <section id="chanstats-wrap">
       <h2>Channel stats</h2>
       <div id="chanstats"></div>
@@ -3413,6 +3457,8 @@ INDEX_HTML = r"""<!doctype html>
   const chat = document.getElementById('chat');
   const rosterEl = document.getElementById('r-list');
   const rosterHeading = document.getElementById('r-heading');
+  const tasksEl = document.getElementById('t-list');
+  const tasksHeading = document.getElementById('t-heading');
   const chanStatsEl = document.getElementById('chanstats');
   const sparkEl = document.getElementById('sparkline');
   const hChannel = document.getElementById('h-channel');
@@ -6897,6 +6943,154 @@ INDEX_HTML = r"""<!doctype html>
     updateTitle();
   });
 
+  // ── Task board ──
+  // Reads GET /api/tasks and renders the channel's tasks in the sidebar,
+  // grouped by status. The tasks table is authoritative server-side; this is
+  // a pure read view refreshed off the SSE feed (see below).
+  const TASK_GROUPS = [
+    ['open',      'Open'],
+    ['claimed',   'Claimed'],
+    ['blocked',   'Blocked'],
+    ['completed', 'Completed'],
+    ['cancelled', 'Cancelled'],
+  ];
+  // A task lifecycle event IS an ordinary chat message today (e.g. "[claimed
+  // #3] by X" — see nth_server.py), so there's no dedicated SSE task event to
+  // key on. We re-fetch the board whenever an incoming message looks like a
+  // lifecycle marker. Brittle (string match); the durable fix is a structured
+  // kind/task_id column on messages so the client keys on data, not a prefix.
+  const TASK_LIFECYCLE_RE = /^\[(task|claimed|done|released|cancelled) #?\d+/;
+  function isTaskLifecycle(content) {
+    return TASK_LIFECYCLE_RE.test(content || '');
+  }
+
+  function renderTaskRow(t) {
+    const div = document.createElement('div');
+    div.className = 'task status-' + (t.status || '');
+    div.dataset.taskId = String(t.id);
+
+    const row = document.createElement('div');
+    row.className = 'task-row';
+    const idEl = document.createElement('span');
+    idEl.className = 'task-id';
+    idEl.textContent = '#' + t.id;
+    row.appendChild(idEl);
+    const desc = document.createElement('span');
+    desc.className = 'task-desc';
+    desc.textContent = t.description || '';
+    desc.title = t.description || '';
+    row.appendChild(desc);
+    const badge = document.createElement('span');
+    badge.className = 'task-badge ' + (t.status || '');
+    badge.textContent = t.status || '';
+    row.appendChild(badge);
+    div.appendChild(row);
+
+    // Meta line: claimer avatar + name, age, deps.
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+    if (t.claimed_by) {
+      const mem = state.members.get(t.claimed_by);
+      const anim = animalForId(t.claimed_by);
+      const av = document.createElement('span');
+      av.className = 'task-animal';
+      av.textContent = anim.emoji || '';
+      meta.appendChild(av);
+      const who = document.createElement('span');
+      who.className = 'task-claimer';
+      who.textContent = (mem && mem.name) || anim.name || t.claimed_by.slice(0, 8);
+      who.style.color = colorFor(t.claimed_by);
+      meta.appendChild(who);
+    }
+    const age = document.createElement('span');
+    age.className = 'task-age';
+    const created = t.created_at ? Date.parse(t.created_at) : NaN;
+    if (isFinite(created)) {
+      age.textContent = fmtRel((Date.now() - created) / 1000);
+      age.title = t.created_at;
+    } else {
+      age.textContent = '—';
+    }
+    meta.appendChild(age);
+    if (Array.isArray(t.blocked_by) && t.blocked_by.length) {
+      const deps = document.createElement('span');
+      deps.className = 'task-deps';
+      deps.textContent = '⛓ ' + t.blocked_by.map(n => '#' + n).join(' ');
+      deps.title = 'blocked by ' + t.blocked_by.map(n => '#' + n).join(', ');
+      meta.appendChild(deps);
+    }
+    // Only append the meta line if it carries something.
+    if (meta.childNodes.length) div.appendChild(meta);
+
+    if (t.result) {
+      const res = document.createElement('div');
+      res.className = 'task-result';
+      res.textContent = '→ ' + t.result;
+      res.title = t.result;
+      div.appendChild(res);
+    }
+    return div;
+  }
+
+  function renderTasks(tasks) {
+    tasks = tasks || [];
+    tasksHeading.textContent = 'Tasks (' + tasks.length + ')';
+    const frag = document.createDocumentFragment();
+    if (!tasks.length) {
+      const empty = document.createElement('div');
+      empty.className = 'task-empty';
+      empty.textContent = 'no tasks yet';
+      frag.appendChild(empty);
+    } else {
+      const byStatus = new Map();
+      for (const t of tasks) {
+        const k = t.status || 'other';
+        if (!byStatus.has(k)) byStatus.set(k, []);
+        byStatus.get(k).push(t);
+      }
+      for (const [status, label] of TASK_GROUPS) {
+        const group = byStatus.get(status);
+        if (!group || !group.length) continue;
+        const head = document.createElement('div');
+        head.className = 'task-group-head';
+        head.innerHTML = '';
+        const lbl = document.createElement('span');
+        lbl.textContent = label;
+        head.appendChild(lbl);
+        const cnt = document.createElement('span');
+        cnt.className = 'task-group-count';
+        cnt.textContent = group.length;
+        head.appendChild(cnt);
+        const wrap = document.createElement('div');
+        wrap.className = 'task-group';
+        wrap.appendChild(head);
+        for (const t of group) {
+          try { wrap.appendChild(renderTaskRow(t)); }
+          catch (err) { console.error('renderTaskRow failed for', t && t.id, err); }
+        }
+        frag.appendChild(wrap);
+      }
+    }
+    tasksEl.innerHTML = '';
+    tasksEl.appendChild(frag);
+  }
+
+  let tasksInFlight = false;
+  async function refreshTasks() {
+    if (tasksInFlight) return;  // coalesce bursts of lifecycle messages
+    tasksInFlight = true;
+    try {
+      const r = await fetch('/api/tasks?channel=' + encodeURIComponent(state.channel || ''));
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.ok) renderTasks(data.tasks);
+    } catch (e) {
+      console.error('refreshTasks failed', e);
+    } finally {
+      tasksInFlight = false;
+    }
+  }
+
   // ── SSE ──
   let es = null;
   let reconnectTimer = null;
@@ -6911,7 +7105,12 @@ INDEX_HTML = r"""<!doctype html>
     es.onmessage = (ev) => {
       try {
         const payload = JSON.parse(ev.data);
-        if (payload.type === 'message') appendMessage(payload);
+        if (payload.type === 'message') {
+          appendMessage(payload);
+          // A task lifecycle event arrives as an ordinary message; refresh the
+          // board when one does. (v1: string-match the marker — see isTaskLifecycle.)
+          if (isTaskLifecycle(payload.content)) refreshTasks();
+        }
         else if (payload.type === 'message_update') updateMessageDom(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
       } catch (e) { console.error('bad event', e); }
@@ -7026,6 +7225,7 @@ INDEX_HTML = r"""<!doctype html>
     input.focus();
     updatePreview();
     updateChanStats();
+    refreshTasks();
   }
 
   // __TRIO_TEST_HOOK_START__
@@ -7043,6 +7243,7 @@ INDEX_HTML = r"""<!doctype html>
       state,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
       paintBody, applyTargetBars, formatTime,
+      isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
       isTargetable, targetableMembers, soleAgentId, directAt,
     };
