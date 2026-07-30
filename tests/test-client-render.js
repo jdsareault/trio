@@ -534,6 +534,54 @@ check('renderDmInbox: empty state when the operator has no DMs', () => {
   assert.strictEqual(H.dmListEl.querySelectorAll('.dm-empty').length, 1, 'shows empty notice');
 });
 
+check('renderDmInbox: rows are keyboard-accessible (role=button, tabindex)', () => {
+  seedDmState([{ id: 1, member_id: 'a', recipients: [OP], content: 'hi' }], { a: 'alice' }, {});
+  H.renderDmInbox();
+  const row = H.dmListEl.querySelectorAll('.dm-thread')[0];
+  assert.strictEqual(row.getAttribute('role'), 'button');
+  assert.strictEqual(String(row.tabIndex), '0');
+});
+
+check('renderDmInbox: falls back to "(no preview)" for a bodyless DM', () => {
+  seedDmState([{ id: 1, member_id: 'a', recipients: [OP], content: '' }], { a: 'alice' }, {});
+  H.renderDmInbox();
+  const prev = H.dmListEl.querySelectorAll('.dm-prev')[0];
+  assert.strictEqual(prev.textContent, '(no preview)');
+});
+
+check('dmThreadsFor: flags a group DM thread (>1 non-operator participant)', () => {
+  const msgs = [
+    { id: 1, member_id: 'a', recipients: [OP, 'b'], content: 'group hi' }, // a→(op,b)
+    { id: 2, member_id: 'c', recipients: [OP], content: '1:1' },           // c→op
+  ];
+  seedDmState(msgs, { a: 'alice', b: 'bob', c: 'carol' }, {});
+  const threads = H.dmThreadsFor(H.state.messages.values(), OP, H.state.dmRead);
+  const a = threads.find((t) => t.counterparty === 'a');
+  const c = threads.find((t) => t.counterparty === 'c');
+  assert.strictEqual(a.group, true, 'a↔op+b is a group thread');
+  assert.strictEqual(c.group, false, 'c↔op is a plain 1:1');
+});
+check('renderDmInbox: labels a group thread', () => {
+  seedDmState([{ id: 1, member_id: 'a', recipients: [OP, 'b'], content: 'g' }],
+    { a: 'alice', b: 'bob' }, {});
+  H.renderDmInbox();
+  const name = H.dmListEl.querySelectorAll('.dm-name')[0];
+  assert.ok(/group/.test(name.textContent), 'group label present: ' + name.textContent);
+});
+
+check('markDmRead clears a thread\'s unread and drops the bubble to 0', () => {
+  const msgs = [
+    { id: 4, member_id: 'a', recipients: [OP], content: 'one' },
+    { id: 6, member_id: 'a', recipients: [OP], content: 'two' },
+  ];
+  seedDmState(msgs, { a: 'alice' }, {});
+  H.state.channel = 'unit';   // markDmRead persists under trio.dmRead.<channel>
+  assert.strictEqual(H.unreadDmCount(H.state.messages.values(), OP, H.state.dmRead), 2);
+  H.markDmRead('a');
+  assert.strictEqual(H.unreadDmCount(H.state.messages.values(), OP, H.state.dmRead), 0,
+    'reading the thread clears its unread');
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);

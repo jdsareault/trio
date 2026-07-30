@@ -5105,7 +5105,7 @@ INDEX_HTML = r"""<!doctype html>
       badge.title = `${mem.name} (${mid}) — the ${animalName} — ${read ? 'read ✓' : 'pending…'}  · last_read: ${mem.last_read}  (click to open DM tab)`;
       badge.onclick = (e) => {
         e.stopPropagation();
-        if (!DM_MODE) window.open('/?dm=' + encodeURIComponent(mid), '_blank');
+        if (!DM_MODE) openDmTab(mid);   // marks the thread read + clears the bubble
       };
       box.appendChild(badge);
     }
@@ -5622,6 +5622,12 @@ INDEX_HTML = r"""<!doctype html>
     if (m.retracted_at) {
       const acts = div.querySelector('.msg-actions');
       if (acts) acts.remove();
+    }
+    // An edit/retract/delete of one of the operator's OWN DMs changes the inbox
+    // preview (and a delete shouldn't keep counting toward unread) — refresh.
+    if (!DM_MODE && dmCounterparty(state.messages.get(m.id), state.operator.id)) {
+      refreshDmBadge();
+      if (dmPanel && !dmPanel.hasAttribute('hidden')) renderDmInbox();
     }
   }
 
@@ -6423,7 +6429,7 @@ INDEX_HTML = r"""<!doctype html>
       dmBtn.title = `Open DM tab with ${m.name}`;
       dmBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.open('/?dm=' + encodeURIComponent(m.id), '_blank');
+        openDmTab(m.id);   // marks the thread read + clears the bubble
       });
       topRow.appendChild(dmBtn);
     }
@@ -7517,10 +7523,18 @@ INDEX_HTML = r"""<!doctype html>
       const cp = dmCounterparty(m, operatorId);
       if (!cp) continue;
       let t = byCp.get(cp);
-      if (!t) { t = { counterparty: cp, lastId: 0, lastMsg: null, unread: 0 }; byCp.set(cp, t); }
+      if (!t) { t = { counterparty: cp, lastId: 0, lastMsg: null, unread: 0, group: false }; byCp.set(cp, t); }
       if (m.id > t.lastId) { t.lastId = m.id; t.lastMsg = m; }
       const readId = (readMap && readMap.get(cp)) || 0;
       if (m.member_id === cp && m.id > readId) t.unread++;
+      // Group flag: any contributing message with >1 non-operator participant
+      // (sender + recipients, minus the operator). The existing DM tab is 1:1,
+      // so a group thread is labelled and opens the 1:1 view with `cp` — a known
+      // limitation, but never silently mislabelled as a plain 1:1.
+      const others = new Set(m.recipients || []);
+      others.add(m.member_id);
+      others.delete(operatorId);
+      if (others.size > 1) t.group = true;
     }
     return [...byCp.values()].sort((a, b) => b.lastId - a.lastId);
   }
@@ -7590,6 +7604,9 @@ INDEX_HTML = r"""<!doctype html>
       const row = document.createElement('div');
       row.className = 'dm-thread';
       row.title = 'Open DM with ' + nm;
+      // Keyboard-accessible like the settings drawer's real controls.
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
 
       const av = document.createElement('span');
       av.className = 'dm-av';
@@ -7600,13 +7617,15 @@ INDEX_HTML = r"""<!doctype html>
       meta.className = 'dm-meta';
       const name = document.createElement('div');
       name.className = 'dm-name';
-      name.textContent = nm;
+      name.textContent = t.group ? (nm + ' · group') : nm;
+      if (t.group) row.title = 'Open DM with ' + nm + ' (part of a group DM — opens the 1:1 view)';
       meta.appendChild(name);
       const prev = document.createElement('div');
       prev.className = 'dm-prev';
       const last = t.lastMsg || {};
       const who = last.member_id === state.operator.id ? 'You: ' : '';
-      prev.textContent = who + humanizeIdSigils((last.content || '').replace(/\s+/g, ' ')).slice(0, 60);
+      const body = humanizeIdSigils((last.content || '').replace(/\s+/g, ' ')).trim();
+      prev.textContent = body ? (who + body.slice(0, 60)) : '(no preview)';
       meta.appendChild(prev);
       row.appendChild(meta);
 
@@ -7617,6 +7636,9 @@ INDEX_HTML = r"""<!doctype html>
       row.appendChild(badge);
 
       row.addEventListener('click', () => openDmTab(t.counterparty));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDmTab(t.counterparty); }
+      });
       dmListEl.appendChild(row);
     }
   }
@@ -7624,8 +7646,11 @@ INDEX_HTML = r"""<!doctype html>
   function toggleDmPanel(force) {
     if (!dmPanel) return;
     const show = (force !== undefined) ? force : dmPanel.hasAttribute('hidden');
-    if (show) { renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on'); }
-    else { dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
+    if (show) {
+      // Both drawers share the same top-right slot — only one at a time.
+      if (typeof toggleSettings === 'function') toggleSettings(false);
+      renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
+    } else { dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
   }
   if (btnDm && !DM_MODE) {
     btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
@@ -7636,6 +7661,15 @@ INDEX_HTML = r"""<!doctype html>
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !dmPanel.hasAttribute('hidden')) toggleDmPanel(false);
+    });
+    // Cross-tab sync: a DM opened/marked-read in another dashboard tab (or the
+    // spawned /?dm= tab writing this key) updates our read watermark too.
+    window.addEventListener('storage', (e) => {
+      if (e.key === dmReadKey()) {
+        loadDmRead();
+        refreshDmBadge();
+        if (!dmPanel.hasAttribute('hidden')) renderDmInbox();
+      }
     });
   }
 
@@ -8110,6 +8144,8 @@ INDEX_HTML = r"""<!doctype html>
 
   function toggleSettings(force) {
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
+    // Both drawers share the same top-right slot — only one at a time.
+    if (show && typeof toggleDmPanel === 'function') toggleDmPanel(false);
     if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
     else { stopTestRecording(); settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
@@ -8664,7 +8700,7 @@ INDEX_HTML = r"""<!doctype html>
       isTargetable, targetableMembers, soleAgentId, directAt,
       colorFor, rememberColors, chimeScopeAllows,
       dmCounterparty, dmThreadsFor, unreadDmCount,
-      renderDmInbox, refreshDmBadge, dmListEl, dmCountEl,
+      renderDmInbox, refreshDmBadge, markDmRead, dmListEl, dmCountEl,
     };
   }
   // __TRIO_TEST_HOOK_END__
