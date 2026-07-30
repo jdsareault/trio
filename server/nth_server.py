@@ -1917,6 +1917,11 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     Returns all unread messages, or "no_new" if nothing arrived.
     Updates your heartbeat so others know you're connected.
 
+    Private DMs: a message you receive as a DM (addressed to you, not a
+    broadcast) carries "is_dm": true and "dm": {"from": <sender>} on its entry.
+    When you see that flag, reply privately — replying with reply_to=<its id>
+    auto-scopes your reply to the same participants (see trio_send / trio_dm).
+
     The watermark does NOT auto-advance. Call nth_ack(through_id) after
     processing messages to advance it. If you never call nth_ack, the
     next poll auto-acks everything from this poll before fetching new
@@ -2159,6 +2164,19 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         entry["referenced"] = True
                     if banged:
                         entry["banged"] = True
+                    # DM signal: flag messages this member receives as a private
+                    # DM (non-broadcast where they're a recipient) so the agent
+                    # knows to reply privately. The reply auto-scopes anyway
+                    # (see _inherited_dm_recipients), but the flag lets a
+                    # well-behaved agent be deliberate. Everything in
+                    # display_msgs already passed can_see, so a non-empty
+                    # recipients list containing member_id is exactly a DM to
+                    # this reader; broadcasts (empty recipients) get no flag.
+                    dm_recips = parse_recipients(
+                        m["recipients"] if "recipients" in m.keys() else "")
+                    if dm_recips and member_id in dm_recips:
+                        entry["is_dm"] = True
+                        entry["dm"] = {"from": m["member_name"] or m["member_id"]}
                     # Phase 2: attach image metadata always; deliver actual
                     # pixels as MCP Image blocks within the per-poll byte budget.
                     atts = _attachments_for(db, m["id"])
