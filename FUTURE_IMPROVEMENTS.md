@@ -315,5 +315,335 @@ text, and render it as a small color-coded **badge** attached to the message.
   habits. Keep backward-compat (appending text still works) and update SKILL
   guidance to prefer the param. Absent confidence must render cleanly (no empty
   badge).
+
+---
+
+## 9. Real direct messages (private 1:1) — and the "DM implies privacy" gap
+
+**Straddles bug and feature** (operator was unsure which). Two separable pieces:
+a small honesty fix now, and a larger real-DMs feature that extends #5.
+
+**Current state — the DM tab is a cosmetic filter, not a private channel.**
+There is no DM store, no private delivery, and nothing agent-facing: SKILL /
+REFERENCE / PROTOCOLS and the MCP tool docstrings never mention DMs at all — to
+an agent, a "DM" is just an `@mention`. The whole concept lives in the dashboard:
+- **Read side:** opening a DM loads `/?dm=<member_id>` and renders *every* channel
+  message, then hides non-matching ones with a `.dm-hidden { display:none }` CSS
+  class (`nth_web.py:2707`). The predicate `isRelevantInDm` (`nth_web.py:6156-6166`)
+  keeps only the mutual-@mention subset: target→operator @mentions, operator→target
+  @mentions, plus system notices about the target. That's why the tab isn't blank
+  before you've "DMed" — it's surfacing pre-existing main-channel @mentions.
+- **Send side:** posting from a DM tab is an ordinary broadcast send that just
+  auto-@mentions the target and prepends `@name` to the text
+  (`nth_web.py:5998-6009`) — it lands in the shared `messages` table and shows in
+  everyone's main tab.
+- **Server side:** every read path (`trio_poll` / `trio_history` / SSE) is
+  `WHERE channel = ? AND id > ?` with no per-member visibility predicate — every
+  member reads every message (same fact #5 is built on). So DM "privacy" exists
+  only in one browser tab's CSS; another operator tab, the main view, or any
+  agent's `trio_poll` sees the full exchange.
+
+**Piece A — honesty fix (small, do regardless).** The "DM" label promises privacy
+the system doesn't provide — an operator can reasonably type something into a DM
+tab believing only the target sees it. Until real DMs exist, make the affordance
+tell the truth: relabel (e.g. "@mention filter" / "focus view") or add an inline
+note that a DM is a filtered view of the public channel, visible to all members.
+Purely client-side.
+
+**Piece B — real private DMs (feature, larger).** A genuinely private 1:1 requires
+what #5 already scopes plus more:
+- a recipient/visibility column on `messages` (or a separate `dm_messages`
+  table) so a DM is addressed, not broadcast;
+- **member-aware read paths** — `trio_poll`, `trio_history`, SSE, *and* the
+  conversation export must all honor it, or the "private" message leaks (this is
+  exactly #5's "miss one and it leaks" cost);
+- an agent-facing way to send/receive DMs (a `to=` arg or a `trio_dm` tool) —
+  today agents have no DM primitive at all;
+- watermark handling for messages a member can't see (the #5 problem).
+
+**Relationship to #5:** this is a superset of #5's "can see" axis — same predicate,
+same read-path surface, same watermark care. If real DMs are wanted, build them
+*on* #5's visibility engine rather than as a parallel mechanism. Do them together
+or #5 first.
+
+**Strength of the boundary depends on deployment (refines #5's "soft scoping"):**
+Server-side read-path enforcement *is* effective against a well-behaved agent —
+agents only touch the channel through the MCP tools (`trio_poll` / `trio_history`
+/ SSE), so if the server withholds a non-recipient's bytes there, a normal agent
+never sees the DM. The strength of that boundary against a *determined or
+misbehaving* agent then splits by deployment:
+- **Local trio:** soft. The agent runs as the same OS user and (as a Claude Code
+  session) has `Bash`/`Read`; the DB is a plaintext SQLite file at a fixed,
+  documented path (`~/.claude/nth/nth.db`) with no encryption or special perms. So
+  bypass is ~one `sqlite3` call away — "going out of its way," but no privilege
+  boundary crossed. Holds against normal use and accidents, **not** against an
+  agent told (or deciding) to snoop. Don't present local DMs as a trust boundary.
+- **Remote quartet:** a genuinely real boundary. A spoke reaches the hub *only*
+  over MCP-over-SSE and has no filesystem access to the hub's DB
+  (`nth_spoke_monitor.py:4-6`) — it can't open the file, so server enforcement is
+  the whole story and actually holds.
+
+Piece A is worth doing on its own precisely because today's DMs aren't even soft
+scoping — they're cosmetic (client-side CSS over data the agent already receives
+in full via `trio_poll`).
+
+## 10. Sequential label colors — kill the hash-collision clustering
+
+**What:** Assign member label colors collision-free (one after another) instead
+of by hash, so a small channel doesn't end up with most members sharing a color.
+Observed live: 5 "pink" members in a channel of 8.
+
+**Current state — colors are hashed, not assigned:**
+- An 8-entry `PALETTE` (`nth_web.py:3457`); `colorFor(id) = PALETTE[hash32(id) %
+  8]` (`:3467`), computed independently on each client with no coordination.
+- So clustering is *expected*, not bad luck: hash-mod-8 is the birthday problem —
+  8 members into 8 buckets come out all-distinct only ~0.24% of the time.
+- The palette also skews: `#d070d7` + `#f79fea` are both pink-family and `#ff8470`
+  is coral (~3 "pink" buckets of 8); `#62d7ef` + `#9ef0f0` are both cyan. Effective
+  hue diversity is ~5–6, which is what makes the pink pile-up so visible.
+
+**Substrate that already exists (the exact mechanism, for avatars):**
+- The server already does collision-free per-channel assignment for animal emojis:
+  `animal_for_channel()` (`nth_constants.py:52`) resolves members in sorted-id
+  order, linear-probes to the next free slot, and only wraps/repeats once the
+  roster exceeds the pool. `animal_emoji` is already delivered on the member
+  payload; the client prefers it and falls back to a local hash for historical
+  authors (`nth_web.py:3475-3480`).
+
+**What's new:**
+- A `color_for_channel()` mirroring `animal_for_channel()` over the palette;
+  deliver a `color` (or color index) on the member payload the way `animal_emoji`
+  is.
+- Client uses `member.color` when present, **falling back to `colorFor(id)`** for
+  message authors no longer in the roster (same pattern as avatars) so history
+  stays stably colored.
+
+**Considerations:**
+- Preserve the two invariants the current pure-hash gives for free: (a) all clients
+  agree on a member's color, (b) departed authors still color consistently.
+  Server-assign + payload-deliver + hash-fallback keeps both.
+- **8 colors < `MAX_MEMBERS` (20):** repeats past 8 members are unavoidable
+  regardless of algorithm. Sequential assignment removes the *clustering* with
+  today's palette; true no-repeat up to a full channel needs a bigger palette
+  (~16–20) that's theme-legible (light + dark) and evenly hue-spaced — de-dupe the
+  double-pinks/double-cyans while doing it. (The `dataviz` skill covers accessible
+  categorical palettes.)
+- Assignment stability on leave/join: `animal_for_channel` re-derives from the
+  member set each render, so a departure can let someone probe into a freed slot
+  and shift a color. Fine for avatars today; if color stickiness matters more,
+  persist an assigned index on the member row at join.
+
+## 11. Inline `#` / `!` formatting parity with `@`
+
+**What:** Render `#pound` and `!bang` references inline in the message body the
+same way `@mentions` already are — a member-colored chip/dot in the prose —
+instead of leaving them as plain (name-only) text. Keep their distinct semantics
+(# = "about", ! = "alert") in the styling; "same way" means the same *mechanism*,
+not an identical color.
+
+**Current state (asymmetric):**
+- `@`: gets a member-colored inline chip + dot in the body (`.inline-mention`,
+  `nth_web.py:2650`), applied by `decorateInlineMentions` → `collectMentionMatches`
+  whose regex matches **only `@`** (`nth_web.py:3825`) — *plus* a routing chip in
+  the mentions-bar above.
+- `#` and `!`: get a routing-bar chip above the message (`.refs-bar` muted green,
+  `.bangs-bar` loud coral; `nth_web.py:2612` / `:2628`) and are name-humanized in
+  the body (`humanizeIdSigils`, `:3791`) — but the body occurrence itself stays
+  **unstyled**. So the "who" pop `@` gets inline is missing for `#`/`!`.
+
+**Substrate that already exists:**
+- Every message already carries parsed `mentions` / `refs` / `bangs` id arrays
+  (server-side `_parse_sigils_against_roster`), so the client already knows which
+  body tokens are `#`'d and `!`'d — no new parsing.
+- `decorateInlineMentions` + `colorFor` are ready to generalize: accept the sigil
+  char + a per-sigil style, reusing the member color for the dot.
+
+**What's new:**
+- Generalize the inline decorator to also match `#`/`!` and wrap them in a styled
+  inline span. Give `#` the muted "about" treatment and `!` the loud "alert" one
+  (reuse the bar palettes: green `#9ccf9c` / coral `#ff8470`) so the three sigils
+  stay *distinguishable* while all getting the member-colored dot.
+
+**Considerations:**
+- The differentiation is deliberate (# quieter than @, ! louder) — preserve it;
+  don't flatten all three to the `@` look.
+- Carry over the code/pre/link exclusions already in `decorateInlineMentions`
+  (`:3854`) so `#`/`!` inside code spans aren't decorated. `#` especially collides
+  with Markdown headings — the decorator only runs on resolved-roster tokens, which
+  limits false hits, but verify against `# heading` lines.
+
+## 12. Task display — a tasks tab/sidebar + richer lifecycle rendering in chat
+
+**What:** Give tasks a first-class surface: (a) a running list of the channel's
+tasks in a tab/sidebar grouped by status, and (b) format the task lifecycle
+messages in the chat stream as styled cards/badges instead of plain `[task #N]`
+text.
+
+**Current state — tasks are fully structured server-side but invisible in the UI:**
+- The `tasks` table already holds everything a board needs: `id, posted_by,
+  claimed_by, status (open/claimed/completed/cancelled), description, result,
+  blocked_by (JSON deps), created_at, updated_at, lease_expires_at`
+  (`nth_server.py:242`, `:328`).
+- Lifecycle already emits distinct chat messages: `[task #N] <desc>` (created,
+  `:1060`), `[claimed #N] by X` (`:2291`), `[done #N] by X — result` (`:2378`),
+  `[released #N] …` (`:2461`), `[cancelled #N] …` (`:2552`).
+- But the dashboard has **no task UI at all** — the only "task" rendering is GFM
+  checkbox lists in message bodies (`li.task`, `:2688`), which is unrelated
+  Markdown. So the lifecycle shows only as plain text lines scattered through the
+  chat; there's no way to see "what's open / who's on what / what's done."
+
+**What's new:**
+1. **Tasks tab/sidebar (additive read).** New endpoint (e.g.
+   `/api/tasks?channel=…`) doing `SELECT … FROM tasks WHERE channel = ? ORDER BY
+   …`; render grouped by `status` with claimer avatar, age, and `blocked_by` shown
+   as dependency links. Mirrors the additive-read + new-view pattern proposed for
+   the gallery (#3).
+2. **Styled lifecycle messages in chat.** Special-case the `[task #N]` /
+   `[claimed]` / `[done]` / `[released]` / `[cancelled]` markers (same way
+   `.msg.system` is already special-cased) into compact cards with a status badge +
+   task-id chip + jump-to-task, instead of raw prose. The `#N` is stable, so a chip
+   can deep-link into the sidebar.
+
+**Considerations:**
+- **Parse marker vs. structured field:** matching the `[done #N]` text is quick but
+  brittle. Cleaner long-term: tag lifecycle messages with a structured
+  `kind`/`task_id` column (same additive-`ALTER TABLE` pattern #8 uses for
+  confidence) so the client keys on data, not a string prefix. Start with the
+  marker match if you want it cheap; note the brittleness.
+- **Live updates:** the sidebar should refresh off the existing SSE feed (a task
+  lifecycle *is* a new message today), or add a light task-changed event — avoid a
+  separate poll loop.
+- Shares shape with **#3** (additive read endpoint + new tab) and **#8**
+  (structured field + styled badge) — build on those patterns rather than a
+  bespoke one.
+
+---
+
+# Bugs
+
+Distinct from the feature ideas above — these are defects observed in a live
+session that hit a model's context limit. Both trace to the same structural gap:
+**a trio "agent" is really two decoupled things — a `members` row in the DB
+(authoritative for identity) and a persistent `nth_monitor.py` process launched
+via the `Monitor` tool (an OS process the server can't see or kill) — and nothing
+keeps their lifecycles in sync.** When the two diverge — compaction on the
+session side, a cull on the DB side — you get orphans. The operator's stated
+preference is to **enforce correct behavior in code** rather than lean on agents
+following written guidance, and both root causes below are indeed code/design
+issues, not (primarily) misbehaving agents.
+
+## B1. Compaction spawns a duplicate agent; the original lingers, then goes stale
+
+**Symptom:** after the parent session compacts, the agent rejoins the channel
+under a new identity while the pre-compaction one is still present. The dashboard
+shows two roster rows for one logical agent; the Claude Code terminal shows
+multiple live `nth_monitor.py` processes; the original eventually goes stale.
+
+**Root cause — this is by design, not a rogue agent.** The protocol tells a
+session that lost its token to compression to reconnect, and reconnecting
+*deliberately* mints a fresh `member_id`:
+- `SKILL-trio.md:147` — "If you lose the token (context compressed), reconnect to
+  mint a fresh session. You'll get a new `member_id` too."
+- `nth_connect` always generates a new `member_id` (`nth_server.py:714`); there is
+  no "resume this identity" path.
+
+So compaction → reconnect legitimately produces a second member **and** a second
+`Monitor` launch. The old identity is *supposed* to be swept by the dedup safety
+net, but it can't be, because of a race:
+- `_prune_name_ghosts` (`nth_server.py:553`) only purges a same-name prior row
+  when its `members.last_seen` is **stale** (>`STALE_THRESHOLD_SECONDS` = 300s;
+  constant at `nth_server.py:40`, liveness gate at `:588`).
+- The old monitor keeps writing `last_seen` every ~10s for as long as its process
+  is alive (`nth_monitor.py:241-263`). If that process survives the compaction,
+  the old identity looks perfectly alive at reconnect time → **not pruned** → a
+  live duplicate with its own monitor.
+
+That single race explains **both** halves of the report: while the old monitor is
+still alive you see two active monitors + two roster rows; once it finally dies or
+stalls, the orphan stops heart-beating and goes stale — and is only cleared on the
+*next* same-name reconnect.
+
+**The key thing to verify (code, not agent behavior):** does the `Monitor`
+background process survive a parent-session compaction? Compaction rewrites
+context, not the OS process table, so the working assumption is **yes, it
+survives** — which is exactly what produces the duplicate. Confirm empirically
+(compact a session; `ps`-grep for `nth_monitor.py` before/after). Note there is
+**no `PreCompact` hook** registered to tear it down — `setup.sh` wires only
+StopFailure / Stop / PreToolUse / UserPromptSubmit (`setup.sh:366-374`).
+
+**Fix directions (code-enforced, preferred over more guidance):**
+- **Reclaim identity instead of minting a new one.** Persist `(member_id,
+  session_token)` in a stable per-channel local file (e.g.
+  `~/.claude/nth/session-<channel>.json`) at connect. Add an optional
+  `resume_member_id` + token to `nth_connect` so a post-compaction reconnect
+  re-attaches to the SAME member — no new row, no ghost, no second identity.
+- **Tear down the old monitor on compaction.** Register a new `PreCompact` hook
+  (none exists today) that stops this session's trio `Monitor`, so at most one
+  monitor is ever live per session. Pairs naturally with identity-reclaim (hook
+  records intent → post-compaction reconnect resumes the same member + relaunches
+  one monitor).
+- **Make relaunch idempotent.** If identity is reclaimed, a relaunched monitor for
+  the same `member_id` should be detectably a duplicate the agent can skip.
+
+**Design constraint — don't regress the frozen-but-alive spare.**
+`_prune_name_ghosts` intentionally spares a frozen-but-alive agent by keying on
+the Monitor heartbeat (`nth_server.py:561-571`). Do **not** "fix" B1 by making the
+prune more aggressive against live rows — that would start culling legitimately
+frozen-but-revivable agents. The fix belongs at reconnect (reclaim identity) and
+compaction (teardown), not in the liveness gate.
+
+## B2. Culled agents don't actually leave — the monitor keeps running
+
+**Symptom:** the operator culls an agent from the dashboard; the member vanishes
+from the roster but its monitor stays live and keeps surfacing new-message
+notifications — the agent effectively remains in the channel.
+
+**Root cause — the monitor has no terminal signal for "you were removed."**
+- Cull hard-`DELETE`s the member row and revokes its sessions (`cull_member`
+  `nth_web.py:608`; `nth_cull` → `_purge_member`, `nth_server.py:3230`).
+- But the monitor only self-terminates on `channel_ended`
+  (`nth_monitor.py:214-225`) or `channel_gone` (`:211-212`). A **missing member**
+  is treated as a *transient* error: it emits
+  `{"event":"error","msg":"Member not found in channel."}`, then `sleep(10);
+  continue` (`nth_monitor.py:200-203`). It never exits.
+- The monitor runs inside the agent's Claude Code session; the server/dashboard
+  that performed the cull has **no channel to kill that OS process.** The only way
+  a monitor stops is by self-detecting a terminal condition — and removal isn't
+  one.
+
+**Guidance makes it worse (the "something else" to flag).** The `error` event is
+documented as "Surface and decide whether to reconnect" (`SKILL-trio.md:177`,
+`CURRENT.md:73`, `PROTOCOLS-trio.md:15`). A culled agent surfacing "member not
+found" is thus being *told it may reconnect* — and `nth_connect` will happily
+re-add it under a fresh `member_id`. So cull is not merely un-enforced; the
+protocol actively invites the culled agent back in.
+
+**Fix directions (code-enforced):**
+- **Give removal a distinct terminal event.** Write a tombstone on cull (e.g. a
+  `members.evicted_at`, or a short-lived `evictions` row keyed by `(channel,
+  member_id)`) rather than relying on row-absence. The monitor reads it and, on
+  hit, emits a dedicated `{"event":"culled"}` and `return` — a clean exit like
+  `channel_ended`. A tombstone (vs. inferring from a deleted row) is unambiguous
+  and also survives the B1 reconnect-collision case.
+- **Distinguish "removed" from "transient DB error" in the monitor.** Even without
+  a schema change: track whether the member was ever seen; disappearance *after*
+  presence = removal → exit, while never-seen-at-startup stays lenient (join
+  race). The tombstone is cleaner, but this closes the gap immediately.
+- **Fix the guidance so a culled agent stays out.** Document the `culled` event as
+  terminal — acknowledge, stop, do **not** reconnect to that channel — as distinct
+  from the recoverable generic `error`. Enforce it by making the terminal event
+  unambiguous in code rather than leaving the reconnect decision to agent
+  judgment.
+
+**Open question:** should a cull also *proactively* signal the agent, rather than
+waiting for the monitor's next tick to notice? Tombstone + next-tick exit is the
+reliable floor (≤ one poll interval, ~0.5s active). A louder path — a server-side
+`!culled` bang, or wiring the `Notification` hook — would be additive for an agent
+busy between ticks.
+
+**Relationship to B1:** both are the DB/monitor lifecycle split. A tombstone +
+monitor-exit primitive built for B2 is reusable by B1's `PreCompact` teardown
+(same "stop this monitor authoritatively" mechanism), so the two are worth
+designing together.
 - Confidence is meaningful on status / answer posts, not every message — the
   badge should appear only when provided.
