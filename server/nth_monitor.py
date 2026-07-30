@@ -38,6 +38,14 @@ Filter modes (pick ONE; default = all):
                        No wake on unrelated chatter between other members.
     --filter at     — wake only on @pings. #pound refs are silent.
 
+The --filter arg is only a SEED. The live source of truth is the
+members.filter_mode DB column, which the monitor READS every tick — so an
+operator can retune an agent's wake filter from the web dashboard with no
+restart (picked up on the next tick). The launch arg is written into the
+column only when it is null (a fresh member); once the column holds a value
+the DB wins and the arg is ignored. An unknown/invalid mode fails open (wake
+on everything), so a bad write can never silently mute an agent.
+
 Bangs (`!name` / `!all`) ALWAYS wake the target regardless of filter. They
 are the last-resort / channel-close signal and deliberately bypass every
 opt-out. Agents cannot suppress bangs; using bang for routine messages is
@@ -198,11 +206,23 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
             # on OperationalError before reaching the sleeping-check.
             check_interval = ACTIVE_INTERVAL
             try:
-                member = db.execute(
-                    "SELECT last_seen, last_read, status_text "
-                    "FROM members WHERE channel = ? AND id = ?",
-                    (channel, member_id),
-                ).fetchone()
+                # filter_mode (v7.2+) is the operator-adjustable wake filter and
+                # the single source of truth for should_wake() — read it every
+                # tick alongside the liveness columns. A pre-v7.2 schema without
+                # the column drops to the older SELECT and falls back to the
+                # launch --filter arg (see the wake-filter block below).
+                try:
+                    member = db.execute(
+                        "SELECT last_seen, last_read, status_text, filter_mode "
+                        "FROM members WHERE channel = ? AND id = ?",
+                        (channel, member_id),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    member = db.execute(
+                        "SELECT last_seen, last_read, status_text "
+                        "FROM members WHERE channel = ? AND id = ?",
+                        (channel, member_id),
+                    ).fetchone()
 
                 if not member:
                     # A missing member row is ambiguous. Two causes:
@@ -251,6 +271,34 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                     emit({"event": "channel_ended", "ended_by": ender_name})
                     return
 
+                # --- Wake filter: the DB column is the source of truth ---
+                # Operator-adjustable wake filter (feature #4): should_wake()
+                # follows members.filter_mode, not the launch --filter arg. The
+                # launch arg only SEEDS a null column (fresh member / first run);
+                # once the column holds a value — seeded here or set by the
+                # operator from the dashboard — the DB value wins and the launch
+                # arg is ignored. A change is picked up on the NEXT tick, with no
+                # restart. A pre-v7.2 schema without the column falls back to the
+                # launch arg. Invalid values fail open in should_wake() below.
+                if "filter_mode" in member.keys():
+                    db_mode = member["filter_mode"]
+                    if db_mode is None:
+                        # Seed the null column ONCE with the launch arg, then
+                        # read it back on later ticks. Use the seed for this
+                        # tick's wake decisions regardless; a failed write is
+                        # best-effort and simply retries on the next tick.
+                        effective_mode = filter_mode
+                        db.execute(
+                            "UPDATE members SET filter_mode = ? "
+                            "WHERE channel = ? AND id = ?",
+                            (filter_mode, channel, member_id),
+                        )
+                        db.commit()
+                    else:
+                        effective_mode = db_mode
+                else:
+                    effective_mode = filter_mode
+
                 # Decouple heartbeat writes from poll rate. At 0.5s active polling
                 # we'd otherwise do ~172k fsync-bearing commits/day just to bump a
                 # timestamp. The server's _sentinel_nag() threshold is 300s, so
@@ -267,23 +315,18 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if (mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL
                         or wall - last_heartbeat_wall >= HEARTBEAT_INTERVAL):
                     now_ts = now_iso()
-                    # Best-effort filter_mode write (added v7.2). Older DBs
-                    # without the column drop back to the pre-v7.2 heartbeat.
-                    try:
-                        db.execute(
-                            "UPDATE members SET last_seen = ?, "
-                            "messenger_heartbeat = ?, watchdog_heartbeat = ?, "
-                            "filter_mode = ? "
-                            "WHERE channel = ? AND id = ?",
-                            (now_ts, now_ts, now_ts, filter_mode, channel, member_id),
-                        )
-                    except sqlite3.OperationalError:
-                        db.execute(
-                            "UPDATE members SET last_seen = ?, "
-                            "messenger_heartbeat = ?, watchdog_heartbeat = ? "
-                            "WHERE channel = ? AND id = ?",
-                            (now_ts, now_ts, now_ts, channel, member_id),
-                        )
+                    # Heartbeat only — deliberately does NOT write filter_mode.
+                    # The monitor now READS filter_mode as the source of truth
+                    # (see the wake-filter block above); mirroring the launch arg
+                    # back into the column each tick would clobber operator
+                    # changes made from the dashboard. These three columns all
+                    # predate v7.2, so this UPDATE needs no schema fallback.
+                    db.execute(
+                        "UPDATE members SET last_seen = ?, "
+                        "messenger_heartbeat = ?, watchdog_heartbeat = ? "
+                        "WHERE channel = ? AND id = ?",
+                        (now_ts, now_ts, now_ts, channel, member_id),
+                    )
                     db.commit()
                     last_heartbeat_mono = mono
                     last_heartbeat_wall = wall
@@ -343,7 +386,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if unread:
                     local_hwm = max(m["id"] for m in unread)
 
-                    mode = filter_mode if filter_mode in FILTER_MODES else "all"
+                    mode = effective_mode if effective_mode in FILTER_MODES else "all"
                     relevant = []
                     for m in unread:
                         mraw = m["mentions"] if "mentions" in m.keys() else ""
