@@ -1125,6 +1125,11 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
     and leaves a breadcrumb bob can read on wake. "!all channel closing in
     60s" wakes every member unconditionally.
 
+    DM auto-scope: if reply_to points at a private DM you participate in, this
+    reply is automatically kept private to the SAME people — a reply to a DM
+    stays a DM, no recipient list needed. A reply to a broadcast stays a
+    broadcast. Use trio_dm (with `to`) to start a new DM or override scope.
+
     Set task=True to simultaneously post the message as a claimable task.
     Set pin=True to pin this message as the channel objective (shown in
     nth_status and nth_connect for new joiners). Only one pin per channel.
@@ -1204,6 +1209,13 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             if not target:
                 return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
 
+        # Auto-scope DM replies: a reply to a DM STAYS a DM to the same people
+        # (code-enforced, participant-gated — see _inherited_dm_recipients).
+        # trio_send never takes explicit recipients, so this is the only way a
+        # trio_send reply becomes private, and it only ever narrows scope.
+        reader_kind = member["kind"] if "kind" in member.keys() else "agent"
+        recipients_json = _inherited_dm_recipients(db, channel, reply_to, member_id, reader_kind)
+
         now = now_iso()
         task_id = None
 
@@ -1273,15 +1285,23 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
         # Detect @pings, #pounds, and !bangs against the roster (shared helper).
         mention_ids, ref_ids, bang_ids = _parse_sigils(db, channel, content)
+        # If this reply inherited a DM scope, auto-wake its recipients (mirror
+        # trio_dm): they CAN see it, so add them to the ping set even if the
+        # replier didn't @them. Visibility stays governed by `recipients`.
+        if recipients_json is not None:
+            for rid in json.loads(recipients_json):
+                if rid not in mention_ids:
+                    mention_ids.append(rid)
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
         bangs_json = json.dumps(bang_ids) if bang_ids else ""
 
         cur = db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
-            "author_session, reply_to, confidence, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "recipients, author_session, reply_to, confidence, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
+             recipients_json if recipients_json is not None else "[]",
              author_session, reply_to, confidence_val, now),
         )
         msg_id = cur.lastrowid
@@ -1384,6 +1404,65 @@ def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
         elif rid not in recipient_ids:
             recipient_ids.append(rid)
     return recipient_ids, unresolved
+
+
+def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
+                             sender_kind: str = "agent"):
+    """Auto-scope a reply so a reply to a DM STAYS a DM to the same people.
+
+    Returns a JSON recipients string to stamp on the reply, or None to leave it
+    a broadcast (the caller's default). The rule, code-enforced so a member's
+    reply can never accidentally leak a private thread:
+
+      • reply_to points at a BROADCAST (empty recipients) → None (a reply to a
+        broadcast stays a broadcast — no change).
+      • reply_to points at a DM (non-empty recipients) AND the replier is a
+        PARTICIPANT of that DM (its original sender, one of its recipients, or
+        the all-seeing operator) → inherit the ORIGINAL participant set
+        {original_sender} ∪ recipients, minus the replier itself (the sender
+        always sees their own posts via can_see), so exactly the same people
+        can read the reply. Never empty: a self-addressed thread falls back to
+        the full participant set rather than degrading to a broadcast (which
+        would be a privacy inversion).
+      • the replier is NOT a participant → None. A non-participant must not be
+        able to widen or narrow a thread they were never in; their reply is
+        treated as an ordinary broadcast of their own words (it carries none of
+        the DM's content), so nothing leaks.
+
+    Inheritance only ever NARROWS visibility (broadcast→scoped); it can never
+    turn a DM into a broadcast. Callers that pass explicit recipients (trio_dm's
+    `to`, the web DM tab) skip this entirely — explicit recipients win.
+    """
+    if reply_to is None:
+        return None
+    try:
+        row = db.execute(
+            "SELECT member_id, recipients FROM messages WHERE id = ? AND channel = ?",
+            (reply_to, channel),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Pre-migration DB with no recipients column — nothing to inherit.
+        return None
+    if not row:
+        return None
+    recips = parse_recipients(row["recipients"] if "recipients" in row.keys() else "")
+    if not recips:
+        return None  # reply to a broadcast stays a broadcast
+    orig_sender = row["member_id"]
+    # Participant guard: only a participant (or the all-seeing operator) inherits.
+    is_participant = (
+        sender_id == orig_sender
+        or sender_id in recips
+        or is_all_seeing(sender_id, sender_kind)
+    )
+    if not is_participant:
+        return None
+    # Ordered-unique participant set, then drop the replier (sees own posts).
+    participants = list(dict.fromkeys([orig_sender, *recips]))
+    inherited = [p for p in participants if p != sender_id]
+    if not inherited:
+        inherited = participants  # self-thread: keep private, never broadcast
+    return json.dumps(inherited)
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_dm")
