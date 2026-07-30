@@ -247,3 +247,73 @@ prompts when a human is in the channel (ask via `@operator` through `trio_send`
 instead). So this state doubles as a **detector for an agent that ignored that
 guidance and is now silently blocking the room** — which is the argument for
 making it loud.
+
+---
+
+## 7. Mention-scoped chime (audio)
+
+**What:** Let the operator set the dashboard chime to sound **only when a
+message `@mentions` them**, rather than on every new message. Options:
+off / `@mentions` only / any message.
+
+**Substrate that already exists (most of it):**
+- The client already has a chime (`btn-sound` / `soundEnabled` /
+  `chimeVolume`), but it's all-or-nothing — its tooltip literally reads "play a
+  chime on any new message."
+- **Desktop notifications already have exactly this scope** —
+  `notifyScope: 'mention' | 'all'` (plus `notifyWhen: 'hidden' | 'always'`),
+  keyed on `@you` where "you" is the operator member `_op_<hostname>`. So the
+  mention-of-operator predicate is already computed; the chime just doesn't
+  consult it.
+- The settings drawer (`#settings-panel`) already renders `<select>` set-rows
+  and a volume range — the natural home for the control.
+
+**What's new:**
+- Give the chime a `mention | all` scope (reuse `notifyScope`, or add a parallel
+  `soundScope`), gating the existing chime on the mention predicate.
+- One `<select>` in the settings drawer, persisted to `localStorage` alongside
+  the other sound settings.
+
+**Notes:**
+- Purely client-side — no server or schema change.
+- Probably keep chime scope *independent* of the desktop-notify scope: a user
+  may want a quiet chime on all messages but a desktop popup only on
+  `@mentions`, or the reverse.
+
+---
+
+## 8. Structured confidence — tool-call field + styled badge
+
+**What:** Make an agent's confidence (`high` / `medium` / `low`) a first-class
+parameter of `trio_send` rather than a word tacked onto the end of the message
+text, and render it as a small color-coded **badge** attached to the message.
+
+**Current state (convention only):**
+- Confidence is purely a text convention today — the SKILL doc tells agents to
+  append "high/medium/low" to status posts, and the server even reminds them
+  ("3-call cadence with confidence (high/medium/low)"). Nothing is structured:
+  `messages` has no confidence column and `nth_send(...)` has no confidence
+  param.
+
+**What's new:**
+- Add an optional `confidence` enum param to `nth_send` (nullable — absent = no
+  badge).
+- Add a nullable `confidence` column to `messages` (same additive `ALTER TABLE`
+  pattern already used for `last_turn_end`).
+- Include it in the `_message_event` SSE payload.
+- Render a styled badge in the client (e.g. green / amber / red) bound to the
+  message, instead of trailing prose.
+
+**Payoff beyond aesthetics:**
+- Structured confidence lets the dashboard **highlight or filter low-confidence
+  posts** — which the cadence-escalation protocol already cares about ("second
+  consecutive low → ask for help"), and could even drive automated escalation
+  detection.
+
+**Considerations:**
+- The text-suffix convention is baked across the skill docs and current agent
+  habits. Keep backward-compat (appending text still works) and update SKILL
+  guidance to prefer the param. Absent confidence must render cleanly (no empty
+  badge).
+- Confidence is meaningful on status / answer posts, not every message — the
+  badge should appear only when provided.
