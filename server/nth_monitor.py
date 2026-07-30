@@ -319,7 +319,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 # on old DBs just get the pre-bang behavior.
                 try:
                     unread = db.execute(
-                        "SELECT id, mentions, refs, bangs, member_name, content FROM messages "
+                        "SELECT id, mentions, refs, bangs, recipients, member_id, member_name, content FROM messages "
                         "WHERE channel = ? AND id > ? AND member_id != ? "
                         "ORDER BY id",
                         (channel, local_hwm, member_id),
@@ -341,7 +341,22 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         ).fetchall()
 
                 if unread:
+                    # Advance the LOCAL watermark over the whole raw batch first,
+                    # so a DM this agent can't see still moves the cursor past it
+                    # (it must not re-surface every tick). Then drop DMs this
+                    # member isn't a recipient of BEFORE should_wake — otherwise
+                    # a new_messages event would carry a content `preview` of a
+                    # DM addressed to someone else, which is itself the leak. The
+                    # monitor only ever runs for an agent (member_id is its own),
+                    # so kind='agent' here; a pre-migration row (no recipients)
+                    # is treated as a broadcast (visible), unchanged.
                     local_hwm = max(m["id"] for m in unread)
+                    unread = [
+                        m for m in unread
+                        if can_see(member_id, "agent",
+                                   (m["member_id"] if "member_id" in m.keys() else None),
+                                   (m["recipients"] if "recipients" in m.keys() else ""))
+                    ]
 
                     mode = filter_mode if filter_mode in FILTER_MODES else "all"
                     relevant = []
