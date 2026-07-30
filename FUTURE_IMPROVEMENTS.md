@@ -315,5 +315,134 @@ text, and render it as a small color-coded **badge** attached to the message.
   habits. Keep backward-compat (appending text still works) and update SKILL
   guidance to prefer the param. Absent confidence must render cleanly (no empty
   badge).
+
+---
+
+# Bugs
+
+Distinct from the feature ideas above — these are defects observed in a live
+session that hit a model's context limit. Both trace to the same structural gap:
+**a trio "agent" is really two decoupled things — a `members` row in the DB
+(authoritative for identity) and a persistent `nth_monitor.py` process launched
+via the `Monitor` tool (an OS process the server can't see or kill) — and nothing
+keeps their lifecycles in sync.** When the two diverge — compaction on the
+session side, a cull on the DB side — you get orphans. The operator's stated
+preference is to **enforce correct behavior in code** rather than lean on agents
+following written guidance, and both root causes below are indeed code/design
+issues, not (primarily) misbehaving agents.
+
+## B1. Compaction spawns a duplicate agent; the original lingers, then goes stale
+
+**Symptom:** after the parent session compacts, the agent rejoins the channel
+under a new identity while the pre-compaction one is still present. The dashboard
+shows two roster rows for one logical agent; the Claude Code terminal shows
+multiple live `nth_monitor.py` processes; the original eventually goes stale.
+
+**Root cause — this is by design, not a rogue agent.** The protocol tells a
+session that lost its token to compression to reconnect, and reconnecting
+*deliberately* mints a fresh `member_id`:
+- `SKILL-trio.md:147` — "If you lose the token (context compressed), reconnect to
+  mint a fresh session. You'll get a new `member_id` too."
+- `nth_connect` always generates a new `member_id` (`nth_server.py:714`); there is
+  no "resume this identity" path.
+
+So compaction → reconnect legitimately produces a second member **and** a second
+`Monitor` launch. The old identity is *supposed* to be swept by the dedup safety
+net, but it can't be, because of a race:
+- `_prune_name_ghosts` (`nth_server.py:553`) only purges a same-name prior row
+  when its `members.last_seen` is **stale** (>`STALE_THRESHOLD_SECONDS` = 300s;
+  constant at `nth_server.py:40`, liveness gate at `:588`).
+- The old monitor keeps writing `last_seen` every ~10s for as long as its process
+  is alive (`nth_monitor.py:241-263`). If that process survives the compaction,
+  the old identity looks perfectly alive at reconnect time → **not pruned** → a
+  live duplicate with its own monitor.
+
+That single race explains **both** halves of the report: while the old monitor is
+still alive you see two active monitors + two roster rows; once it finally dies or
+stalls, the orphan stops heart-beating and goes stale — and is only cleared on the
+*next* same-name reconnect.
+
+**The key thing to verify (code, not agent behavior):** does the `Monitor`
+background process survive a parent-session compaction? Compaction rewrites
+context, not the OS process table, so the working assumption is **yes, it
+survives** — which is exactly what produces the duplicate. Confirm empirically
+(compact a session; `ps`-grep for `nth_monitor.py` before/after). Note there is
+**no `PreCompact` hook** registered to tear it down — `setup.sh` wires only
+StopFailure / Stop / PreToolUse / UserPromptSubmit (`setup.sh:366-374`).
+
+**Fix directions (code-enforced, preferred over more guidance):**
+- **Reclaim identity instead of minting a new one.** Persist `(member_id,
+  session_token)` in a stable per-channel local file (e.g.
+  `~/.claude/nth/session-<channel>.json`) at connect. Add an optional
+  `resume_member_id` + token to `nth_connect` so a post-compaction reconnect
+  re-attaches to the SAME member — no new row, no ghost, no second identity.
+- **Tear down the old monitor on compaction.** Register a new `PreCompact` hook
+  (none exists today) that stops this session's trio `Monitor`, so at most one
+  monitor is ever live per session. Pairs naturally with identity-reclaim (hook
+  records intent → post-compaction reconnect resumes the same member + relaunches
+  one monitor).
+- **Make relaunch idempotent.** If identity is reclaimed, a relaunched monitor for
+  the same `member_id` should be detectably a duplicate the agent can skip.
+
+**Design constraint — don't regress the frozen-but-alive spare.**
+`_prune_name_ghosts` intentionally spares a frozen-but-alive agent by keying on
+the Monitor heartbeat (`nth_server.py:561-571`). Do **not** "fix" B1 by making the
+prune more aggressive against live rows — that would start culling legitimately
+frozen-but-revivable agents. The fix belongs at reconnect (reclaim identity) and
+compaction (teardown), not in the liveness gate.
+
+## B2. Culled agents don't actually leave — the monitor keeps running
+
+**Symptom:** the operator culls an agent from the dashboard; the member vanishes
+from the roster but its monitor stays live and keeps surfacing new-message
+notifications — the agent effectively remains in the channel.
+
+**Root cause — the monitor has no terminal signal for "you were removed."**
+- Cull hard-`DELETE`s the member row and revokes its sessions (`cull_member`
+  `nth_web.py:608`; `nth_cull` → `_purge_member`, `nth_server.py:3230`).
+- But the monitor only self-terminates on `channel_ended`
+  (`nth_monitor.py:214-225`) or `channel_gone` (`:211-212`). A **missing member**
+  is treated as a *transient* error: it emits
+  `{"event":"error","msg":"Member not found in channel."}`, then `sleep(10);
+  continue` (`nth_monitor.py:200-203`). It never exits.
+- The monitor runs inside the agent's Claude Code session; the server/dashboard
+  that performed the cull has **no channel to kill that OS process.** The only way
+  a monitor stops is by self-detecting a terminal condition — and removal isn't
+  one.
+
+**Guidance makes it worse (the "something else" to flag).** The `error` event is
+documented as "Surface and decide whether to reconnect" (`SKILL-trio.md:177`,
+`CURRENT.md:73`, `PROTOCOLS-trio.md:15`). A culled agent surfacing "member not
+found" is thus being *told it may reconnect* — and `nth_connect` will happily
+re-add it under a fresh `member_id`. So cull is not merely un-enforced; the
+protocol actively invites the culled agent back in.
+
+**Fix directions (code-enforced):**
+- **Give removal a distinct terminal event.** Write a tombstone on cull (e.g. a
+  `members.evicted_at`, or a short-lived `evictions` row keyed by `(channel,
+  member_id)`) rather than relying on row-absence. The monitor reads it and, on
+  hit, emits a dedicated `{"event":"culled"}` and `return` — a clean exit like
+  `channel_ended`. A tombstone (vs. inferring from a deleted row) is unambiguous
+  and also survives the B1 reconnect-collision case.
+- **Distinguish "removed" from "transient DB error" in the monitor.** Even without
+  a schema change: track whether the member was ever seen; disappearance *after*
+  presence = removal → exit, while never-seen-at-startup stays lenient (join
+  race). The tombstone is cleaner, but this closes the gap immediately.
+- **Fix the guidance so a culled agent stays out.** Document the `culled` event as
+  terminal — acknowledge, stop, do **not** reconnect to that channel — as distinct
+  from the recoverable generic `error`. Enforce it by making the terminal event
+  unambiguous in code rather than leaving the reconnect decision to agent
+  judgment.
+
+**Open question:** should a cull also *proactively* signal the agent, rather than
+waiting for the monitor's next tick to notice? Tombstone + next-tick exit is the
+reliable floor (≤ one poll interval, ~0.5s active). A louder path — a server-side
+`!culled` bang, or wiring the `Notification` hook — would be additive for an agent
+busy between ticks.
+
+**Relationship to B1:** both are the DB/monitor lifecycle split. A tombstone +
+monitor-exit primitive built for B2 is reusable by B1's `PreCompact` teardown
+(same "stop this monitor authoritatively" mechanism), so the two are worth
+designing together.
 - Confidence is meaningful on status / answer posts, not every message — the
   badge should appear only when provided.
