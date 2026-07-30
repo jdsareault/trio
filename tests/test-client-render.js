@@ -394,6 +394,39 @@ check('confBadge: an out-of-enum value renders no badge', () => {
   assert.strictEqual(H.confBadge('unsure'), null);
 });
 
+// ── applyConfBadge (DOM): retract clears the badge, mirroring target bars ─────
+function makeMsgWithHead() {
+  const div = new FakeElement('div');
+  const head = new FakeElement('div');
+  head.className = 'head';
+  const acks = new FakeElement('span');
+  acks.className = 'acks';
+  head.appendChild(acks);
+  div.appendChild(head);
+  return { div, head };
+}
+check('applyConfBadge: adds a badge before .acks when confidence is present', () => {
+  const { div, head } = makeMsgWithHead();
+  H.applyConfBadge(div, { id: 1, content: 'x', confidence: 'medium' });
+  const badges = head.querySelectorAll('.conf-badge');
+  assert.strictEqual(badges.length, 1, 'exactly one badge');
+  assert.strictEqual(badges[0].textContent, 'medium');
+});
+check('applyConfBadge: a retracted message clears its confidence badge', () => {
+  const { div, head } = makeMsgWithHead();
+  H.applyConfBadge(div, { id: 1, content: 'x', confidence: 'high' });
+  assert.strictEqual(head.querySelectorAll('.conf-badge').length, 1, 'seeded badge');
+  H.applyConfBadge(div, { id: 1, content: 'x', confidence: 'high', retracted_at: 'now' });
+  assert.strictEqual(head.querySelectorAll('.conf-badge').length, 0,
+    'retracted message should carry no confidence badge');
+});
+check('applyConfBadge: clearing confidence (absent) removes an existing badge', () => {
+  const { div, head } = makeMsgWithHead();
+  H.applyConfBadge(div, { id: 1, content: 'x', confidence: 'low' });
+  H.applyConfBadge(div, { id: 1, content: 'x', confidence: null });
+  assert.strictEqual(head.querySelectorAll('.conf-badge').length, 0, 'no stale badge');
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);

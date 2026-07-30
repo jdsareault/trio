@@ -4989,6 +4989,9 @@ INDEX_HTML = r"""<!doctype html>
     if (!head) return;
     const existing = head.querySelector('.conf-badge');
     if (existing) existing.remove();
+    // A retracted message shows "[deleted]" — drop its badge too, mirroring
+    // applyTargetBars clearing sigils on retract.
+    if (m.retracted_at) return;
     if (isSystemContent(m.content || '')) return;
     const cb = confBadge(m.confidence);
     if (!cb) return;
@@ -7527,7 +7530,7 @@ INDEX_HTML = r"""<!doctype html>
     globalThis.__TRIO_TEST__ = {
       state,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
-      paintBody, applyTargetBars, formatTime, confBadge,
+      paintBody, applyTargetBars, formatTime, confBadge, applyConfBadge,
       isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
       taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
