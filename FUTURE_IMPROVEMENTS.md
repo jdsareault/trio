@@ -122,3 +122,76 @@ browser and the bytes are delivered to the agent as MCP `Image` blocks on poll).
   show a thumbnail. Either add Pillow to generate thumbnails (`?w=240` on the
   serve endpoint) or accept lazy-loaded full-res tiles for v1. Lean toward
   thumbnails if an agent might link dozens of images.
+
+---
+
+## 4. Operator-adjustable wake filter (from the dashboard)
+
+**What:** Let the operator change any agent's wake filter (`all` / `about` /
+`at`) on the fly from the agent detail dropdown in the web dashboard — no agent
+restart, no editing launch flags. Today the filter is chosen only by the agent
+itself, as a launch-time `--filter` arg on its `nth_monitor.py` process.
+
+**Substrate that already exists:**
+- `members.filter_mode` is already a per-member column (v7.2+). It's just used
+  backwards for this goal: the monitor *writes* its launch-time `--filter` arg
+  into the column each tick (a reporting mirror so the roster can show it),
+  rather than reading behavior from it.
+- `should_wake()` in `nth_monitor.py` is already a pure function of
+  `filter_mode` — no per-message state to migrate.
+
+**What's new:**
+- **Flip the monitor to READ `members.filter_mode` from the DB each tick**
+  instead of writing its static launch arg. The launch flag becomes only the
+  initial seed (used when the column is null). This makes the DB the **single
+  source of truth**, so operator and agent aren't fighting two mechanisms.
+- New endpoint (e.g. `POST /api/member/<id>/filter`) doing one
+  `UPDATE members SET filter_mode = ?`.
+- A dropdown in the agent detail panel posting to it.
+
+**Why it's low-risk:**
+- The monitor already touches the DB every tick, so reading one more column is
+  cheap; the change is picked up on the **next tick** (no restart).
+- Unknown/invalid modes already *fail open* (wake on everything), so a bad write
+  can't silently mute an agent.
+- Precedence rule: DB value wins once set; `--filter` only seeds a null column.
+
+---
+
+## 5. Two-axis filtering — separate "wakes on" from "can see" (FOR CONSIDERATION)
+
+**Status:** Exploratory — kept on the list for consideration, **not decided**.
+Materially larger than #4 and it shifts trio's transparency model, so it wants a
+deliberate yes/no rather than a near-term build. Depends on #4 (which delivers
+the "wakes on" half).
+
+**What:** Give each member two independent settings — **"wakes on"**
+(notification) and **"can see"** (readability) — as two dropdowns in the agent
+detail panel. Today there is no "can see" axis at all: `trio_poll` is
+`SELECT … WHERE channel=? AND id>?` with no per-member visibility predicate, so
+every member reads everything.
+
+**The elegant design (reuse one predicate for both axes):**
+- `should_wake()` already classifies each message per member
+  (ambient / pound / at / bang). Apply that **same predicate at read time**
+  (poll / history / pounds / SSE), not just at wake time in the monitor. Result:
+  two independent knobs sharing one engine.
+- e.g. *wakes on: `at`, can see: `about`* → interrupted only by `@pings`, but on
+  poll it reads everything about it (incl. `#pounds`) and not unrelated
+  cross-talk. Both default to `all` → today's behavior, unchanged.
+
+**Costs / open questions (why it's not a tweak):**
+- **Every read path must become member-aware:** `trio_poll`, `trio_history`,
+  `trio_pounds`, the SSE feed, **and** the conversation export. Miss one and
+  "can see" leaks.
+- **Watermark handling:** hidden messages must be *advanced past* without being
+  *returned*, or they sit unread forever / reappear. The `mentions_only` path
+  already wrestles with this tension — the pattern exists but needs care for a
+  stored per-member filter.
+- **Philosophical decision required:** the operator stays all-seeing
+  (superuser) while agents get scoped views. Coherent, but a real shift from
+  trio's "one transparent broadcast room" model + audit export. Choose on
+  purpose.
+- **Soft scoping, not security:** all agents share one SQLite DB, so "can see"
+  governs what the *server hands each member* at delivery time, not
+  cryptographic isolation. Don't present it as a trust boundary.
