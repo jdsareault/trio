@@ -1611,11 +1611,98 @@ STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
 
 
 # ───────── HTTP handler ─────────
+# ── multi-channel runtime registry ──
+# Historically nth_web served exactly one channel: main() created a single
+# EventHub + StallWatchdog and pinned the channel onto the handler class. The
+# unified hub serves EVERY channel from one process, so those become per-channel
+# runtimes created lazily on first request and cached for the process lifetime.
+# Nothing is eagerly started for channels nobody is watching.
+_RUNTIMES: Dict[str, Tuple["EventHub", "StallWatchdog"]] = {}
+_RUNTIMES_LOCK = threading.Lock()
+_DB_PATH_GLOBAL: Path = DB_PATH
+
+
+def get_channel_runtime(channel: str) -> Tuple["EventHub", "StallWatchdog"]:
+    """Return (hub, watchdog) for `channel`, creating + starting them on first
+    use. Thread-safe; cached for the process lifetime."""
+    with _RUNTIMES_LOCK:
+        rt = _RUNTIMES.get(channel)
+        if rt is None:
+            hub = EventHub(_DB_PATH_GLOBAL, channel)
+            hub.start()
+            wd = StallWatchdog(_DB_PATH_GLOBAL, channel)
+            wd.start()
+            _RUNTIMES[channel] = rt = (hub, wd)
+        return rt
+
+
+def stop_all_runtimes() -> None:
+    """Stop every live per-channel hub + watchdog (process shutdown)."""
+    with _RUNTIMES_LOCK:
+        for hub, wd in _RUNTIMES.values():
+            try:
+                hub.stop()
+            except Exception:
+                pass
+            try:
+                wd.stop()
+            except Exception:
+                pass
+        _RUNTIMES.clear()
+
+
+def channel_exists(channel: str) -> bool:
+    """True if `channel` is a real row in the channels table. Guards runtime
+    creation so a bogus ?channel= can't spin up a hub for a non-channel."""
+    if not channel:
+        return False
+    try:
+        db = sqlite3.connect(str(_DB_PATH_GLOBAL), timeout=5)
+        try:
+            row = db.execute(
+                "SELECT 1 FROM channels WHERE code = ?", (channel,)
+            ).fetchone()
+            return row is not None
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return False
+
+
 class NthWebHandler(BaseHTTPRequestHandler):
-    # Populated in main()
-    hub: Optional[EventHub] = None
-    channel: str = ""
+    # Populated in main(). `_default_channel` is the CLI-arg channel (back-compat
+    # single-channel mode); "" means multi-channel mode where the channel comes
+    # from each request's ?channel= param. The `channel` and `hub` properties
+    # resolve per-request — see below.
+    _default_channel: str = ""
     db_path: Path = DB_PATH
+
+    # ── per-request channel resolution ──
+    @property
+    def channel(self) -> str:
+        """The channel this request targets. Resolved once per request from the
+        ?channel= query param, falling back to the CLI-default channel. Cached
+        on the instance so repeated access doesn't re-parse."""
+        cached = getattr(self, "_resolved_channel", None)
+        if cached is not None:
+            return cached
+        want = ""
+        try:
+            want = (parse_qs(urlparse(self.path).query).get(
+                "channel", [""])[0] or "").strip()
+        except Exception:
+            want = ""
+        resolved = want or self._default_channel
+        self._resolved_channel = resolved
+        return resolved
+
+    @property
+    def hub(self) -> Optional["EventHub"]:
+        """The EventHub for this request's channel, or None if unresolved."""
+        ch = self.channel
+        if not ch:
+            return None
+        return get_channel_runtime(ch)[0]
 
     # Suppress default noisy logging
     def log_message(self, fmt: str, *args) -> None:
@@ -1700,6 +1787,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             token, ident, is_new = self._resolve_identity()
             self._json({
                 "channel": self.channel,
+                "default_channel": self._default_channel,
+                "multi": not self._default_channel,
                 "operator": {
                     "id": ident.member_id,
                     "name": ident.display_name,
@@ -1708,6 +1797,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 },
                 "server_host": socket.gethostname(),
             }, set_cookie_token=token if is_new else None)
+        elif path == "/api/channels":
+            self._handle_channels()
         elif path == "/api/events":
             self._serve_sse()
         elif path.startswith("/api/attachment/"):
@@ -1776,7 +1867,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self._json({"error": msg}, status=status)
 
     def _serve_sse(self) -> None:
-        assert self.hub is not None
+        # Multi-channel: the channel comes from ?channel= (or the CLI default).
+        # Guard runtime creation so a bogus channel can't spin up a hub.
+        if not channel_exists(self.channel):
+            self._error(404, "unknown channel")
+            return
+        hub = self.hub
+        if hub is None:
+            self._error(404, "unknown channel")
+            return
         # Resolve who is watching so the hub can scope the stream: only the
         # authenticated OPERATOR (loopback/tailscale) is all-seeing; a guest /
         # pending / any non-operator viewer receives only broadcasts, its own
@@ -1792,7 +1891,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = self.hub.subscribe(viewer_id=viewer_id, all_seeing=viewer_all_seeing)
+        q = hub.subscribe(viewer_id=viewer_id, all_seeing=viewer_all_seeing)
         try:
             last_heartbeat = time.monotonic()
             while True:
@@ -1811,7 +1910,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
-            self.hub.unsubscribe(q)
+            hub.unsubscribe(q)
 
     def _read_json_body(self, max_bytes: int = 16384) -> Optional[Dict[str, Any]]:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -2348,6 +2447,61 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
+
+    def _handle_channels(self) -> None:
+        """Read-only channel list for the sidebar: every channel in the DB with
+        active-member count, last-activity timestamp, and a short preview of the
+        most recent message. Powers the unified multi-channel client. Mirrors
+        _handle_tasks' identity gate + short read-connection idioms."""
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT c.code, c.status, c.pinned_message_id, "
+                "  (SELECT COUNT(*) FROM members m "
+                "     WHERE m.channel = c.code AND m.active = 1) AS members, "
+                "  (SELECT MAX(created_at) FROM messages msg "
+                "     WHERE msg.channel = c.code) AS last_at "
+                "FROM channels c "
+                "ORDER BY last_at DESC"
+            ).fetchall()
+            channels = []
+            for r in rows:
+                last_at = r["last_at"]
+                preview = ""
+                if last_at is not None:
+                    prow = db.execute(
+                        "SELECT member_name, content FROM messages "
+                        "WHERE channel = ? ORDER BY id DESC LIMIT 1",
+                        (r["code"],),
+                    ).fetchone()
+                    if prow is not None:
+                        who = (prow["member_name"] or "").strip()
+                        body = (prow["content"] or "").replace("\n", " ").strip()
+                        preview = (f"{who}: {body}" if who else body)[:80]
+                channels.append({
+                    "code": r["code"],
+                    "status": r["status"],
+                    "members": r["members"],
+                    "last_at": last_at,
+                    "preview": preview,
+                })
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "count": len(channels), "channels": channels})
 
     def _handle_tasks(self, parsed) -> None:
         """Read-only task board: every task in this channel, ordered by status
@@ -8951,8 +9105,12 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Web dashboard for a trio channel.")
-    ap.add_argument("channel", help="Channel code to observe.")
+    ap = argparse.ArgumentParser(description="Web dashboard for trio channels.")
+    ap.add_argument("channel", nargs="?", default=None,
+                    help="Channel code to observe. Omit to serve ALL channels "
+                         "(unified multi-channel client). When given, that "
+                         "channel is the default and its hub starts at boot "
+                         "(back-compat single-channel mode).")
     ap.add_argument("--host", default=None,
                     help="Interface to bind. Default 127.0.0.1. "
                          "Use --tailnet to bind 0.0.0.0 instead.")
@@ -8986,18 +9144,19 @@ def main() -> int:
     finally:
         _mig.close()
 
-    # Spin up the event hub before serving.
-    hub = EventHub(db_path, args.channel)
-    hub.start()
-
-    # Stall-watchdog: auto-resume sessions whose turn died to a transient API
-    # error (see StallWatchdog). Mirrors the hub — own thread, own connection.
-    watchdog = StallWatchdog(db_path, args.channel)
-    watchdog.start()
-
-    NthWebHandler.hub = hub
-    NthWebHandler.channel = args.channel
+    # Per-channel hubs + watchdogs are created lazily on first request (see
+    # get_channel_runtime). Point the registry at the DB and set the default
+    # channel on the handler.
+    global _DB_PATH_GLOBAL
+    _DB_PATH_GLOBAL = db_path
+    NthWebHandler._default_channel = args.channel or ""
     NthWebHandler.db_path = db_path
+
+    # Back-compat single-channel mode: if a channel was named, start its hub +
+    # watchdog eagerly so behaviour matches the old one-channel server (the
+    # stall-watchdog runs from boot rather than waiting for the first viewer).
+    if args.channel:
+        get_channel_runtime(args.channel)
 
     # Let multiple channel dashboards start without manual port coordination.
     requested_port = args.port
@@ -9021,8 +9180,7 @@ def main() -> int:
     server.daemon_threads = True
 
     def shutdown(_sig=None, _frm=None):
-        hub.stop()
-        watchdog.stop()
+        stop_all_runtimes()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
@@ -9030,7 +9188,7 @@ def main() -> int:
     # Banner
     ts_ip = get_tailscale_ip()
     print("nth_web serving:")
-    print(f"  channel:     {args.channel}")
+    print(f"  channel:     {args.channel or '(all channels)'}")
     print(f"  db:          {db_path}")
     if port != requested_port:
         print(f"  note:        port {requested_port} was busy — using {port} instead")
@@ -9048,8 +9206,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        hub.stop()
-        watchdog.stop()
+        stop_all_runtimes()
 
     return 0
 
