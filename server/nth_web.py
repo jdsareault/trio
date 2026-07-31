@@ -7743,7 +7743,9 @@ INDEX_HTML = r"""<!doctype html>
 
       const badge = document.createElement('span');
       badge.className = 'dm-unread';
-      if (t.unread > 0) { badge.textContent = t.unread > 99 ? '99+' : String(t.unread); }
+      // The thread on screen never shows an unread badge — it mirrors the bubble,
+      // which unconditionally excludes it (its watermark can lag the backscroll).
+      if (t.unread > 0 && !isCurrent) { badge.textContent = t.unread > 99 ? '99+' : String(t.unread); }
       else { badge.hidden = true; }
       row.appendChild(badge);
 
@@ -7764,7 +7766,10 @@ INDEX_HTML = r"""<!doctype html>
   // the picker is the deliberate "reach anyone" surface. Sorted by name.
   function dmPickerMembers() {
     return [...state.members.values()]
-      .filter((m) => m && m.id && m.id !== state.operator.id)
+      // Exclude the operator, and — inside a DM view — the counterparty already
+      // on screen (you're in that thread; picking it would just dup the tab).
+      .filter((m) => m && m.id && m.id !== state.operator.id
+                     && !(DM_MODE && m.id === DM_TARGET_ID))
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
   }
 
@@ -7810,7 +7815,13 @@ INDEX_HTML = r"""<!doctype html>
   function toggleDmPicker(force) {
     if (!dmPickerEl || !dmNewBtn) return;
     const show = (force !== undefined) ? force : dmPickerEl.hasAttribute('hidden');
-    if (show) { renderDmPicker(); dmPickerEl.removeAttribute('hidden'); dmNewBtn.classList.add('on'); }
+    if (show) {
+      renderDmPicker(); dmPickerEl.removeAttribute('hidden'); dmNewBtn.classList.add('on');
+      // Drop focus onto the first recipient so the picker is keyboard-drivable
+      // straight away (it's the primary "start a DM" surface).
+      const first = dmPickerEl.querySelector('.dm-pick-row');
+      if (first) first.focus();
+    }
     else { dmPickerEl.setAttribute('hidden', ''); dmNewBtn.classList.remove('on'); }
   }
   if (dmNewBtn) {
