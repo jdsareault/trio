@@ -3150,7 +3150,8 @@ INDEX_HTML = r"""<!doctype html>
     box-shadow: 0 0 0 1px var(--bg); pointer-events: none; }
   #btn-dm .dm-badge[hidden] { display: none; }
   #btn-dm.has-unread { border-color: var(--accent); color: var(--accent); }
-  body.dm-mode #btn-dm { display: none; }  /* already inside a DM tab */
+  /* The DMs button stays available inside a DM view so the operator can open the
+     inbox and hop straight to another thread without returning to the channel. */
 
   /* DM inbox panel — mirrors the settings drawer. */
   #dm-panel {
@@ -3167,6 +3168,8 @@ INDEX_HTML = r"""<!doctype html>
   .dm-thread { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
                border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
   .dm-thread:hover { background: var(--hover); border-color: var(--border); }
+  .dm-thread.dm-current { border-color: var(--accent); background: var(--hover); cursor: default; }
+  .dm-thread.dm-current .dm-name { color: var(--accent); }
   .dm-thread .dm-av { font-size: 15px; flex: 0 0 auto; }
   .dm-thread .dm-meta { flex: 1 1 auto; min-width: 0; }
   .dm-thread .dm-name { font-size: 12px; color: var(--fg); font-weight: 600;
@@ -5604,6 +5607,9 @@ INDEX_HTML = r"""<!doctype html>
     _initialSettleTimer = setTimeout(() => {
       _initialSettleTimer = null;
       state.initialLoad = false;
+      // The on-screen DM thread was just fully rendered — mark it read once so
+      // its backscroll doesn't linger in the bubble, then reflect that.
+      if (DM_MODE && DM_TARGET_ID) { markDmRead(DM_TARGET_ID); refreshDmBadge(); }
       requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
     }, 250);
   }
@@ -5674,7 +5680,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     // An edit/retract/delete of one of the operator's OWN DMs changes the inbox
     // preview (and a delete shouldn't keep counting toward unread) — refresh.
-    if (!DM_MODE && dmCounterparty(state.messages.get(m.id), state.operator.id)) {
+    if (dmCounterparty(state.messages.get(m.id), state.operator.id)) {
       refreshDmBadge();
       if (dmPanel && !dmPanel.hasAttribute('hidden')) renderDmInbox();
     }
@@ -6020,7 +6026,13 @@ INDEX_HTML = r"""<!doctype html>
     // refresh the unread bubble (and the inbox if it's open). Gated on the
     // message actually being the operator's DM so ordinary broadcast traffic
     // doesn't trigger a recompute.
-    if (!DM_MODE && dmCounterparty(m, state.operator.id)) {
+    const dmCp = dmCounterparty(m, state.operator.id);
+    if (dmCp) {
+      // In a DM view, keep the on-screen thread marked read so its own live
+      // traffic never lights the bubble; the bubble tracks OTHER threads. Only
+      // on live appends — the initial burst is watermarked once on settle
+      // (below) to avoid per-message localStorage churn across tabs.
+      if (DM_MODE && dmCp === DM_TARGET_ID && !state.initialLoad) markDmRead(dmCp);
       refreshDmBadge();
       if (dmPanel && !dmPanel.hasAttribute('hidden')) renderDmInbox();
     }
@@ -7627,8 +7639,14 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   function refreshDmBadge() {
-    if (DM_MODE || !dmCountEl || !btnDm) return;
-    const n = unreadDmCount(state.messages.values(), state.operator.id, state.dmRead);
+    if (!dmCountEl || !btnDm) return;
+    // In a DM view the thread on screen is being read, so it never contributes
+    // to the bubble — the count reflects OTHER conversations needing attention.
+    let n = 0;
+    for (const t of dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead)) {
+      if (DM_MODE && t.counterparty === DM_TARGET_ID) continue;
+      n += t.unread;
+    }
     if (n > 0) {
       dmCountEl.textContent = n > 99 ? '99+' : String(n);
       dmCountEl.hidden = false;
@@ -7661,9 +7679,10 @@ INDEX_HTML = r"""<!doctype html>
       const mem = state.members.get(t.counterparty);
       const nm = mem ? mem.name : t.counterparty;
       const anim = animalFor(mem || { id: t.counterparty });
+      const isCurrent = DM_MODE && t.counterparty === DM_TARGET_ID;
       const row = document.createElement('div');
-      row.className = 'dm-thread';
-      row.title = 'Open DM with ' + nm;
+      row.className = 'dm-thread' + (isCurrent ? ' dm-current' : '');
+      row.title = isCurrent ? 'This DM (already open)' : ('Open DM with ' + nm);
       // Keyboard-accessible like the settings drawer's real controls.
       row.setAttribute('role', 'button');
       row.tabIndex = 0;
@@ -7678,7 +7697,8 @@ INDEX_HTML = r"""<!doctype html>
       const name = document.createElement('div');
       name.className = 'dm-name';
       name.textContent = t.group ? (nm + ' · group') : nm;
-      if (t.group) row.title = 'Open DM with ' + nm + ' (part of a group DM — opens the 1:1 view)';
+      if (isCurrent) name.textContent = nm + ' · here';
+      else if (t.group) row.title = 'Open DM with ' + nm + ' (part of a group DM — opens the 1:1 view)';
       meta.appendChild(name);
       const prev = document.createElement('div');
       prev.className = 'dm-prev';
@@ -7695,9 +7715,12 @@ INDEX_HTML = r"""<!doctype html>
       else { badge.hidden = true; }
       row.appendChild(badge);
 
-      row.addEventListener('click', () => openDmTab(t.counterparty));
+      // The thread you're already viewing just closes the drawer — no point
+      // spawning a duplicate tab of the DM already on screen.
+      const activate = isCurrent ? () => toggleDmPanel(false) : () => openDmTab(t.counterparty);
+      row.addEventListener('click', activate);
       row.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDmTab(t.counterparty); }
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
       });
       dmListEl.appendChild(row);
     }
@@ -7712,7 +7735,7 @@ INDEX_HTML = r"""<!doctype html>
       renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
     } else { dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
   }
-  if (btnDm && !DM_MODE) {
+  if (btnDm) {
     btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
     document.addEventListener('click', (e) => {
       if (dmPanel.hasAttribute('hidden')) return;
