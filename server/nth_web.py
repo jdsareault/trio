@@ -3165,6 +3165,26 @@ INDEX_HTML = r"""<!doctype html>
   #dm-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
                  letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
   #dm-panel .dm-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
+  /* Inbox header row: title on the left, "+ New DM" affordance on the right. */
+  #dm-panel .dm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #dm-new-btn { font: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px;
+                border-radius: 4px; background: var(--bg2); color: var(--fg);
+                border: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
+  #dm-new-btn:hover, #dm-new-btn.on { background: var(--accent); color: var(--bg);
+                                      border-color: var(--accent); }
+  /* Recipient picker — a compact member list revealed under the header. */
+  #dm-picker { display: flex; flex-direction: column; gap: 2px;
+               padding: 4px; border: 1px solid var(--border); border-radius: 5px;
+               background: var(--bg); max-height: 40vh; overflow-y: auto; }
+  #dm-picker[hidden] { display: none; }
+  #dm-picker .dm-pick-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
+  .dm-pick-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+                 border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
+  .dm-pick-row:hover, .dm-pick-row:focus { background: var(--hover);
+                                           border-color: var(--border); outline: none; }
+  .dm-pick-row .dm-av { font-size: 15px; flex: 0 0 auto; }
+  .dm-pick-row .dm-pick-name { font-size: 12px; color: var(--fg); font-weight: 600;
+                               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dm-thread { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
                border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
   .dm-thread:hover { background: var(--hover); border-color: var(--border); }
@@ -4102,7 +4122,11 @@ INDEX_HTML = r"""<!doctype html>
     <h3>Settings</h3>
   </div>
   <div id="dm-panel" hidden>
-    <h3>Direct messages</h3>
+    <div class="dm-head">
+      <h3>Direct messages</h3>
+      <button type="button" id="dm-new-btn" title="Start a direct message with a channel member">+ New DM</button>
+    </div>
+    <div id="dm-picker" hidden></div>
     <div id="dm-list"></div>
   </div>
 
@@ -7620,6 +7644,8 @@ INDEX_HTML = r"""<!doctype html>
   const dmPanel = document.getElementById('dm-panel');
   const dmListEl = document.getElementById('dm-list');
   const dmCountEl = document.getElementById('dm-count');
+  const dmNewBtn = document.getElementById('dm-new-btn');
+  const dmPickerEl = document.getElementById('dm-picker');
 
   function dmReadKey() { return 'trio.dmRead.' + (state.channel || ''); }
   function loadDmRead() {
@@ -7726,6 +7752,65 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Members the operator can start a NEW DM with: everyone in the roster except
+  // themselves (agents AND other human operators). Distinct from the roster's
+  // per-agent Message action, which — like the old .dm-btn — skips _op_ humans;
+  // the picker is the deliberate "reach anyone" surface. Sorted by name.
+  function dmPickerMembers() {
+    return [...state.members.values()]
+      .filter((m) => m && m.id && m.id !== state.operator.id)
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  }
+
+  function renderDmPicker() {
+    if (!dmPickerEl) return;
+    dmPickerEl.textContent = '';
+    const members = dmPickerMembers();
+    if (!members.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-pick-empty';
+      empty.textContent = 'No one else in the channel yet.';
+      dmPickerEl.appendChild(empty);
+      return;
+    }
+    for (const m of members) {
+      const anim = animalFor(m);
+      const row = document.createElement('div');
+      row.className = 'dm-pick-row';
+      row.dataset.memberId = m.id;
+      row.title = 'Start a DM with ' + m.name;
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+
+      const av = document.createElement('span');
+      av.className = 'dm-av';
+      av.textContent = anim.emoji;
+      row.appendChild(av);
+
+      const nm = document.createElement('span');
+      nm.className = 'dm-pick-name';
+      nm.textContent = m.name;
+      row.appendChild(nm);
+
+      const start = () => { toggleDmPicker(false); openDmTab(m.id); toggleDmPanel(false); };
+      row.addEventListener('click', start);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); start(); }
+      });
+      dmPickerEl.appendChild(row);
+    }
+  }
+
+  function toggleDmPicker(force) {
+    if (!dmPickerEl || !dmNewBtn) return;
+    const show = (force !== undefined) ? force : dmPickerEl.hasAttribute('hidden');
+    if (show) { renderDmPicker(); dmPickerEl.removeAttribute('hidden'); dmNewBtn.classList.add('on'); }
+    else { dmPickerEl.setAttribute('hidden', ''); dmNewBtn.classList.remove('on'); }
+  }
+  if (dmNewBtn) {
+    dmNewBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPicker(); });
+  }
+
   function toggleDmPanel(force) {
     if (!dmPanel) return;
     const show = (force !== undefined) ? force : dmPanel.hasAttribute('hidden');
@@ -7733,7 +7818,7 @@ INDEX_HTML = r"""<!doctype html>
       // Both drawers share the same top-right slot — only one at a time.
       if (typeof toggleSettings === 'function') toggleSettings(false);
       renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
-    } else { dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
+    } else { toggleDmPicker(false); dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
   }
   if (btnDm) {
     btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
@@ -8784,6 +8869,7 @@ INDEX_HTML = r"""<!doctype html>
       colorFor, rememberColors, chimeScopeAllows,
       dmCounterparty, dmThreadsFor, unreadDmCount,
       renderDmInbox, refreshDmBadge, markDmRead, dmListEl, dmCountEl,
+      dmPickerMembers, renderDmPicker, openDmTab, dmPickerEl,
     };
   }
   // __TRIO_TEST_HOOK_END__
