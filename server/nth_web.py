@@ -3828,6 +3828,15 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-auto { display: inline-flex; align-items: center; gap: 5px; }
   #target-bar .tb-auto-name { color: var(--fg); font-weight: 600; }
   body.dm-mode #target-bar { display: none; }
+  /* One-click exit from a DM view back to the main channel (a DM opens in its
+     own view; don't force the operator onto the browser back button). */
+  #dm-back { display: none; }
+  body.dm-mode #dm-back { display: inline-flex; align-items: center;
+    margin-right: 10px; padding: 3px 9px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--border);
+    color: var(--dim); font-size: 12px; font-weight: 600; text-decoration: none;
+    white-space: nowrap; }
+  body.dm-mode #dm-back:hover { border-color: var(--accent); color: var(--fg); }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input-stack { flex: 1; position: relative; min-width: 0; background: var(--bg);
                  border-radius: 4px; }
@@ -6322,6 +6331,17 @@ INDEX_HTML = r"""<!doctype html>
         state.originalTitle = label;
         hChannel.textContent = label;
         updateTitle();
+      }
+      // One-click exit back to the main channel — a DM opens in its own view,
+      // so don't make the operator rely on the browser back button. The link
+      // drops the ?dm= query, loading the main channel in this same tab.
+      if (hChannel && hChannel.parentNode && !document.getElementById('dm-back')) {
+        const back = document.createElement('a');
+        back.id = 'dm-back';
+        back.href = location.pathname;
+        back.textContent = '← #' + state.channel;
+        back.title = 'Back to the main channel';
+        hChannel.parentNode.insertBefore(back, hChannel);
       }
     }
   }
