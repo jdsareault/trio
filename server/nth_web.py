@@ -1651,13 +1651,15 @@ def stop_all_runtimes() -> None:
         _RUNTIMES.clear()
 
 
-def channel_exists(channel: str) -> bool:
-    """True if `channel` is a real row in the channels table. Guards runtime
-    creation so a bogus ?channel= can't spin up a hub for a non-channel."""
+def channel_exists(channel: str, db_path: Optional[Path] = None) -> bool:
+    """True if `channel` is a real row in the channels table. Guards writes to
+    (and hub creation for) a bogus ?channel=. Takes an explicit db_path so it
+    reads the SAME database the handlers do (NthWebHandler.db_path), rather than
+    assuming it equals the module default — the two must not drift."""
     if not channel:
         return False
     try:
-        db = sqlite3.connect(str(_DB_PATH_GLOBAL), timeout=5)
+        db = sqlite3.connect(str(db_path or _DB_PATH_GLOBAL), timeout=5)
         try:
             row = db.execute(
                 "SELECT 1 FROM channels WHERE code = ?", (channel,)
@@ -1775,8 +1777,38 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # morsel.OutputString() returns a header value without "Set-Cookie: "
         self.send_header("Set-Cookie", c[OP_COOKIE].OutputString())
 
+    # ── channel authorization ──
+    def _authorize_channel(self) -> bool:
+        """Existence + access gate for channel-scoped endpoints. Writes the
+        error response and returns False on denial.
+
+        Making `channel` per-request removed the implicit per-channel boundary
+        that used to come from "one process/port per channel" (Aragorn). The
+        multi-channel view is therefore an OPERATOR console: an all-seeing
+        operator (loopback/tailscale) may touch any channel; a non-operator
+        (guest/pending) is confined to the CLI-default channel only — i.e.
+        back-compat single-channel access, never cross-channel browsing over the
+        shared DB. Also blocks writes to a non-existent channel (the FK is not
+        enforced, so this is the only guard against orphan-channel row injection).
+        """
+        ch = self.channel
+        if not channel_exists(ch, self.db_path):
+            self._error(404, "unknown channel")
+            return False
+        _token, ident, _is_new = self._resolve_identity()
+        if is_all_seeing(ident.member_id):
+            return True
+        if self._default_channel and ch == self._default_channel:
+            return True
+        self._error(403, "not authorized for this channel")
+        return False
+
     # ── routing ──
     def do_GET(self) -> None:
+        # Reset the per-request channel cache. Handler instances are per-request
+        # under the default HTTP/1.0 close-after-response, but resetting here
+        # keeps the cache correct even if keep-alive is ever enabled (Gandalf).
+        self._resolved_channel = None
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/" or path == "/index.html":
@@ -1800,38 +1832,61 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/channels":
             self._handle_channels()
         elif path == "/api/events":
+            if not self._authorize_channel():
+                return
             self._serve_sse()
         elif path.startswith("/api/attachment/"):
+            if not self._authorize_channel():
+                return
             self._serve_attachment(path)
         elif path == "/api/stt/health":
             self._json(STT.health())
         elif path == "/api/search":
+            if not self._authorize_channel():
+                return
             self._handle_search(parsed)
         elif path == "/api/tasks":
+            if not self._authorize_channel():
+                return
             self._handle_tasks(parsed)
         elif path == "/api/tools":
+            if not self._authorize_channel():
+                return
             self._handle_tools(parsed)
         else:
             self._error(404, "not found")
 
     def do_POST(self) -> None:
+        self._resolved_channel = None
         parsed = urlparse(self.path)
         if parsed.path == "/api/send":
+            if not self._authorize_channel():
+                return
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
         elif parsed.path == "/api/upload":
+            if not self._authorize_channel():
+                return
             self._handle_upload()
         elif parsed.path == "/api/stt/transcribe":
             self._handle_transcribe()
         elif parsed.path == "/api/cull":
+            if not self._authorize_channel():
+                return
             self._handle_cull()
         elif (parsed.path.startswith("/api/member/")
               and parsed.path.endswith("/filter")):
+            if not self._authorize_channel():
+                return
             self._handle_set_filter(parsed)
         elif parsed.path == "/api/edit":
+            if not self._authorize_channel():
+                return
             self._handle_edit()
         elif parsed.path == "/api/delete":
+            if not self._authorize_channel():
+                return
             self._handle_delete()
         elif parsed.path == "/api/path/validate":
             self._handle_path_validate()
@@ -1867,11 +1922,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self._json({"error": msg}, status=status)
 
     def _serve_sse(self) -> None:
-        # Multi-channel: the channel comes from ?channel= (or the CLI default).
-        # Guard runtime creation so a bogus channel can't spin up a hub.
-        if not channel_exists(self.channel):
-            self._error(404, "unknown channel")
-            return
+        # Channel existence + authorization already enforced by
+        # _authorize_channel() in do_GET before we get here.
         hub = self.hub
         if hub is None:
             self._error(404, "unknown channel")
@@ -2454,8 +2506,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
         most recent message. Powers the unified multi-channel client. Mirrors
         _handle_tasks' identity gate + short read-connection idioms."""
         _token, ident, _is_new = self._resolve_identity()
-        if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+        # OPERATOR-only: the channel list (with previews that could quote a DM)
+        # enumerates every channel in the shared DB. A non-all-seeing guest must
+        # not get cross-channel visibility (Aragorn). Guests stay confined to
+        # their single default channel via _authorize_channel; they don't get a
+        # switcher at all.
+        if not is_all_seeing(ident.member_id):
+            self._error(403, "operator only")
             return
         db = None
         try:
@@ -2510,10 +2567,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         structured (nth_server.py posts the lifecycle markers into chat, this
         just surfaces the underlying rows). Mirrors _handle_search's identity
         gate + short-lived read connection idioms."""
-        # This server instance serves exactly one channel (self.channel); a
-        # ?channel= param is accepted for forward-compat / symmetry with the
-        # documented URL but must match, so one channel's board can't read
-        # another's over a shared DB.
+        # Channel scoping is now enforced upstream by _authorize_channel()
+        # (existence + operator-or-default-channel) plus the WHERE channel = ?
+        # filter below; self.channel already IS the requested ?channel=. The
+        # residual match check is a harmless belt-and-suspenders no-op.
         qs = parse_qs(parsed.query)
         want = (qs.get("channel", [""])[0] or "").strip()
         if want and want != self.channel:
