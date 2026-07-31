@@ -442,6 +442,45 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_tool_events_session
         ON tool_events (session_id, id)
     """)
+    # ── unified-interface: durable agent identity (additive) ──
+    # A managed agent's GLOBAL identity, above the per-channel members row.
+    # The supervisor (nth_supervisor.py) owns the OS process; `members` becomes
+    # the per-channel presence/join record via agent_channels. `managed=0` marks
+    # an externally launched (terminal) agent trio only observes.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id             TEXT PRIMARY KEY,
+            name           TEXT NOT NULL,
+            model          TEXT NOT NULL DEFAULT '',
+            base_prompt    TEXT NOT NULL DEFAULT '',
+            state          TEXT NOT NULL DEFAULT 'stopped',
+            managed        INTEGER NOT NULL DEFAULT 1,
+            session_id     TEXT,
+            pid            INTEGER,
+            owner          TEXT,
+            created_at     TEXT NOT NULL,
+            last_active_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_channels (
+            agent_id    TEXT NOT NULL,
+            channel     TEXT NOT NULL,
+            member_id   TEXT NOT NULL,
+            joined_at   TEXT NOT NULL,
+            PRIMARY KEY (agent_id, channel),
+            FOREIGN KEY (agent_id) REFERENCES agents(id),
+            FOREIGN KEY (channel) REFERENCES channels(code)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_channels_channel
+        ON agent_channels (channel)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_channels_member
+        ON agent_channels (member_id)
+    """)
     conn.commit()
     return conn
 
