@@ -6044,7 +6044,10 @@ INDEX_HTML = r"""<!doctype html>
     // (soundScope) is kept independent of the desktop-notify scope, so a quiet
     // chime on all messages can coexist with a popup only on @mentions, or vice
     // versa. Reuses the same mentionsOperator predicate the notify block uses.
-    if (state.soundEnabled && !isMine && !isSystem &&
+    // Skip the primed-history burst on load/reconnect — chime only for LIVE
+    // messages once state.initialLoad has settled. Without this, a refresh plays
+    // every historical chime at once (overlapping waveforms = loud + phasey).
+    if (!state.initialLoad && state.soundEnabled && !isMine && !isSystem &&
         chimeScopeAllows(state.soundScope, mentionsOperator)) playChime();
 
     // DM inbox: when a message in one of the operator's OWN DM threads arrives,
