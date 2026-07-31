@@ -3649,12 +3649,13 @@ INDEX_HTML = r"""<!doctype html>
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
                            user-select: none; }
-  .member .dm-btn { font-size: 9px; padding: 2px 5px; border-radius: 3px;
-                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
-                    cursor: pointer; flex-shrink: 0; user-select: none;
-                    text-transform: uppercase; letter-spacing: 0.5px; }
-  .member .dm-btn:hover { background: var(--accent); color: var(--bg);
-                          border-color: var(--accent); }
+  /* "Message" action inside the expanded detail panel — opens a DM with this
+     member. Sized to match the Remove button so the stacked actions align. */
+  .member .dm-msg-btn { font-size: 11px; line-height: 1.2; padding: 4px 10px; border-radius: 4px;
+                        background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
+                        cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
+  .member .dm-msg-btn:hover { background: var(--accent); color: var(--bg);
+                              border-color: var(--accent); }
   .member .member-actions { display: none; padding: 6px 0 2px 16px; }
   .member.expanded .member-actions { display: flex; flex-direction: column;
                                      align-items: flex-start; gap: 8px; }
@@ -6516,19 +6517,9 @@ INDEX_HTML = r"""<!doctype html>
         : 'Listening mode: about — wakes on @pings and #pounds. Ambient silent.';
       topRow.appendChild(fmPill);
     }
-    // DM button — opens a filtered-view tab for this agent.
-    // Hide for self, for human operator rows, and inside an existing DM tab.
-    if (!DM_MODE && m.id !== state.operator.id && !m.id.startsWith('_op_')) {
-      const dmBtn = document.createElement('span');
-      dmBtn.className = 'dm-btn';
-      dmBtn.textContent = 'DM';
-      dmBtn.title = `Open DM tab with ${m.name}`;
-      dmBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openDmTab(m.id);   // marks the thread read + clears the bubble
-      });
-      topRow.appendChild(dmBtn);
-    }
+    // (The per-row DM button was removed to de-clutter the roster; a "Message"
+    // action now lives in the expanded detail panel below, alongside wakes-on
+    // and Remove. Starting a fresh DM is done from the inbox's "+ New DM".)
     const caret = document.createElement('span');
     caret.className = 'caret';
     caret.textContent = '▶';
@@ -6612,6 +6603,21 @@ INDEX_HTML = r"""<!doctype html>
         });
         ctl.appendChild(sel);
         actions.appendChild(ctl);
+      }
+      // Message action — opens a DM tab with this member (same behavior the old
+      // per-row .dm-btn had). Same guard as that button: skip other web
+      // operators (_op_); self is already excluded by the block above.
+      if (!m.id.startsWith('_op_')) {
+        const dmMsg = document.createElement('button');
+        dmMsg.type = 'button';
+        dmMsg.className = 'dm-msg-btn';
+        dmMsg.textContent = 'Message';
+        dmMsg.title = `Open a DM with ${m.name}`;
+        dmMsg.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openDmTab(m.id);   // marks the thread read + clears the bubble
+        });
+        actions.appendChild(dmMsg);
       }
       const rm = document.createElement('button');
       rm.type = 'button';
