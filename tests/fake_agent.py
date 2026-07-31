@@ -11,6 +11,7 @@ Behaviour:
 Pointed at via $TRIO_AGENT_CMD in tests.
 """
 import json
+import os
 import sys
 
 
@@ -20,6 +21,11 @@ def emit(obj):
 
 
 def main() -> int:
+    # Crash mode: die before emitting init → exercises the supervisor's
+    # ST_ERRORED path (agent that never comes up).
+    if os.environ.get("FAKE_AGENT_CRASH"):
+        return 1
+
     argv = sys.argv[1:]
     resume = ""
     model = ""
@@ -28,6 +34,12 @@ def main() -> int:
             resume = argv[i + 1]
         elif a == "--model" and i + 1 < len(argv):
             model = argv[i + 1]
+
+    # Robustness probe: emit a non-dict JSON line before init. A correct reader
+    # must skip it and still capture the session_id (Uruk-Hai bug).
+    if os.environ.get("FAKE_AGENT_PREJUNK"):
+        emit(123)
+        emit([1, 2, 3])
 
     session_id = resume or f"sess-fake-{model or 'default'}-001"
     emit({"type": "system", "subtype": "init",
