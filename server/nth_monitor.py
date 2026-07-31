@@ -23,7 +23,13 @@ Events (one JSON line per fire):
     {"event": "cadence", "gap_seconds": N}
     {"event": "channel_ended", "ended_by": "..."}
     {"event": "channel_gone"}
+    {"event": "culled", "member_id": "...", "channel": "..."}
     {"event": "error", "msg": "..."}
+
+The `culled` event is TERMINAL, like `channel_ended`/`channel_gone`: the
+member row disappeared AFTER we'd seen it present (an operator cull hard-
+DELETEs the row), so the script exits. A missing row we've never yet seen
+is treated as the transient join race instead (`error` + retry).
 
 Filter modes (pick ONE; default = all):
 
@@ -31,6 +37,14 @@ Filter modes (pick ONE; default = all):
     --filter about  — wake on any message ABOUT me: @pings or #pounds.
                        No wake on unrelated chatter between other members.
     --filter at     — wake only on @pings. #pound refs are silent.
+
+The --filter arg is only a SEED. The live source of truth is the
+members.filter_mode DB column, which the monitor READS every tick — so an
+operator can retune an agent's wake filter from the web dashboard with no
+restart (picked up on the next tick). The launch arg is written into the
+column only when it is null (a fresh member); once the column holds a value
+the DB wins and the arg is ignored. An unknown/invalid mode fails open (wake
+on everything), so a bad write can never silently mute an agent.
 
 Bangs (`!name` / `!all`) ALWAYS wake the target regardless of filter. They
 are the last-resort / channel-close signal and deliberately bypass every
@@ -54,7 +68,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS
+from nth_constants import SLEEPING_KEYWORDS, can_see, parse_recipients
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
@@ -166,6 +180,7 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
 
 def monitor(channel, member_id, filter_mode="all", _db_path=None):
     local_hwm = None
+    member_seen = False
     cadence_fired = False
     keepalive_fired = False
     last_heartbeat_mono = 0.0
@@ -191,16 +206,47 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
             # on OperationalError before reaching the sleeping-check.
             check_interval = ACTIVE_INTERVAL
             try:
-                member = db.execute(
-                    "SELECT last_seen, last_read, status_text "
-                    "FROM members WHERE channel = ? AND id = ?",
-                    (channel, member_id),
-                ).fetchone()
+                # filter_mode (v7.2+) is the operator-adjustable wake filter and
+                # the single source of truth for should_wake() — read it every
+                # tick alongside the liveness columns. A pre-v7.2 schema without
+                # the column drops to the older SELECT and falls back to the
+                # launch --filter arg (see the wake-filter block below).
+                try:
+                    member = db.execute(
+                        "SELECT last_seen, last_read, status_text, filter_mode "
+                        "FROM members WHERE channel = ? AND id = ?",
+                        (channel, member_id),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    member = db.execute(
+                        "SELECT last_seen, last_read, status_text "
+                        "FROM members WHERE channel = ? AND id = ?",
+                        (channel, member_id),
+                    ).fetchone()
 
                 if not member:
+                    # A missing member row is ambiguous. Two causes:
+                    #   * join race — the monitor was launched before
+                    #     nth_connect committed our row. Transient; retry.
+                    #   * cull — the operator hard-DELETEs the member row and
+                    #     revokes its sessions. Permanent; we've been removed.
+                    # Disambiguate on whether we've ever seen ourselves present.
+                    # Absent AFTER having been present == removal: emit a
+                    # dedicated terminal event and exit cleanly, exactly like
+                    # channel_ended. Never-yet-seen at startup stays lenient
+                    # (short sleep + continue) to tolerate the join race.
+                    if member_seen:
+                        emit({"event": "culled",
+                              "member_id": member_id,
+                              "channel": channel})
+                        return
                     emit({"event": "error", "msg": "Member not found in channel."})
                     time.sleep(10)
                     continue
+
+                # We've observed our own row at least once. Any later
+                # disappearance is a cull, not the startup join race.
+                member_seen = True
 
                 ch = db.execute(
                     "SELECT status, ended_by FROM channels WHERE code = ?",
@@ -225,6 +271,34 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                     emit({"event": "channel_ended", "ended_by": ender_name})
                     return
 
+                # --- Wake filter: the DB column is the source of truth ---
+                # Operator-adjustable wake filter (feature #4): should_wake()
+                # follows members.filter_mode, not the launch --filter arg. The
+                # launch arg only SEEDS a null column (fresh member / first run);
+                # once the column holds a value — seeded here or set by the
+                # operator from the dashboard — the DB value wins and the launch
+                # arg is ignored. A change is picked up on the NEXT tick, with no
+                # restart. A pre-v7.2 schema without the column falls back to the
+                # launch arg. Invalid values fail open in should_wake() below.
+                if "filter_mode" in member.keys():
+                    db_mode = member["filter_mode"]
+                    if db_mode is None:
+                        # Seed the null column ONCE with the launch arg, then
+                        # read it back on later ticks. Use the seed for this
+                        # tick's wake decisions regardless; a failed write is
+                        # best-effort and simply retries on the next tick.
+                        effective_mode = filter_mode
+                        db.execute(
+                            "UPDATE members SET filter_mode = ? "
+                            "WHERE channel = ? AND id = ?",
+                            (filter_mode, channel, member_id),
+                        )
+                        db.commit()
+                    else:
+                        effective_mode = db_mode
+                else:
+                    effective_mode = filter_mode
+
                 # Decouple heartbeat writes from poll rate. At 0.5s active polling
                 # we'd otherwise do ~172k fsync-bearing commits/day just to bump a
                 # timestamp. The server's _sentinel_nag() threshold is 300s, so
@@ -241,23 +315,18 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if (mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL
                         or wall - last_heartbeat_wall >= HEARTBEAT_INTERVAL):
                     now_ts = now_iso()
-                    # Best-effort filter_mode write (added v7.2). Older DBs
-                    # without the column drop back to the pre-v7.2 heartbeat.
-                    try:
-                        db.execute(
-                            "UPDATE members SET last_seen = ?, "
-                            "messenger_heartbeat = ?, watchdog_heartbeat = ?, "
-                            "filter_mode = ? "
-                            "WHERE channel = ? AND id = ?",
-                            (now_ts, now_ts, now_ts, filter_mode, channel, member_id),
-                        )
-                    except sqlite3.OperationalError:
-                        db.execute(
-                            "UPDATE members SET last_seen = ?, "
-                            "messenger_heartbeat = ?, watchdog_heartbeat = ? "
-                            "WHERE channel = ? AND id = ?",
-                            (now_ts, now_ts, now_ts, channel, member_id),
-                        )
+                    # Heartbeat only — deliberately does NOT write filter_mode.
+                    # The monitor now READS filter_mode as the source of truth
+                    # (see the wake-filter block above); mirroring the launch arg
+                    # back into the column each tick would clobber operator
+                    # changes made from the dashboard. These three columns all
+                    # predate v7.2, so this UPDATE needs no schema fallback.
+                    db.execute(
+                        "UPDATE members SET last_seen = ?, "
+                        "messenger_heartbeat = ?, watchdog_heartbeat = ? "
+                        "WHERE channel = ? AND id = ?",
+                        (now_ts, now_ts, now_ts, channel, member_id),
+                    )
                     db.commit()
                     last_heartbeat_mono = mono
                     last_heartbeat_wall = wall
@@ -293,7 +362,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 # on old DBs just get the pre-bang behavior.
                 try:
                     unread = db.execute(
-                        "SELECT id, mentions, refs, bangs, member_name, content FROM messages "
+                        "SELECT id, mentions, refs, bangs, recipients, member_id, member_name, content FROM messages "
                         "WHERE channel = ? AND id > ? AND member_id != ? "
                         "ORDER BY id",
                         (channel, local_hwm, member_id),
@@ -315,9 +384,25 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         ).fetchall()
 
                 if unread:
+                    # Advance the LOCAL watermark over the whole raw batch first,
+                    # so a DM this agent can't see still moves the cursor past it
+                    # (it must not re-surface every tick). Then drop DMs this
+                    # member isn't a recipient of BEFORE should_wake — otherwise
+                    # a new_messages event would carry a content `preview` of a
+                    # DM addressed to someone else, which is itself the leak. The
+                    # monitor only ever runs for an agent (member_id is its own),
+                    # so kind='agent' here; a pre-migration row (no recipients)
+                    # is treated as a broadcast (visible), unchanged.
                     local_hwm = max(m["id"] for m in unread)
+                    unread = [
+                        m for m in unread
+                        if can_see(member_id, "agent",
+                                   (m["member_id"] if "member_id" in m.keys() else None),
+                                   (m["recipients"] if "recipients" in m.keys() else ""),
+                                   allow_all_seeing=False)
+                    ]
 
-                    mode = filter_mode if filter_mode in FILTER_MODES else "all"
+                    mode = effective_mode if effective_mode in FILTER_MODES else "all"
                     relevant = []
                     for m in unread:
                         mraw = m["mentions"] if "mentions" in m.keys() else ""
@@ -333,6 +418,15 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         has_bangs    = any(k == "bang"  for _m, k in relevant)
                         has_mentions = any(k == "at"    for _m, k in relevant)
                         has_refs     = any(k == "pound" for _m, k in relevant)
+                        # DM signal: any relevant message that is a private DM to
+                        # this member (non-broadcast recipients including us).
+                        # `unread` was already can_see-filtered, so a non-empty
+                        # recipients list here means this member is a recipient.
+                        has_dms = any(
+                            member_id in parse_recipients(
+                                m["recipients"] if "recipients" in m.keys() else "")
+                            for m, _k in relevant
+                        )
                         from_names = []
                         seen = set()
                         for m, _kind in relevant:
@@ -351,6 +445,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             "has_bangs": has_bangs,
                             "has_mentions": has_mentions,
                             "has_refs": has_refs,
+                            "has_dms": has_dms,
                             "from_names": from_names,
                             "preview": preview,
                             "filter": mode,

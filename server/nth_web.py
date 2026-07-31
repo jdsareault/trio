@@ -54,7 +54,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel
+from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
+                           can_see, is_all_seeing, parse_recipients)
 
 
 # ───────── Config ─────────
@@ -100,6 +101,10 @@ IDENTITY_SOURCE_PENDING = "pending"
 # Identity tiers allowed to perform destructive, roster-wide actions (cull).
 # A self-declared guest is deliberately excluded — see _handle_cull.
 CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
+# Valid wake-filter modes for the operator-adjustable filter (feature #4),
+# mirrored from nth_monitor.FILTER_MODES — the monitor reads members.filter_mode
+# each tick, so /api/member/<id>/filter validates against exactly this set.
+FILTER_MODES = ("all", "about", "at")
 # Agents reading the roster can check the member's summary field:
 #   "human — tailnet: knelsonb"       → identity-traceable via Tailscale
 #   "human — local (user: repro)"     → connected via loopback; trust level is
@@ -373,11 +378,18 @@ def _iso_secs(iso: Optional[str]) -> Optional[float]:
 
 def member_status(last_seen_iso: Optional[str], status_text: str,
                   session_activity_iso: Optional[str] = None,
-                  last_turn_end_iso: Optional[str] = None) -> str:
+                  last_turn_end_iso: Optional[str] = None,
+                  blocked_since_iso: Optional[str] = None) -> str:
     """Classify a member for the roster dot.
 
-    States: working / active / idle / stale / dead.
+    States: blocked / working / active / idle / stale / dead.
       dead    — no heartbeat for DEAD_SECONDS (process gone).
+      blocked — frozen on an interactive host prompt (AskUserQuestion/
+                ExitPlanMode): the activity hook set sessions.blocked_since and
+                nothing has cleared it. Checked BEFORE stale — a blocked wait
+                can outlast STALE_SECONDS (last_seen freezes at block start), and
+                a silently-stalled room is exactly what this state must shout
+                about; DEAD is the ultimate backstop if the process died blocked.
       stale   — heartbeat aging (> STALE_SECONDS).
       idle    — alive, but its last turn has ended (nothing since) or it set a
                 sleeping status_text: "done / waiting on you".
@@ -400,6 +412,24 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
     age = datetime.now(timezone.utc).timestamp() - ls
     if age > DEAD_SECONDS:
         return "dead"
+    # Blocked outranks stale/idle/working (but not dead): a host prompt can stall
+    # the room longer than STALE_SECONDS, and the whole point is to be loud.
+    #
+    # A block is only real while the session's OWN activity has NOT advanced past
+    # blocked_since. At a genuine block the activity hook stamps last_seen and
+    # blocked_since to the same instant, and nothing runs during the host-prompt
+    # freeze, so session_last_seen stays == blocked_since → blocked. The moment
+    # ANY later activity lands — the clearing PostToolUse, a new prompt, another
+    # tool, OR a trio RPC that only bumps last_seen (nth_send/nth_poll don't
+    # touch blocked_since) — session_last_seen advances past blocked_since and we
+    # stop reporting blocked. This makes the "self-heals on next activity"
+    # guarantee hold even when the clearing write was dropped under contention.
+    # (Uses the session's raw last_seen, not the monitor-inflated value.)
+    bs = _iso_secs(blocked_since_iso)
+    if bs is not None:
+        act = _iso_secs(session_activity_iso)
+        if act is None or act <= bs:
+            return "blocked"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
@@ -641,10 +671,15 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
         ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
         ("messages", "reply_to",  "INTEGER"),
+        # real-DMs: recipient/visibility column (see nth_server.get_db). The web
+        # dashboard may run against a DB the MCP server hasn't migrated yet, so
+        # we own the forward-compat ALTER here too. '[]'/NULL = broadcast.
+        ("messages", "recipients", "TEXT NOT NULL DEFAULT '[]'"),
         ("messages", "retracted_at", "TEXT"),
         ("messages", "retracted_by", "TEXT"),
         ("messages", "retraction_reason", "TEXT"),
         ("messages", "edited_at",  "TEXT"),
+        ("messages", "confidence", "TEXT"),
     ):
         try:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -720,12 +755,36 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
         "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
         "reply_to": (r["reply_to"] if "reply_to" in keys else None),
+        "confidence": (r["confidence"] if "confidence" in keys else None),
+        # recipients backs the DM tab's real (no longer cosmetic) scoping. The
+        # web dashboard is the OPERATOR view and is all-seeing by design
+        # (operator sees every message, audit preserved), so the feed ships
+        # every row; the client uses recipients to focus the DM tab. Empty
+        # list = broadcast.
+        "recipients": parse_recipients(r["recipients"] if "recipients" in keys else ""),
         "retracted_at": (r["retracted_at"] if "retracted_at" in keys else None),
         "retraction_reason": (r["retraction_reason"] if "retraction_reason" in keys else None),
         "edited_at": (r["edited_at"] if "edited_at" in keys else None),
         "created_at": r["created_at"],
         "attachments": attachments_for_message(db, r["id"]),
     }
+
+
+def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
+                      all_seeing: bool) -> bool:
+    """Whether an SSE event may be delivered to a given viewer. Only 'message'
+    and 'message_update' events carry recipients and can be a DM — everything
+    else (roster, etc.) is always delivered. An all-seeing operator sees all;
+    any other viewer sees a message only if can_see admits it (broadcast, own,
+    or addressed to them). allow_all_seeing is False here so a guest/pending
+    web viewer — a human but NOT the operator — cannot use its identity to see
+    others' DMs on the live feed."""
+    if all_seeing:
+        return True
+    if event.get("type") not in ("message", "message_update"):
+        return True
+    return can_see(viewer_id, None, event.get("member_id"),
+                   event.get("recipients"), allow_all_seeing=False)
 
 
 # ───────── EventHub: polls DB, fans out SSE events ─────────
@@ -737,27 +796,36 @@ class EventHub:
         self.db_path = db_path
         self.channel = channel
         self.last_msg_id = 0
-        self._subs: List[queue.Queue] = []
+        # Each sub is (queue, viewer_id, all_seeing) so the fan-out can scope
+        # per-viewer — an operator sees all; a guest sees only what can_see admits.
+        self._subs: List[Tuple[queue.Queue, Optional[str], bool]] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_roster_snapshot: Optional[str] = None
 
     # ── subscription ──
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, viewer_id: Optional[str] = None, all_seeing: bool = True) -> queue.Queue:
+        """Register an SSE subscriber. viewer_id + all_seeing scope what this
+        connection receives: an all-seeing OPERATOR (loopback/tailscale) gets
+        every message; a guest / pending / any non-operator viewer receives
+        only broadcasts, its own messages, and DMs addressed to it — real DMs
+        are withheld from a guest's live feed, not just hidden client-side.
+        Defaults keep the operator (and existing callers/tests) all-seeing."""
         q: queue.Queue = queue.Queue(maxsize=200)
+        sub = (q, viewer_id, all_seeing)
         with self._lock:
-            self._subs.append(q)
+            self._subs.append(sub)
         # Immediately send a current snapshot so the client renders right away.
-        self._prime_subscriber(q)
+        self._prime_subscriber(q, viewer_id, all_seeing)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
-            if q in self._subs:
-                self._subs.remove(q)
+            self._subs = [s for s in self._subs if s[0] is not q]
 
-    def _prime_subscriber(self, q: queue.Queue) -> None:
+    def _prime_subscriber(self, q: queue.Queue, viewer_id: Optional[str] = None,
+                          all_seeing: bool = True) -> None:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
@@ -772,12 +840,17 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                q.put_nowait(json.dumps(_message_event(db, r)))
+                ev = _message_event(db, r)
+                # Withhold a non-recipient's DMs from the primed history too —
+                # else a guest sees every past DM on first page load.
+                if not _event_visible_to(ev, viewer_id, all_seeing):
+                    continue
+                q.put_nowait(json.dumps(ev))
         except (sqlite3.Error, queue.Full):
             pass
         finally:
@@ -789,16 +862,23 @@ class EventHub:
 
     # ── broadcast ──
     def _broadcast(self, event: Dict[str, Any]) -> None:
-        payload = json.dumps(event)
+        # Per-subscriber visibility: an all-seeing operator gets the payload;
+        # a scoped viewer only gets messages it may see (broadcasts, its own,
+        # DMs to it). Non-message events (roster) reach everyone. Serialize
+        # once for the common all-seeing case.
+        payload_all = json.dumps(event)
         with self._lock:
             dead = []
-            for q in self._subs:
+            for sub in self._subs:
+                q, viewer_id, all_seeing = sub
                 try:
-                    q.put_nowait(payload)
+                    if all_seeing or _event_visible_to(event, viewer_id, all_seeing):
+                        q.put_nowait(payload_all)
                 except queue.Full:
-                    dead.append(q)
+                    dead.append(sub)
             for d in dead:
-                self._subs.remove(d)
+                if d in self._subs:
+                    self._subs.remove(d)
 
     # ── DB poll ──
     def _fetch_roster(self, db: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -815,7 +895,11 @@ class EventHub:
                 "m.filter_mode AS filter_mode, m.model AS model, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen, "
-                "MAX(s.last_turn_end) AS session_last_turn_end "
+                "MAX(s.last_turn_end) AS session_last_turn_end, "
+                "MAX(s.last_tool_name) AS last_tool_name, "
+                "MAX(s.last_tool_target) AS last_tool_target, "
+                "MAX(s.last_tool_at) AS last_tool_at, "
+                "MAX(s.blocked_since) AS blocked_since "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -860,6 +944,14 @@ class EventHub:
             fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
             keys = r.keys()
             s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
+            # Tool-use chip (#1/#2). MAX over the member's sessions picks the sole
+            # session's values under trio's one-primary-session-per-member
+            # invariant (same basis as last_seen/last_turn_end above). Absent on
+            # pre-observability schemas (fallback query) — chip simply hidden.
+            last_tool_name = (r["last_tool_name"] if "last_tool_name" in keys else None) or ""
+            last_tool_target = (r["last_tool_target"] if "last_tool_target" in keys else None) or ""
+            last_tool_at = (r["last_tool_at"] if "last_tool_at" in keys else None) or None
+            blocked_since = (r["blocked_since"] if "blocked_since" in keys else None) or None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -879,9 +971,14 @@ class EventHub:
                 "status": member_status(
                     effective_last_seen, r["status_text"] or "",
                     session_activity_iso=(r["session_last_seen"] or None),
-                    last_turn_end_iso=s_turn_end),
+                    last_turn_end_iso=s_turn_end,
+                    blocked_since_iso=blocked_since),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
+                "last_tool_name": last_tool_name,
+                "last_tool_target": last_tool_target,
+                "last_tool_at": last_tool_at,
+                "blocked_since": blocked_since,
             })
         return out
 
@@ -924,7 +1021,7 @@ class EventHub:
                     prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
@@ -938,7 +1035,7 @@ class EventHub:
                     scan_now = now_iso()
                     changed = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                        "choices, selection, reply_to, retracted_at, retraction_reason, edited_at, created_at "
+                        "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id <= ? AND "
                         "((retracted_at IS NOT NULL AND retracted_at > ?) OR "
                         " (edited_at IS NOT NULL AND edited_at > ?)) ORDER BY id",
@@ -1619,6 +1716,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._json(STT.health())
         elif path == "/api/search":
             self._handle_search(parsed)
+        elif path == "/api/tasks":
+            self._handle_tasks(parsed)
+        elif path == "/api/tools":
+            self._handle_tools(parsed)
         else:
             self._error(404, "not found")
 
@@ -1634,10 +1735,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_transcribe()
         elif parsed.path == "/api/cull":
             self._handle_cull()
+        elif (parsed.path.startswith("/api/member/")
+              and parsed.path.endswith("/filter")):
+            self._handle_set_filter(parsed)
         elif parsed.path == "/api/edit":
             self._handle_edit()
         elif parsed.path == "/api/delete":
             self._handle_delete()
+        elif parsed.path == "/api/path/validate":
+            self._handle_path_validate()
+        elif parsed.path == "/api/reveal":
+            self._handle_reveal()
         else:
             self._error(404, "not found")
 
@@ -1669,6 +1777,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def _serve_sse(self) -> None:
         assert self.hub is not None
+        # Resolve who is watching so the hub can scope the stream: only the
+        # authenticated OPERATOR (loopback/tailscale) is all-seeing; a guest /
+        # pending / any non-operator viewer receives only broadcasts, its own
+        # messages, and DMs addressed to it — real DMs are withheld from a
+        # guest's live feed, not merely hidden client-side.
+        _token, ident, _is_new = self._resolve_identity()
+        viewer_id = ident.member_id
+        viewer_all_seeing = is_all_seeing(viewer_id)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -1676,7 +1792,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = self.hub.subscribe()
+        q = self.hub.subscribe(viewer_id=viewer_id, all_seeing=viewer_all_seeing)
         try:
             last_heartbeat = time.monotonic()
             while True:
@@ -1705,7 +1821,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError guards against a deeply-nested-JSON DoS (json.loads
+            # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
 
@@ -1777,6 +1895,31 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if reply_to is not None and not (type(reply_to) is int and reply_to > 0):
             self._error(400, "invalid reply_to")
             return
+
+        # recipients: when the operator composes in the DM tab the client sends
+        # the DM target's member_id(s) here, making this a REAL private message
+        # — the server stores the recipient list and the agent-facing read
+        # paths withhold it from everyone else. Absent / empty => broadcast
+        # (recipients column stays '[]'), i.e. today's behavior. The operator
+        # (sender) is all-seeing regardless, so their own dashboard still shows
+        # it. Validate: a list of non-empty strings, capped, de-duplicated.
+        raw_recipients = body.get("recipients")
+        recipient_ids: list = []
+        if raw_recipients is not None:
+            if not isinstance(raw_recipients, list):
+                self._error(400, "invalid recipients")
+                return
+            if len(raw_recipients) > 64:
+                self._error(400, "too many recipients (max 64)")
+                return
+            for rid in raw_recipients:
+                if not isinstance(rid, str) or not rid.strip():
+                    self._error(400, "invalid recipients")
+                    return
+                rid = rid.strip()
+                if rid not in recipient_ids:
+                    recipient_ids.append(rid)
+
         raw_sel = body.get("selection")
         selection_json = None
         has_selection = raw_sel is not None
@@ -1966,17 +2109,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
                     db, self.channel, posted_content
                 )
+                # A DM's recipients are auto-added to the ping set so they wake
+                # (they can see it); visibility stays governed by recipients.
+                # Mirrors trio_dm on the MCP side.
+                if recipient_ids:
+                    for rid in recipient_ids:
+                        if rid not in mention_ids:
+                            mention_ids.append(rid)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs, reply_to, selection) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, reply_to, selection, recipients) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
                      reply_to,
-                     selection_json if selection_json else ""),
+                     selection_json if selection_json else "",
+                     json.dumps(recipient_ids) if recipient_ids else "[]"),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
@@ -2070,6 +2221,76 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, **(result or {})})
 
+    def _handle_set_filter(self, parsed) -> None:
+        """Set a member's wake filter (operator-adjustable filter, feature #4).
+        One UPDATE members SET filter_mode = ?. The monitor READS this column
+        every tick, so the change takes effect on its next poll — no restart,
+        and it wins over the agent's launch --filter arg (which only seeds a
+        null column). Mode is validated server-side against FILTER_MODES; an
+        unknown mode is rejected here, and even a bad value that slipped in
+        would fail open (wake on everything) in the monitor's should_wake()."""
+        # Path is /api/member/<id>/filter → ['', 'api', 'member', '<id>', 'filter'].
+        parts = parsed.path.split("/")
+        target_id = unquote(parts[3]).strip() if len(parts) == 5 else ""
+        if not target_id:
+            self._error(400, "member id required")
+            return
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        mode = body.get("filter_mode")
+        if not isinstance(mode, str) or mode not in FILTER_MODES:
+            self._error(400, f"filter_mode must be one of: {', '.join(FILTER_MODES)}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Retuning an agent's wake filter changes how it behaves in the room, so
+        # restrict it to a trusted operator (local shell or Tailscale-verified),
+        # exactly like cull — a weak self-declared guest must not be able to
+        # quiet agents, especially under --tailnet's 0.0.0.0 bind.
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can change wake filters")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            row = db.execute(
+                "SELECT id FROM members WHERE channel = ? AND id = ?",
+                (self.channel, target_id),
+            ).fetchone()
+            if not row:
+                self._error(404, "member not found")
+                return
+            db.execute(
+                "UPDATE members SET filter_mode = ? WHERE channel = ? AND id = ?",
+                (mode, self.channel, target_id),
+            )
+            db.commit()
+        except sqlite3.OperationalError as e:
+            # Pre-v7.2 schemas lack the column; report clearly instead of 500.
+            if "no such column" in str(e) or "filter_mode" in str(e):
+                self._error(409, "wake filters not supported on this database schema")
+                return
+            self._error(500, f"db error: {e}")
+            return
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": target_id, "filter_mode": mode})
+
     def _handle_search(self, parsed) -> None:
         """Full-history search: substring match over this channel's stored
         messages (beyond the ~200 the dashboard keeps in memory)."""
@@ -2083,6 +2304,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
+        # Only the operator is all-seeing; a guest search must not surface
+        # other members' DMs. Scope results with can_see for non-operators.
+        viewer_id = ident.member_id
+        viewer_all_seeing = is_all_seeing(viewer_id)
         # Escape LIKE wildcards so a query like "50%" is a literal substring.
         esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         like = f"%{esc}%"
@@ -2091,16 +2316,28 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at FROM messages "
-                "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
-                "ORDER BY id DESC LIMIT 200",
-                (self.channel, like),
-            ).fetchall()
+            try:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, recipients, created_at FROM messages "
+                    "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                    "ORDER BY id DESC LIMIT 200",
+                    (self.channel, like),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, created_at FROM messages "
+                    "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                    "ORDER BY id DESC LIMIT 200",
+                    (self.channel, like),
+                ).fetchall()
             results = [{"id": r["id"], "member_id": r["member_id"],
                         "member_name": r["member_name"] or r["member_id"],
                         "content": r["content"] or "", "created_at": r["created_at"]}
-                       for r in rows]
+                       for r in rows
+                       if viewer_all_seeing or can_see(
+                           viewer_id, None, r["member_id"],
+                           (r["recipients"] if "recipients" in r.keys() else ""),
+                           allow_all_seeing=False)]
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
             return
@@ -2111,6 +2348,131 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
+
+    def _handle_tasks(self, parsed) -> None:
+        """Read-only task board: every task in this channel, ordered by status
+        priority (open → claimed → blocked → completed → cancelled) then id.
+        Additive — no schema changes; the tasks table is already fully
+        structured (nth_server.py posts the lifecycle markers into chat, this
+        just surfaces the underlying rows). Mirrors _handle_search's identity
+        gate + short-lived read connection idioms."""
+        # This server instance serves exactly one channel (self.channel); a
+        # ?channel= param is accepted for forward-compat / symmetry with the
+        # documented URL but must match, so one channel's board can't read
+        # another's over a shared DB.
+        qs = parse_qs(parsed.query)
+        want = (qs.get("channel", [""])[0] or "").strip()
+        if want and want != self.channel:
+            self._error(403, "channel mismatch")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Status sort priority: active work first, terminal states last.
+        order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
+                 "WHEN 'blocked' THEN 2 WHEN 'completed' THEN 3 "
+                 "WHEN 'cancelled' THEN 4 ELSE 5 END")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, posted_by, claimed_by, status, description, result, "
+                "blocked_by, created_at, updated_at, lease_expires_at "
+                "FROM tasks WHERE channel = ? "
+                f"ORDER BY {order}, id",
+                (self.channel,),
+            ).fetchall()
+            tasks = []
+            for r in rows:
+                try:
+                    deps = json.loads(r["blocked_by"] or "[]")
+                except (ValueError, TypeError):
+                    deps = []
+                tasks.append({
+                    "id": r["id"],
+                    "posted_by": r["posted_by"],
+                    "claimed_by": r["claimed_by"],
+                    "status": r["status"],
+                    "description": r["description"] or "",
+                    "result": r["result"] or "",
+                    "blocked_by": deps,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "lease_expires_at": r["lease_expires_at"],
+                })
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": self.channel,
+                    "count": len(tasks), "tasks": tasks})
+
+    def _handle_tools(self, parsed) -> None:
+        """Read-only expandable detail for the roster tool-use chip (#1/#2):
+        the recent tool calls for one member, newest first, resolved from the
+        capped tool_events ring via sessions.fingerprint. Only SHORT summaries
+        are stored (see nth_activity_hook's privacy contract) so nothing here
+        can leak raw tool_input. Mirrors _handle_tasks' identity gate + short
+        read connection idioms."""
+        qs = parse_qs(parsed.query)
+        want = (qs.get("channel", [""])[0] or "").strip()
+        if want and want != self.channel:
+            self._error(403, "channel mismatch")
+            return
+        member = (qs.get("member", [""])[0] or "").strip()
+        if not member:
+            self._error(400, "member required")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            # Join the event ring to this channel's live sessions for the member.
+            # The ring is already capped per session; LIMIT bounds the response.
+            rows = db.execute(
+                "SELECT te.tool_name AS tool_name, te.target AS target, "
+                "te.created_at AS created_at "
+                "FROM tool_events te "
+                "JOIN sessions s ON s.fingerprint = te.session_id "
+                "WHERE s.channel = ? AND s.member_id = ? AND s.revoked_at IS NULL "
+                "ORDER BY te.id DESC LIMIT 40",
+                (self.channel, member),
+            ).fetchall()
+            events = [{
+                "tool_name": r["tool_name"] or "",
+                "target": r["target"] or "",
+                "created_at": r["created_at"],
+            } for r in rows]
+            # Sub-agents (#2): the Task spawns, surfaced distinctly.
+            subagents = [e for e in events if e["tool_name"] in ("Task", "Agent")]
+        except sqlite3.OperationalError:
+            # Pre-observability schema (no tool_events table): empty, not an error.
+            events, subagents = [], []
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": self.channel, "member": member,
+                    "count": len(events), "events": events,
+                    "subagents": subagents})
 
     def _edit_target(self, db, mid, ident):
         """Load an operator-editable message row, or (None, error). The caller
@@ -2258,6 +2620,160 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "id": mid})
 
+    # ── file-path validate / reveal ──
+    # The client detects path-LIKE tokens in message bodies broadly, then asks
+    # the server which ones actually exist on disk; only real files get linked
+    # (validation, not pattern-matching, gates linkification). A linked path can
+    # then be revealed in Finder. There is NO access gating on these endpoints
+    # (operator's explicit choice), so injection-safety is enforced structurally:
+    # reveal never runs a shell and never plain-`open`s a file (which would
+    # launch its default app) — it only `open -R` (reveal/select in Finder).
+    _PATH_VALIDATE_CAP = 200          # max candidates per validate request
+    _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
+
+    @staticmethod
+    def _expand_path(candidate: str) -> str:
+        """Expand a leading ~ (and ~user). No other transformation — existence
+        is checked as-is, so a relative candidate resolves against the server's
+        current working directory (best-effort; if it doesn't resolve there it
+        simply won't be linked, which is the intended validation behavior).
+        NOTE: relative candidates are validated against the SERVER's cwd, not
+        any client/agent cwd — this is unchanged, intentional, best-effort."""
+        return os.path.expanduser(candidate)
+
+    @staticmethod
+    def _is_trivial_root(expanded: str) -> bool:
+        """True for a filesystem root or pure-separator token ('/', '//', '/..',
+        a bare Windows/volume drive root). These EXIST on disk yet are never a
+        meaningful file link — treating a lone '/' as one is exactly what made a
+        slash used as prose punctuation ('reload / incognito', '#' / '!') pick
+        up a folder icon. Rejected in both validate and reveal (defense in depth
+        alongside the client's filename-segment filter). Real paths UNDER a root
+        ('/Users/…') contain more than separators, so they're unaffected."""
+        if not expanded or not expanded.strip("/\\ \t"):
+            return True                       # empty or only slashes/whitespace
+        try:
+            norm = os.path.normpath(expanded)
+        except (ValueError, TypeError):
+            return False
+        if norm in (os.sep, "/", "//"):       # POSIX root (normpath preserves '//')
+            return True
+        drive, tail = os.path.splitdrive(norm)
+        if drive and tail in ("", os.sep, "/", "\\"):   # bare drive root 'C:\'
+            return True
+        return False
+
+    def _resolve_existing(self, raw: str) -> Optional[str]:
+        """Return the expanded on-disk target for `raw`, or None if it doesn't
+        exist (or is a trivial root — see _is_trivial_root). Tries the candidate
+        as-is first, then with a trailing :line[:col] (editor/grep/Claude-Code
+        form) stripped — so both validate and reveal agree on what a `path:line`
+        token resolves to. Uses lexists so broken symlinks (still revealable)
+        count. Never raises (a NUL/bad path is just 'not found')."""
+        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
+            expanded = self._expand_path(cand)
+            if self._is_trivial_root(expanded):
+                continue                      # '/' & bare roots are not linkable
+            try:
+                if expanded and os.path.lexists(expanded):
+                    return expanded
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def _handle_path_validate(self) -> None:
+        """POST /api/path/validate — body {"paths": [...]}. Returns
+        {"exists": {candidate: bool}} keyed by the ORIGINAL candidate string
+        (so client cache keys line up). A `path:line[:col]` token counts as
+        existing when the bare file exists. Capped at _PATH_VALIDATE_CAP."""
+        # Bodies can carry up to 200 paths; allow a generous cap over the default.
+        body = self._read_json_body(max_bytes=256 * 1024)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            self._error(400, "paths must be a list")
+            return
+        exists: Dict[str, bool] = {}
+        for cand in paths[: self._PATH_VALIDATE_CAP]:
+            if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
+                continue
+            if cand in exists:
+                continue
+            exists[cand] = self._resolve_existing(cand) is not None
+        self._json({"exists": exists})
+
+    def _handle_reveal(self) -> None:
+        """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
+        Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
+        `open` (which would launch the default app), and a leading `--` so a
+        path beginning with `-` can't be read as a flag. Existence is verified
+        first (404 otherwise), so a bogus/injection-style value never reaches a
+        launch. A `path:line[:col]` suffix (Claude-Code form) is stripped so the
+        file itself is revealed."""
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        raw = body.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            self._error(400, "path required")
+            return
+        raw = raw.strip()
+        if len(raw) > self._PATH_MAX_LEN:
+            self._error(400, "path too long")
+            return
+
+        # Resolve to an existing target (as-is, else with a :line[:col] suffix
+        # stripped). Same resolver validate uses, so the UI and the reveal agree.
+        target = self._resolve_existing(raw)
+        if target is None:
+            self._error(404, "path not found on disk")
+            return
+
+        abspath = os.path.abspath(target)
+        plat = sys.platform
+        try:
+            if plat == "darwin":
+                # Reveal (select) in Finder. ARG LIST + `--`: no shell, no flag
+                # injection. `-R` reveals; it never launches the file's app.
+                cp = subprocess.run(
+                    ["open", "-R", "--", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("linux"):
+                # Best-effort: open the containing folder (no reliable "select").
+                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                cp = subprocess.run(
+                    ["xdg-open", "--", folder],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("win"):
+                cp = subprocess.run(
+                    ["explorer", "/select,", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                self._json({"ok": False, "error": f"unsupported platform: {plat}"},
+                           status=501)
+                return
+        except FileNotFoundError:
+            self._json({"ok": False, "error": "reveal tool not available"}, status=501)
+            return
+        except subprocess.TimeoutExpired:
+            self._error(504, "reveal timed out")
+            return
+        if cp.returncode != 0:
+            msg = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
+            self._error(502, f"reveal failed: {msg}")
+            return
+        self._json({"ok": True, "path": abspath})
+
     def _handle_upload(self) -> None:
         """Accept a raw image body (Content-Type = mime, X-Filename header),
         validate by magic bytes, store on disk, and create an unlinked
@@ -2404,16 +2920,60 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "not found")
             return
         att_id = int(tail)
+        # ── Identity + visibility gate ──
+        # Attachment bytes are message content: a DM image must be withheld from
+        # anyone who cannot see its owning message. Resolve the requester the
+        # same way the SSE feed / search do, require a non-PENDING identity (an
+        # unidentified visitor gets nothing, matching sibling endpoints), then
+        # apply THE visibility predicate (can_see) to the owning message. This
+        # is what closes the leak where any reachable client could fetch a DM
+        # attachment by id, bypassing the visibility engine.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        viewer_id = ident.member_id
+        viewer_all_seeing = is_all_seeing(viewer_id)
         row = None
+        msg = None
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             row = db.execute(
-                "SELECT mime, path FROM attachments WHERE id = ? AND channel = ?",
+                "SELECT mime, path, message_id, member_id FROM attachments "
+                "WHERE id = ? AND channel = ?",
                 (att_id, self.channel),
             ).fetchone()
+            # Load the OWNING message so its sender + recipients drive can_see.
+            # Only needed for non-operators (the operator is all-seeing) and only
+            # when the attachment is linked to a message. Defensive: fall back to
+            # a recipients-less SELECT on a pre-migration DB (treated as broadcast,
+            # preserving legacy every-member-sees-everything behavior).
+            if (row is not None and not viewer_all_seeing
+                    and row["message_id"] is not None):
+                try:
+                    msg = db.execute(
+                        "SELECT member_id, recipients FROM messages "
+                        "WHERE id = ? AND channel = ?",
+                        (row["message_id"], self.channel),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    # Missing recipients column (pre-migration) OR a transient
+                    # busy_timeout. Retry the recipients-less form; if the
+                    # messages table is still unhappy, leave msg=None and fall
+                    # through to the uploader-only fallback rather than letting
+                    # the error bubble to the outer handler and DISCARD a
+                    # successfully-read attachment row (which would 404 a
+                    # servable broadcast image under write contention).
+                    try:
+                        msg = db.execute(
+                            "SELECT member_id FROM messages WHERE id = ? AND channel = ?",
+                            (row["message_id"], self.channel),
+                        ).fetchone()
+                    except sqlite3.Error:
+                        msg = None
         except sqlite3.Error:
             row = None
         finally:
@@ -2425,6 +2985,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if not row:
             self._error(404, "not found")
             return
+        # Visibility check — the SAME predicate the SSE feed applies. Serve only
+        # if the requester can_see the owning message: broadcast (empty
+        # recipients), the sender, an addressed recipient, or the all-seeing
+        # operator. Deny with 404 (NOT 403) so a DM attachment id is not an
+        # existence oracle to a non-recipient. Broadcasts stay visible to every
+        # identified viewer, so normal (non-DM) image sharing is unaffected.
+        if not viewer_all_seeing:
+            if msg is not None:
+                recips_raw = (msg["recipients"] if "recipients" in msg.keys() else "")
+                allowed = can_see(viewer_id, None, msg["member_id"], recips_raw,
+                                  allow_all_seeing=False)
+            else:
+                # Not linked to a message yet (freshly uploaded, still composing)
+                # or the owning message is gone — fail closed: only the uploader
+                # may fetch it.
+                allowed = (viewer_id is not None and viewer_id == row["member_id"])
+            if not allowed:
+                self._error(404, "not found")
+                return
         try:
             chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", self.channel)).resolve()
             resolved = Path(row["path"]).resolve()
@@ -2561,6 +3140,67 @@ INDEX_HTML = r"""<!doctype html>
   #settings-panel select:focus { outline: none; border-color: var(--accent); }
   #settings-panel input[type="range"] { width: 130px; cursor: pointer; accent-color: var(--accent); }
 
+  /* ── DM inbox: header button + unread bubble + panel ── */
+  /* The unread-DM count bubble rides on the header DM button. */
+  #btn-dm { position: relative; }
+  #btn-dm .dm-badge {
+    position: absolute; top: -6px; right: -6px; min-width: 16px; height: 16px;
+    padding: 0 4px; border-radius: 8px; background: var(--accent); color: #061019;
+    font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+    box-shadow: 0 0 0 1px var(--bg); pointer-events: none; }
+  #btn-dm .dm-badge[hidden] { display: none; }
+  #btn-dm.has-unread { border-color: var(--accent); color: var(--accent); }
+  /* The DMs button stays available inside a DM view so the operator can open the
+     inbox and hop straight to another thread without returning to the channel. */
+
+  /* DM inbox panel — mirrors the settings drawer. */
+  #dm-panel {
+    position: fixed; top: 46px; right: 10px; z-index: 30;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; min-width: 260px; max-width: 340px;
+    max-height: 70vh; overflow-y: auto;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column; gap: 8px; }
+  #dm-panel[hidden] { display: none; }
+  #dm-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
+                 letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
+  #dm-panel .dm-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
+  /* Inbox header row: title on the left, "+ New DM" affordance on the right. */
+  #dm-panel .dm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #dm-new-btn { font: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px;
+                border-radius: 4px; background: var(--bg2); color: var(--fg);
+                border: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
+  #dm-new-btn:hover, #dm-new-btn.on { background: var(--accent); color: var(--bg);
+                                      border-color: var(--accent); }
+  /* Recipient picker — a compact member list revealed under the header. */
+  #dm-picker { display: flex; flex-direction: column; gap: 2px;
+               padding: 4px; border: 1px solid var(--border); border-radius: 5px;
+               background: var(--bg); max-height: 40vh; overflow-y: auto; }
+  #dm-picker[hidden] { display: none; }
+  #dm-picker .dm-pick-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
+  .dm-pick-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+                 border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
+  .dm-pick-row:hover, .dm-pick-row:focus { background: var(--hover);
+                                           border-color: var(--border); outline: none; }
+  .dm-pick-row .dm-av { font-size: 15px; flex: 0 0 auto; }
+  .dm-pick-row .dm-pick-name { font-size: 12px; color: var(--fg); font-weight: 600;
+                               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dm-thread { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+               border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
+  .dm-thread:hover { background: var(--hover); border-color: var(--border); }
+  .dm-thread.dm-current { border-color: var(--accent); background: var(--hover); cursor: default; }
+  .dm-thread.dm-current .dm-name { color: var(--accent); }
+  .dm-thread .dm-av { font-size: 15px; flex: 0 0 auto; }
+  .dm-thread .dm-meta { flex: 1 1 auto; min-width: 0; }
+  .dm-thread .dm-name { font-size: 12px; color: var(--fg); font-weight: 600;
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dm-thread .dm-prev { font-size: 11px; color: var(--dim);
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dm-thread .dm-unread { flex: 0 0 auto; min-width: 16px; height: 16px; padding: 0 4px;
+                          border-radius: 8px; background: var(--accent); color: #061019;
+                          font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
+  .dm-thread .dm-unread[hidden] { display: none; }
+
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
@@ -2597,6 +3237,15 @@ INDEX_HTML = r"""<!doctype html>
                display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
+  /* Structured confidence badge — rendered in the head only when a message
+     carries a confidence value. Absent confidence renders NO badge at all
+     (never an empty chip). Colors mirror the task-badge palette. */
+  .conf-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+                text-transform: uppercase; padding: 1px 6px; border-radius: 3px;
+                cursor: help; }
+  .conf-badge.high   { color: #7ede9e; background: rgba(126, 222, 158, 0.14); }
+  .conf-badge.medium { color: #f0c060; background: rgba(240, 192, 96, 0.14); }
+  .conf-badge.low    { color: #f08c8c; background: rgba(240, 140, 140, 0.14); }
   .msg .mentions-bar { font-size: 11px; margin: 2px 0 4px;
                        display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
   .msg .mentions-bar .to-label { color: var(--dim); font-size: 10px;
@@ -2658,6 +3307,60 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--mention-member-color, var(--mention));
     margin-right: 4px; vertical-align: 1px;
   }
+  /* @all broadcast — a celebratory rainbow shimmer so "ping everyone" reads
+     louder than a single-member @mention. The gradient is clipped to the glyphs
+     and slowly panned; the dot is a static rainbow bead. Targets the pseudo-
+     member id "all" that decorateInlineSigil sets on the span. Motion is
+     disabled under prefers-reduced-motion (the static rainbow still reads). */
+  .msg .body .inline-mention[data-member-id="all"] {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    animation: at-all-shimmer 3s linear infinite;
+    font-weight: 800;
+  }
+  .msg .body .inline-mention[data-member-id="all"]::before {
+    background: conic-gradient(#ff5f5f, #ffb347, #ffe66d, #7ede7e,
+      #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+  }
+  @keyframes at-all-shimmer {
+    0%   { background-position:   0% 50%; }
+    100% { background-position: 200% 50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .msg .body .inline-mention[data-member-id="all"] { animation: none; }
+  }
+  /* #pound reference inline — same chip+dot mechanism as @, tinted from the
+     mentioned member's roster color (like @), but with a fainter fill and
+     lighter weight so it reads quieter than an @ping. Dot stays member-colored
+     to keep the "who". */
+  .msg .body .inline-ref {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 8%, transparent);
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)), var(--fg) 38%);
+    font-weight: 500; white-space: nowrap;
+  }
+  .msg .body .inline-ref::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, var(--mention));
+    margin-right: 4px; vertical-align: 1px;
+  }
+  /* !bang alert inline — same mechanism, tinted from the mentioned member's
+     roster color (like @), but with a stronger fill and heavier weight so it
+     reads louder than an @ping. Dot stays member-colored to keep the "who". */
+  .msg .body .inline-bang {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 16%, transparent);
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)), var(--fg) 38%);
+    font-weight: 800; white-space: nowrap;
+  }
+  .msg .body .inline-bang::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, var(--mention));
+    margin-right: 4px; vertical-align: 1px;
+  }
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
@@ -2672,6 +3375,21 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body em { font-style: italic; }
   .msg .body del { opacity: 0.7; }
   .msg .body a { color: var(--accent2); text-decoration: underline; }
+  /* Validated file paths — clickable "reveal in Finder" links. Distinct from
+     plain links: code-tinted chip + a subtle 📁 affordance, dotted underline. */
+  .msg .body a.file-link {
+    color: var(--accent); text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 2px; cursor: pointer;
+    background: rgba(var(--ov),0.06); border-radius: 3px; padding: 0 3px;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .msg .body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
+  .msg .body a.file-link:hover { background: rgba(var(--ov),0.12); }
+  .msg .body a.file-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .msg .body a.file-link.file-link-ok  { background: rgba(var(--ok-rgb, 80,200,120),0.22); }
+  .msg .body a.file-link.file-link-err {
+    color: var(--err); background: rgba(var(--ov),0.10); text-decoration-style: wavy;
+  }
   .msg .body h1, .msg .body h2, .msg .body h3,
   .msg .body h4, .msg .body h5, .msg .body h6 {
     margin: 8px 0 4px; font-weight: 700; line-height: 1.25; }
@@ -2701,6 +3419,34 @@ INDEX_HTML = r"""<!doctype html>
   }
   .msg.compact .body::after { content: ""; }
   .msg.system .body { color: var(--dim); font-style: italic; }
+
+  /* ── In-chat task lifecycle cards ── */
+  .msg.task-event .task-event-card { display: flex; align-items: baseline;
+      flex-wrap: wrap; gap: 6px; padding: 4px 8px; border-radius: 5px;
+      background: var(--bg2); border: 1px solid var(--border);
+      border-left: 3px solid var(--border); font-style: normal; }
+  .msg.task-event.te-open      .task-event-card { border-left-color: #7cc0f0; }
+  .msg.task-event.te-claimed   .task-event-card { border-left-color: #f0c060; }
+  .msg.task-event.te-completed .task-event-card { border-left-color: #7ede9e; }
+  .msg.task-event.te-released  .task-event-card { border-left-color: var(--dim); }
+  .msg.task-event.te-cancelled .task-event-card { border-left-color: var(--dimmer); }
+  .task-event-badge { font-size: 9px; padding: 1px 6px; border-radius: 3px;
+      text-transform: uppercase; letter-spacing: 0.5px; user-select: none;
+      flex-shrink: 0; border: 1px solid transparent; }
+  .task-event-badge.open      { color: #7cc0f0; background: rgba(124, 192, 240, 0.12);
+                                border-color: rgba(124, 192, 240, 0.3); }
+  .task-event-badge.claimed   { color: #f0c060; background: rgba(240, 192, 96, 0.12);
+                                border-color: rgba(240, 192, 96, 0.3); }
+  .task-event-badge.completed { color: #7ede9e; background: rgba(126, 222, 158, 0.12);
+                                border-color: rgba(126, 222, 158, 0.3); }
+  .task-event-badge.released,
+  .task-event-badge.cancelled { color: var(--dim); background: var(--bg);
+                                border-color: var(--border); }
+  .task-event-chip { font-size: 10px; font-weight: 600; color: var(--dim);
+      background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+      padding: 0 5px; flex-shrink: 0; }
+  .task-event-text { color: var(--fg); font-size: 12px; min-width: 0;
+      overflow-wrap: anywhere; }
   .msg.mine .author { color: var(--accent2); }
   .msg.targeted { background: rgba(var(--mention-rgb), 0.09); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
@@ -2903,19 +3649,34 @@ INDEX_HTML = r"""<!doctype html>
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
                            user-select: none; }
-  .member .dm-btn { font-size: 9px; padding: 2px 5px; border-radius: 3px;
-                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
-                    cursor: pointer; flex-shrink: 0; user-select: none;
-                    text-transform: uppercase; letter-spacing: 0.5px; }
-  .member .dm-btn:hover { background: var(--accent); color: var(--bg);
-                          border-color: var(--accent); }
+  /* "Message" action inside the expanded detail panel — opens a DM with this
+     member. Sized to match the Remove button so the stacked actions align. */
+  .member .dm-msg-btn { font-size: 11px; line-height: 1.2; padding: 4px 10px; border-radius: 4px;
+                        background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
+                        cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
+  .member .dm-msg-btn:hover { background: var(--accent); color: var(--bg);
+                              border-color: var(--accent); }
   .member .member-actions { display: none; padding: 6px 0 2px 16px; }
-  .member.expanded .member-actions { display: flex; }
+  .member.expanded .member-actions { display: flex; flex-direction: column;
+                                     align-items: flex-start; gap: 8px; }
+  /* "Remove from channel" sits on its own line below the Wakes-on control so
+     it reads as a distinct, deliberate action (not an easy-to-mis-hit inline). */
+  .member.expanded .member-actions .rm-btn { margin-top: 2px; }
   .member .rm-btn { font-size: 11px; line-height: 1.2; padding: 4px 10px; border-radius: 4px;
                     background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
                     cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
   .member .rm-btn:hover { background: var(--mention); color: var(--bg);
                           border-color: var(--mention); }
+  .member .fmode-ctl { display: inline-flex; align-items: center; gap: 5px;
+                       font-size: 10px; color: var(--dim); user-select: none;
+                       text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .fmode-select { font: inherit; font-size: 11px; padding: 3px 6px;
+                          border-radius: 4px; background: var(--bg2);
+                          color: var(--fg); border: 1px solid var(--border);
+                          cursor: pointer; text-transform: none;
+                          letter-spacing: normal; }
+  .member .fmode-select:focus { outline: none; border-color: var(--accent); }
+  .member .fmode-select:disabled { opacity: 0.5; cursor: wait; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -2952,12 +3713,40 @@ INDEX_HTML = r"""<!doctype html>
     100% { opacity: 1;    transform: scale(1); }
   }
   @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
+  /* blocked = frozen on a host prompt, silently stalling the room. Loud on
+     purpose: a fast red pulse so it can't be missed in a crowded roster. */
+  .dot.blocked { background: var(--err); animation: blockpulse 0.9s ease-in-out infinite;
+                 box-shadow: 0 0 0 0 var(--err); }
+  @keyframes blockpulse {
+    0%   { opacity: 1;   transform: scale(1);    box-shadow: 0 0 0 0 rgba(255,80,80,0.55); }
+    70%  { opacity: 0.5; transform: scale(1.15); box-shadow: 0 0 0 5px rgba(255,80,80,0); }
+    100% { opacity: 1;   transform: scale(1);    box-shadow: 0 0 0 0 rgba(255,80,80,0); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.blocked { animation: none; } }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
   .member .stext { font-size: 10px; color: var(--dim); margin-top: 2px;
                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                    padding-left: 16px; }
+  /* Tool-use chip (#1/#2): the collapsed "what is it doing right now" cue.
+     Click the row to expand its recent-calls list (fetched from /api/tools). */
+  .member .tool-chip { font-size: 10px; color: var(--dim); margin-top: 2px;
+                       padding-left: 16px; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; }
+  .member .tool-chip .tc-tool { color: var(--accent2); font-weight: 500; }
+  .member .tool-chip .tc-target { color: var(--dimmer); }
+  .member .tool-chip .tc-sub { color: var(--warn); }
+  .member .tool-detail { display: none; padding: 4px 0 2px 16px; font-size: 10px; }
+  .member.expanded .tool-detail { display: block; }
+  .member .tool-detail .td-head { color: var(--dimmer); text-transform: uppercase;
+                                  letter-spacing: 0.04em; font-size: 9px; margin: 4px 0 2px; }
+  .member .tool-detail .td-row { display: flex; gap: 6px; color: var(--dim);
+                                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .member .tool-detail .td-row .td-name { color: var(--accent2); }
+  .member .tool-detail .td-row .td-tgt { color: var(--dimmer); overflow: hidden;
+                                         text-overflow: ellipsis; }
+  .member .tool-detail .td-empty { color: var(--dimmer); font-style: italic; }
 
   .member .stats { display: none; padding: 8px 0 2px 16px;
                    font-size: 10px; color: var(--dim); }
@@ -2981,6 +3770,46 @@ INDEX_HTML = r"""<!doctype html>
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
   #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
                letter-spacing: -1px; padding-top: 4px; }
+
+  /* ── Task board (sidebar) ── */
+  #tasks-wrap .task-group { margin-bottom: 8px; }
+  #tasks-wrap .task-group:last-child { margin-bottom: 0; }
+  #tasks-wrap .task-group-head { font-size: 9px; text-transform: uppercase;
+                    letter-spacing: 0.06em; color: var(--dim); font-weight: 600;
+                    margin: 6px 0 4px; display: flex; align-items: center; gap: 6px; }
+  #tasks-wrap .task-group-count { color: var(--dimmer); font-weight: 500; }
+  #tasks-wrap .task-empty { font-size: 10px; color: var(--dimmer); font-style: italic; }
+  .task { padding: 5px 0; border-top: 1px solid var(--border); font-size: 11px; }
+  .task:first-child { border-top: none; }
+  .task .task-row { display: flex; align-items: baseline; gap: 6px; }
+  .task .task-id { color: var(--dimmer); font-weight: 600; flex-shrink: 0; }
+  .task .task-desc { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; }
+  .task.status-completed .task-desc { color: var(--dim); text-decoration: line-through; }
+  .task.status-cancelled .task-desc { color: var(--dimmer); text-decoration: line-through; }
+  .task .task-badge { font-size: 8px; padding: 1px 5px; border-radius: 3px;
+                      flex-shrink: 0; user-select: none; text-transform: uppercase;
+                      letter-spacing: 0.5px; border: 1px solid transparent; }
+  .task .task-badge.open      { color: #7cc0f0; background: rgba(124, 192, 240, 0.1);
+                                border-color: rgba(124, 192, 240, 0.3); }
+  .task .task-badge.claimed   { color: #f0c060; background: rgba(240, 192, 96, 0.1);
+                                border-color: rgba(240, 192, 96, 0.3); }
+  .task .task-badge.blocked   { color: #f08c8c; background: rgba(240, 140, 140, 0.1);
+                                border-color: rgba(240, 140, 140, 0.3); }
+  .task .task-badge.completed { color: #7ede9e; background: rgba(126, 222, 158, 0.1);
+                                border-color: rgba(126, 222, 158, 0.3); }
+  .task .task-badge.cancelled { color: var(--dim); background: var(--bg2);
+                                border-color: var(--border); }
+  .task .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px;
+                     padding-left: 2px; font-size: 10px; color: var(--dim); }
+  .task .task-animal { font-size: 12px; line-height: 1; }
+  .task .task-claimer { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                        max-width: 110px; }
+  .task .task-age { color: var(--dimmer); flex-shrink: 0; }
+  .task .task-deps { color: var(--dimmer); }
+  .task .task-result { color: var(--dim); font-style: italic; padding-left: 2px;
+                       margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; }
   #filter-banner { padding: 4px 8px; background: rgba(var(--mention-rgb), 0.12); color: var(--mention);
                    font-size: 10px; border-radius: 3px; margin-bottom: 6px;
                    display: none; cursor: pointer; }
@@ -3023,6 +3852,15 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-auto { display: inline-flex; align-items: center; gap: 5px; }
   #target-bar .tb-auto-name { color: var(--fg); font-weight: 600; }
   body.dm-mode #target-bar { display: none; }
+  /* One-click exit from a DM view back to the main channel (a DM opens in its
+     own view; don't force the operator onto the browser back button). */
+  #dm-back { display: none; }
+  body.dm-mode #dm-back { display: inline-flex; align-items: center;
+    margin-right: 10px; padding: 3px 9px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--border);
+    color: var(--dim); font-size: 12px; font-weight: 600; text-decoration: none;
+    white-space: nowrap; }
+  body.dm-mode #dm-back:hover { border-color: var(--accent); color: var(--fg); }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input-stack { flex: 1; position: relative; min-width: 0; background: var(--bg);
                  border-radius: 4px; }
@@ -3043,6 +3881,20 @@ INDEX_HTML = r"""<!doctype html>
   #input-highlight .composer-mention {
     color: var(--mention-member-color, var(--mention));
     box-shadow: inset 0 -2px 0 var(--mention-member-color, var(--mention));
+  }
+  /* @all in the composer gets the same rainbow shimmer as the rendered chip,
+     so typing "@all" previews the broadcast. Reuses the at-all-shimmer keyframe. */
+  #input-highlight .composer-mention-all {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    box-shadow: none;
+    animation: at-all-shimmer 3s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #input-highlight .composer-mention-all { animation: none; }
   }
   /* The textarea's own glyphs are hidden (color: transparent) so the colored
      #input-highlight mirror behind it is what the user reads; caret-color keeps
@@ -3258,16 +4110,25 @@ INDEX_HTML = r"""<!doctype html>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill pill-icon" id="btn-search" title="search the full channel history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span class="lbl">search</span></span>
+    <span class="pill pill-icon" id="btn-dm" title="direct messages addressed to you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H5.2L4 17.2z"/></svg><span class="lbl">DMs</span><span class="dm-badge" id="dm-count" hidden>0</span></span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill pill-icon" id="btn-notify" title="desktop notifications on @you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="lbl">off</span></span>
-    <span class="pill pill-icon" id="btn-sound" title="play a chime on any new message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
+    <span class="pill pill-icon" id="btn-sound" title="play a chime on new messages (scope in settings when on)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg><span class="lbl">off</span></span>
     <span class="pill pill-icon" id="btn-settings" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">settings</span></span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
   <div id="settings-panel" hidden>
     <h3>Settings</h3>
+  </div>
+  <div id="dm-panel" hidden>
+    <div class="dm-head">
+      <h3>Direct messages</h3>
+      <button type="button" id="dm-new-btn" title="Start a direct message with a channel member">+ New DM</button>
+    </div>
+    <div id="dm-picker" hidden></div>
+    <div id="dm-list"></div>
   </div>
 
   <div id="chat-wrap">
@@ -3282,6 +4143,10 @@ INDEX_HTML = r"""<!doctype html>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
       <div id="r-list"></div>
+    </section>
+    <section id="tasks-wrap">
+      <h2 id="t-heading">Tasks</h2>
+      <div id="t-list"></div>
     </section>
     <section id="chanstats-wrap">
       <h2>Channel stats</h2>
@@ -3345,6 +4210,8 @@ INDEX_HTML = r"""<!doctype html>
   const chat = document.getElementById('chat');
   const rosterEl = document.getElementById('r-list');
   const rosterHeading = document.getElementById('r-heading');
+  const tasksEl = document.getElementById('t-list');
+  const tasksHeading = document.getElementById('t-heading');
   const chanStatsEl = document.getElementById('chanstats');
   const sparkEl = document.getElementById('sparkline');
   const hChannel = document.getElementById('h-channel');
@@ -3434,6 +4301,10 @@ INDEX_HTML = r"""<!doctype html>
     notifyEnabled: false,
     soundEnabled: false,
     chimeVolume: 0.33,
+    soundScope: 'all',        // 'mention' | 'all' — chime scope, INDEPENDENT of
+                              // notifyScope. Defaults to 'all' to preserve the
+                              // historical "chime on any new message" behavior
+                              // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     initialLoad: true,        // pin to newest until the history burst settles
@@ -3453,6 +4324,9 @@ INDEX_HTML = r"""<!doctype html>
     // Ordered list of target ids as rendered in the bar — index → id,
     // so Alt+1..9 maps to the Nth pill.
     targetOrder: [],
+    // DM inbox read-state: counterparty id → highest DM id the operator has
+    // opened. Drives the unread bubble; persisted per-channel in localStorage.
+    dmRead: new Map(),
   };
   const PALETTE = ['#62d7ef','#d070d7','#7ede7e','#e5d35e',
                    '#8eb9ff','#ff8470','#9ef0f0','#f79fea'];
@@ -3465,6 +4339,13 @@ INDEX_HTML = r"""<!doctype html>
     return h;
   }
   function colorFor(id) {
+    // Prefer the collision-free per-roster assignment (rememberColors) so
+    // a small channel gets maximally distinct label colors. Fall back to
+    // the plain hash pick for message authors no longer in the roster
+    // (historical authors who left) — mirrors animalForId — so old
+    // messages stay stably colored.
+    const assigned = COLOR_BY_ID.get(id);
+    if (assigned) return assigned;
     return PALETTE[hash32(id) % PALETTE.length];
   }
   function animalFor(member) {
@@ -3489,6 +4370,39 @@ INDEX_HTML = r"""<!doctype html>
       if (m && m.id && m.animal_emoji) {
         AVATAR_BY_ID.set(m.id, { name: m.animal_name || '', emoji: m.animal_emoji });
       }
+    }
+  }
+  // Lookup table: member_id → label color for the current roster, computed
+  // collision-free locally (client-only — colors aren't delivered on the
+  // member payload the way animal_emoji is). Mirrors the server's avatar
+  // assignment animal_for_channel() (nth_constants.py): resolve members in
+  // sorted member-id order, hash each to a start slot, then linear-probe to
+  // the next free palette slot. Because it's a pure function of the sorted
+  // roster id set, every client derives the same map. NOTE: PALETTE has only
+  // 8 colors, so a roster of >8 must repeat colors regardless of algorithm —
+  // overflow members wrap to the plain hash pick. A follow-up may expand the
+  // palette / move assignment server-side.
+  const COLOR_BY_ID = new Map();
+  function rememberColors(members) {
+    COLOR_BY_ID.clear();
+    const ids = [];
+    for (const m of (members || [])) {
+      if (m && m.id) ids.push(m.id);
+    }
+    ids.sort();
+    const taken = new Set();
+    for (const id of ids) {
+      const start = hash32(id) % PALETTE.length;
+      let pick = start;
+      // Linear-probe to the next free slot. Once every slot is taken (roster
+      // exceeds the palette) the probe returns to `start` — the plain hash
+      // pick — so overflow members collide, matching animal_for_channel's wrap.
+      for (let n = 0; n < PALETTE.length; n++) {
+        if (!taken.has(pick)) break;
+        pick = (pick + 1) % PALETTE.length;
+      }
+      taken.add(pick);
+      COLOR_BY_ID.set(id, PALETTE[pick]);
     }
   }
   function animalForId(id) {
@@ -3782,6 +4696,55 @@ INDEX_HTML = r"""<!doctype html>
     return !!m && SYSTEM_WORDS.has(m[1]);
   }
 
+  // Task lifecycle events are ordinary chat messages tagged with a leading
+  // marker ("[task #7] …", "[claimed #7] by X", "[done #7] …", "[released
+  // #7] …", "[cancelled #7] …" — posted by nth_server.py). We special-case
+  // them into a compact status card, the same way isSystemContent muting
+  // special-cases the plain "[word] …" notices.
+  //
+  // BRITTLE (v1): this keys on the text prefix, so renaming a marker server-
+  // side silently drops the styling and a user typing "[done #3]" would be
+  // mis-styled. The durable fix is a structured kind/task_id column on the
+  // messages row so the client keys on data, not a string prefix (same
+  // additive-ALTER pattern the tasks table already uses) — intentionally NOT
+  // added here.
+  const TASK_VERBS = {
+    task:      { label: 'posted',    cls: 'open' },
+    claimed:   { label: 'claimed',   cls: 'claimed' },
+    done:      { label: 'done',      cls: 'completed' },
+    released:  { label: 'released',  cls: 'released' },
+    cancelled: { label: 'cancelled', cls: 'cancelled' },
+  };
+  function taskEventInfo(s) {
+    const m = /^\[(task|claimed|done|released|cancelled) #?(\d+)\]\s*(.*)$/s.exec(s || '');
+    if (!m) return null;
+    const meta = TASK_VERBS[m[1]];
+    return { verb: m[1], label: meta.label, cls: meta.cls,
+             id: m[2], rest: (m[3] || '').trim() };
+  }
+  function renderTaskEventCard(evt) {
+    const card = document.createElement('div');
+    card.className = 'task-event-card';
+    const badge = document.createElement('span');
+    badge.className = 'task-event-badge ' + evt.cls;
+    badge.textContent = evt.label;
+    card.appendChild(badge);
+    const chip = document.createElement('span');
+    chip.className = 'task-event-chip';
+    chip.textContent = '#' + evt.id;
+    chip.title = 'task #' + evt.id;
+    card.appendChild(chip);
+    if (evt.rest) {
+      const txt = document.createElement('span');
+      txt.className = 'task-event-text';
+      // Humanize any @<member_id> sigils the same way message bodies do, then
+      // render as plain text (no markdown — these are short status lines).
+      txt.textContent = humanizeIdSigils(evt.rest);
+      card.appendChild(txt);
+    }
+    return card;
+  }
+
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
   // input (the server-side parser routes it correctly) but ugly to read;
@@ -3806,9 +4769,12 @@ INDEX_HTML = r"""<!doctype html>
     });
   }
 
-  function mentionMemberForToken(token, allowedIds) {
+  function mentionMemberForToken(token, allowedIds, allowAll) {
     const lower = (token || '').toLowerCase();
-    if (lower === 'all') return { id: 'all', name: 'all' };
+    // @all / !all resolve to the every-member pseudo-target; #all has no
+    // analogue (a reference-to-everyone is just noise), so allowAll is false
+    // for the '#' sigil and the literal token stays plain.
+    if (allowAll !== false && lower === 'all') return { id: 'all', name: 'all' };
     for (const mem of state.members.values()) {
       if (allowedIds && !allowedIds.has(mem.id)) continue;
       if ((mem.id || '').toLowerCase() === lower ||
@@ -3817,12 +4783,17 @@ INDEX_HTML = r"""<!doctype html>
     return null;
   }
 
-  // Find only syntactically complete, roster-resolved @mentions. Unknown
-  // @words stay unadorned, which doubles as feedback that they will not ping
-  // a participant.
-  function collectMentionMatches(text, allowedIds) {
+  // Find only syntactically complete, roster-resolved sigil tokens. Defaults to
+  // '@' (mentions); pass '#' / '!' to collect refs / bangs the same way. Unknown
+  // sigil words stay unadorned, which doubles as feedback that they will not
+  // route to a participant.
+  function collectMentionMatches(text, allowedIds, sigil) {
+    sigil = sigil || '@';
+    // '#all' is noise (no every-member analogue); '@all' / '!all' are targets.
+    const allowAll = sigil !== '#';
+    const sig = sigil.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const matches = [];
-    const re = /(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]+)/g;
+    const re = new RegExp('(^|[^A-Za-z0-9_])' + sig + '([A-Za-z0-9_.-]+)', 'g');
     let hit;
     while ((hit = re.exec(text || ''))) {
       // The token class greedily swallows trailing sentence punctuation
@@ -3831,10 +4802,10 @@ INDEX_HTML = r"""<!doctype html>
       // jen.chen / gabe-guest still match), then trim trailing "."/"-" and
       // retry so the mention still highlights, matching the server's routing.
       let token = hit[2];
-      let member = mentionMemberForToken(token, allowedIds);
+      let member = mentionMemberForToken(token, allowedIds, allowAll);
       while (!member && (token.endsWith('.') || token.endsWith('-'))) {
         token = token.slice(0, -1);
-        member = mentionMemberForToken(token, allowedIds);
+        member = mentionMemberForToken(token, allowedIds, allowAll);
       }
       if (!member) continue;
       const start = hit.index + hit[1].length;
@@ -3843,32 +4814,45 @@ INDEX_HTML = r"""<!doctype html>
     return matches;
   }
 
-  function decorateInlineMentions(root, mentionIds) {
-    if (!root || !mentionIds || !mentionIds.length) return;
-    const allowed = new Set(mentionIds);
+  // Per-sigil hover title for an inline-decorated token.
+  const INLINE_SIGIL_TITLES = {
+    '@': (m) => m.id === 'all' ? 'Mentions every participant'
+                               : 'Mentions ' + (m.name || m.id),
+    '#': (m) => 'References ' + (m.name || m.id),
+    '!': (m) => m.id === 'all' ? 'Alerts every participant'
+                               : 'Alerts ' + (m.name || m.id),
+  };
+
+  // Wrap roster-resolved <sigil>token occurrences in the message prose with a
+  // styled inline span (className) carrying the member color on the dot. Shared
+  // by @ (inline-mention), # (inline-ref) and ! (inline-bang) — same mechanism,
+  // distinct per-sigil tint. Tokens inside code/pre/links or an already-
+  // decorated span are skipped so we never double-wrap or touch literal code.
+  function decorateInlineSigil(root, sigil, className, ids) {
+    if (!root || !ids || !ids.length) return;
+    const allowed = new Set(ids);
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     while (walker.nextNode()) {
       const node = walker.currentNode;
       const parent = node.parentElement;
-      if (!parent || parent.closest('code, pre, a, .inline-mention')) continue;
-      if (collectMentionMatches(node.nodeValue || '', allowed).length) nodes.push(node);
+      if (!parent || parent.closest('code, pre, a, .inline-mention, .inline-ref, .inline-bang')) continue;
+      if (collectMentionMatches(node.nodeValue || '', allowed, sigil).length) nodes.push(node);
     }
+    const titleFor = INLINE_SIGIL_TITLES[sigil] || INLINE_SIGIL_TITLES['@'];
     for (const node of nodes) {
       const text = node.nodeValue || '';
-      const matches = collectMentionMatches(text, allowed);
+      const matches = collectMentionMatches(text, allowed, sigil);
       if (!matches.length) continue;
       const frag = document.createDocumentFragment();
       let cursor = 0;
       for (const match of matches) {
         frag.appendChild(document.createTextNode(text.slice(cursor, match.start)));
         const span = document.createElement('span');
-        span.className = 'inline-mention';
+        span.className = className;
         span.textContent = text.slice(match.start, match.end);
         span.dataset.memberId = match.member.id;
-        span.title = match.member.id === 'all'
-          ? 'Mentions every participant'
-          : 'Mentions ' + (match.member.name || match.member.id);
+        span.title = titleFor(match.member);
         if (match.member.id !== 'all') {
           span.style.setProperty('--mention-member-color', colorFor(match.member.id));
         }
@@ -3880,19 +4864,194 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Decorate all three targeting sigils inline from a message's parsed arrays.
+  // @ runs first so its spans exist before the # / ! passes (each pass skips the
+  // others' spans via the exclusion selector).
+  function decorateInlineMentions(root, mentionIds, refIds, bangIds) {
+    decorateInlineSigil(root, '@', 'inline-mention', mentionIds);
+    decorateInlineSigil(root, '#', 'inline-ref',     refIds);
+    decorateInlineSigil(root, '!', 'inline-bang',    bangIds);
+  }
+
+  // ── Clickable file paths (reveal in Finder) ──
+  // Agents reference file paths constantly. Detection here is deliberately
+  // BROAD — it only produces CANDIDATES; a token is linkified ONLY after the
+  // server confirms it exists on disk (POST /api/path/validate). This avoids
+  // false positives from anything that merely looks path-like. Matches:
+  // absolute (/…), home (~/…), explicit relative (./… ../…), a bare relative
+  // dir/file, and any of those with a trailing :line[:col] (Claude-Code form).
+  // A single character-class run + optional :line[:col] — a flat quantifier
+  // (no nested `(…+…)+`), so it scans in LINEAR time and can't be driven into
+  // catastrophic/quadratic backtracking (ReDoS) by a long slash-free blob.
+  // Candidates are then post-filtered: a real path must contain a '/'.
+  const FILE_PATH_RUN_RE = /[A-Za-z0-9_.~/-]+(?::\d+(?::\d+)?)?/g;
+  const FILE_PATH_MAX_LEN = 4096;
+  // Per-path validation cache (path token → exists bool). Shared across every
+  // message so re-renders and repeated paths never re-hit the endpoint.
+  const filePathCache = new Map();
+
+  function detectFilePathCandidates(text) {
+    const out = [];
+    if (!text) return out;
+    FILE_PATH_RUN_RE.lastIndex = 0;
+    let m;
+    while ((m = FILE_PATH_RUN_RE.exec(text)) !== null) {
+      let tok = m[0];
+      const start = m.index;
+      if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Require a real FILENAME SEGMENT, not just separators: a candidate must
+      // carry at least one name character ([A-Za-z0-9_]). This rejects a BARE
+      // '/' (and pure-punctuation runs like '//', './', '-/-') that a slash used
+      // as prose punctuation produces — "reload / incognito", "high / low",
+      // "#" / "!". Those would otherwise validate against on-disk roots ('/'
+      // exists!) and wrongly pick up a folder link. Slash-joined WORDS ('and/or',
+      // 'high/medium/low') still pass here but are gated by real existence, so
+      // they only link if they genuinely resolve. (Server rejects roots too —
+      // defense in depth.)
+      if (!/[A-Za-z0-9_]/.test(tok)) continue;
+      // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
+      // ".." tail. Trailing trim only, so the start offset stays valid.
+      tok = tok.replace(/([^.\/])\.$/, '$1');
+      if (!tok || tok.length > FILE_PATH_MAX_LEN) continue;
+      out.push({ start, end: start + tok.length, token: tok });
+    }
+    return out;
+  }
+
+  // Wrap candidate tokens the caller marks valid (isValid(token) === true) in a
+  // .file-link. Skips code/pre/existing links, the @/#/! sigil spans, and
+  // already-linkified paths, so we never double-wrap or touch literal code.
+  // onClick (optional) is attached to each created link.
+  function linkifyValidatedPaths(root, isValid, onClick) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      if (detectFilePathCandidates(node.nodeValue || '').some(c => isValid(c.token)))
+        nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const cands = detectFilePathCandidates(text).filter(c => isValid(c.token));
+      if (!cands.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const c of cands) {
+        if (c.start < cursor) continue;   // defensive: skip any overlap
+        frag.appendChild(document.createTextNode(text.slice(cursor, c.start)));
+        const link = document.createElement('a');
+        link.className = 'file-link';
+        link.textContent = c.token;
+        link.dataset.path = c.token;
+        link.setAttribute('role', 'button');
+        link.setAttribute('tabindex', '0');
+        link.title = 'Reveal in Finder';
+        if (typeof onClick === 'function') {
+          link.addEventListener('click', (e) => { e.preventDefault(); onClick(c.token, link); });
+          link.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(c.token, link); }
+          });
+        }
+        frag.appendChild(link);
+        cursor = c.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  // Brief inline state on a file link after a reveal attempt (no navigation,
+  // no modal). Success/failure both auto-revert; failures surface the reason
+  // in the tooltip.
+  function flashFileLink(link, ok, msg) {
+    if (!link || !link.classList) return;
+    const cls = ok ? 'file-link-ok' : 'file-link-err';
+    link.classList.add(cls);
+    if (msg) link.title = msg;
+    setTimeout(() => {
+      link.classList.remove(cls);
+      link.title = 'Reveal in Finder';
+    }, 1500);
+  }
+
+  async function revealPath(path, link) {
+    if (typeof fetch !== 'function') return;
+    try {
+      const r = await fetch('/api/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data && data.ok) flashFileLink(link, true);
+      else flashFileLink(link, false, (data && data.error) || ('reveal failed (' + r.status + ')'));
+    } catch (e) {
+      flashFileLink(link, false, 'reveal failed: ' + e.message);
+    }
+  }
+
+  // Detect candidate paths in a rendered message body, validate the uncached
+  // ones against the server (batched into one request per message), then
+  // linkify only those confirmed to exist. Fire-and-forget from paintBody.
+  // Relative candidates are resolved by the server against ITS cwd (best
+  // effort); if they don't resolve there, they simply stay unlinked.
+  async function decorateFilePaths(root) {
+    if (!root || typeof fetch !== 'function') return;
+    const tokens = new Set();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      for (const c of detectFilePathCandidates(node.nodeValue || '')) tokens.add(c.token);
+    }
+    if (!tokens.size) return;
+    const need = [...tokens].filter(t => !filePathCache.has(t));
+    // Validate in chunks (server caps at 200/req); cache each verdict so this
+    // path is never re-validated on a later render.
+    for (let i = 0; i < need.length; i += 200) {
+      const chunk = need.slice(i, i + 200);
+      try {
+        const r = await fetch('/api/path/validate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: chunk }),
+        });
+        if (r.ok) {
+          const data = await r.json().catch(() => ({}));
+          const ex = (data && data.exists) || {};
+          for (const t of chunk) filePathCache.set(t, ex[t] === true);
+        }
+      } catch (e) { /* leave uncached — just won't linkify this pass */ }
+    }
+    linkifyValidatedPaths(root, (t) => filePathCache.get(t) === true, revealPath);
+  }
+
   function renderComposerMentionHighlights() {
     if (!inputHighlight) return;
     const text = input.value || '';
-    const matches = collectMentionMatches(text, null);
+    // Collect all three sigils (was @-only) so #refs and !bangs also highlight
+    // in the composer preview, in the mentioned member's roster color — matching
+    // the rendered message. Reuse the @ class (composer-mention) so glyph weight/
+    // width stays identical to the textarea (a bolder overlay would misalign the
+    // monospace mirror); @all / !all broadcasts keep the rainbow shimmer.
+    const matches = ['@', '#', '!']
+      .flatMap(sig => collectMentionMatches(text, null, sig))
+      .sort((a, b) => a.start - b.start);
     let html = '';
     let cursor = 0;
     for (const match of matches) {
       html += escapeHtml(text.slice(cursor, match.start));
       // colorFor returns a fixed palette hex (injection-safe); @all has no
-      // per-member color and falls back to --mention via the CSS default.
-      const mc = match.member.id === 'all' ? '' : colorFor(match.member.id);
+      // per-member color and falls back to the rainbow shimmer via its own class.
+      const isAll = match.member.id === 'all';
+      const mc = isAll ? '' : colorFor(match.member.id);
       const styleAttr = mc ? ' style="--mention-member-color:' + mc + '"' : '';
-      html += '<span class="composer-mention"' + styleAttr + '>' +
+      const cls = isAll ? 'composer-mention composer-mention-all' : 'composer-mention';
+      html += '<span class="' + cls + '"' + styleAttr + '>' +
               escapeHtml(text.slice(match.start, match.end)) + '</span>';
       cursor = match.end;
     }
@@ -4023,7 +5182,7 @@ INDEX_HTML = r"""<!doctype html>
       badge.title = `${mem.name} (${mid}) — the ${animalName} — ${read ? 'read ✓' : 'pending…'}  · last_read: ${mem.last_read}  (click to open DM tab)`;
       badge.onclick = (e) => {
         e.stopPropagation();
-        if (!DM_MODE) window.open('/?dm=' + encodeURIComponent(mid), '_blank');
+        if (!DM_MODE) openDmTab(mid);   // marks the thread read + clears the bubble
       };
       box.appendChild(badge);
     }
@@ -4473,6 +5632,9 @@ INDEX_HTML = r"""<!doctype html>
     _initialSettleTimer = setTimeout(() => {
       _initialSettleTimer = null;
       state.initialLoad = false;
+      // The on-screen DM thread was just fully rendered — mark it read once so
+      // its backscroll doesn't linger in the bubble, then reflect that.
+      if (DM_MODE && DM_TARGET_ID) { markDmRead(DM_TARGET_ID); refreshDmBadge(); }
       requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
     }, 250);
   }
@@ -4493,7 +5655,11 @@ INDEX_HTML = r"""<!doctype html>
     } else {
       body.classList.remove('plain');
       body.innerHTML = renderMarkdown(m.content || '');
-      decorateInlineMentions(body, m.mentions || []);
+      decorateInlineMentions(body, m.mentions || [], m.refs || [], m.bangs || []);
+      // Async: validate path-like tokens with the server and linkify the real
+      // ones (reveal-in-Finder). Runs after mention decoration so it skips
+      // those spans; fire-and-forget so paint stays synchronous.
+      decorateFilePaths(body);
     }
     if (m.edited_at) {
       const tag = document.createElement('span');
@@ -4530,11 +5696,18 @@ INDEX_HTML = r"""<!doctype html>
       const body = div.querySelector('.body');
       if (body) paintBody(div, body, m);
       applyTargetBars(div, m);   // sigils may have changed / cleared on delete
+      applyConfBadge(div, Object.assign({}, prev, m));  // keep the badge in sync
     }
     // A retracted message is no longer editable — drop its author controls.
     if (m.retracted_at) {
       const acts = div.querySelector('.msg-actions');
       if (acts) acts.remove();
+    }
+    // An edit/retract/delete of one of the operator's OWN DMs changes the inbox
+    // preview (and a delete shouldn't keep counting toward unread) — refresh.
+    if (dmCounterparty(state.messages.get(m.id), state.operator.id)) {
+      refreshDmBadge();
+      if (dmPanel && !dmPanel.hasAttribute('hidden')) renderDmInbox();
     }
   }
 
@@ -4618,6 +5791,38 @@ INDEX_HTML = r"""<!doctype html>
     });
   }
 
+  // Build a confidence badge element for high/medium/low, or null for any
+  // absent/unrecognized value. Returning null (rather than an empty node) is
+  // what guarantees an un-declared confidence renders NOTHING.
+  function confBadge(conf) {
+    const v = (conf == null ? '' : String(conf)).trim().toLowerCase();
+    if (v !== 'high' && v !== 'medium' && v !== 'low') return null;
+    const b = document.createElement('span');
+    b.className = 'conf-badge ' + v;
+    b.textContent = v;
+    b.title = 'self-rated confidence: ' + v;
+    return b;
+  }
+
+  // Refresh a message's confidence badge in place (used by message_update so an
+  // edited message reflects a changed/added/cleared confidence). Removes any
+  // existing badge first, then re-adds only if the current value is valid.
+  function applyConfBadge(div, m) {
+    const head = div.querySelector('.head');
+    if (!head) return;
+    const existing = head.querySelector('.conf-badge');
+    if (existing) existing.remove();
+    // A retracted message shows "[deleted]" — drop its badge too, mirroring
+    // applyTargetBars clearing sigils on retract.
+    if (m.retracted_at) return;
+    if (isSystemContent(m.content || '')) return;
+    const cb = confBadge(m.confidence);
+    if (!cb) return;
+    // Keep the original slot: before the acks span if present, else appended.
+    const acks = head.querySelector('.acks');
+    if (acks) head.insertBefore(cb, acks); else head.appendChild(cb);
+  }
+
   function appendMessage(m) {
     if (state.seenMsgIds.has(m.id)) return;
     state.seenMsgIds.add(m.id);
@@ -4632,12 +5837,17 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     const isMine = m.member_id === state.operator.id;
-    const isSystem = isSystemContent(m.content || '');
+    // Task lifecycle lines render as compact status cards (see taskEventInfo);
+    // treat them as system so the author/bars/edit chrome is suppressed the
+    // same way it is for the muted "[word] …" notices.
+    const taskEvt = taskEventInfo(m.content || '');
+    const isSystem = isSystemContent(m.content || '') || !!taskEvt;
     const isAsk = !isSystem && isAskChoices(m.choices);
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
+                  + (taskEvt ? ' task-event te-' + taskEvt.cls : '')
                   + (mentionsOperator ? ' targeted' : '');
     div.dataset.msgId = String(m.id);
     div.dataset.search = (m.content || '').toLowerCase() + ' '
@@ -4674,6 +5884,13 @@ INDEX_HTML = r"""<!doctype html>
       author.style.color = colorFor(m.member_id);
       head.appendChild(author);
     }
+    // Structured confidence badge — only when a value is present. Absent /
+    // unknown confidence adds nothing (no empty badge). System/task rows carry
+    // no author, so skip the badge there too.
+    if (!isSystem) {
+      const cb = confBadge(m.confidence);
+      if (cb) head.appendChild(cb);
+    }
     const acks = document.createElement('span');
     acks.className = 'acks';
     head.appendChild(acks);
@@ -4692,7 +5909,11 @@ INDEX_HTML = r"""<!doctype html>
       div.appendChild(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
     }
 
-    if (isAsk) {
+    if (taskEvt) {
+      // Task lifecycle: a compact status card (badge + #id chip + short text)
+      // in place of the raw "[done #7] …" prose.
+      div.appendChild(renderTaskEventCard(taskEvt));
+    } else if (isAsk) {
       // trio_ask multiple-choice question: render the interactive picker
       // instead of the plain body (the body text is only a transcript for
       // non-web readers). Stop clicks from toggling compact/expand on the msg.
@@ -4819,8 +6040,30 @@ INDEX_HTML = r"""<!doctype html>
       } catch (e) { /* ignore */ }
     }
 
-    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
-    if (state.soundEnabled && !isMine && !isSystem) playChime();
+    // In-page chime for a new peer message (opt-in, focus-agnostic). The scope
+    // (soundScope) is kept independent of the desktop-notify scope, so a quiet
+    // chime on all messages can coexist with a popup only on @mentions, or vice
+    // versa. Reuses the same mentionsOperator predicate the notify block uses.
+    // Skip the primed-history burst on load/reconnect — chime only for LIVE
+    // messages once state.initialLoad has settled. Without this, a refresh plays
+    // every historical chime at once (overlapping waveforms = loud + phasey).
+    if (!state.initialLoad && state.soundEnabled && !isMine && !isSystem &&
+        chimeScopeAllows(state.soundScope, mentionsOperator)) playChime();
+
+    // DM inbox: when a message in one of the operator's OWN DM threads arrives,
+    // refresh the unread bubble (and the inbox if it's open). Gated on the
+    // message actually being the operator's DM so ordinary broadcast traffic
+    // doesn't trigger a recompute.
+    const dmCp = dmCounterparty(m, state.operator.id);
+    if (dmCp) {
+      // In a DM view, keep the on-screen thread marked read so its own live
+      // traffic never lights the bubble; the bubble tracks OTHER threads. Only
+      // on live appends — the initial burst is watermarked once on settle
+      // (below) to avoid per-message localStorage churn across tabs.
+      if (DM_MODE && dmCp === DM_TARGET_ID && !state.initialLoad) markDmRead(dmCp);
+      refreshDmBadge();
+      if (dmPanel && !dmPanel.hasAttribute('hidden')) renderDmInbox();
+    }
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -5043,15 +6286,27 @@ INDEX_HTML = r"""<!doctype html>
     // authors to the server-assigned collision-free emoji. Must run
     // before any render path that looks up avatars by id.
     rememberAvatars(members);
+    // Refresh the id→color assignment so colorFor() gives current members
+    // collision-free label colors. Same timing constraint as avatars: must
+    // run before any render path that looks up colors by id.
+    rememberColors(members);
 
     // Reconcile state.members — and detect name changes so the chat can
     // retroactively re-label past messages from the renamed member.
     const rename_from = new Map();  // id → old member_name for messages
+    let blockedOnset = false;       // any member just transitioned INTO blocked?
     for (const m of members) {
       const old = state.members.get(m.id);
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
+      // #6: audible/visible alert on the EDGE into blocked (not every refresh
+      // while blocked), and only for peers — never your own session.
+      if (m.status === 'blocked' && (!old || old.status !== 'blocked')
+          && m.id !== state.operator.id) {
+        blockedOnset = true;
+      }
     }
+    if (blockedOnset) alertBlocked();
     // The roster event is a full snapshot — prune anyone no longer in it (e.g.
     // culled). Without this, state.members is set-not-cleared, so a removed
     // member ghosts in ack badges, watermark pins, and @-mention autocomplete
@@ -5073,7 +6328,8 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     const sorted = members.slice().sort((a, b) => {
-      const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+      // blocked floats to the very top — it needs a human's eyes now.
+      const order = { blocked: -1, active: 0, idle: 1, stale: 2, dead: 3 };
       if (a.id === state.operator.id) return 1;
       if (b.id === state.operator.id) return -1;
       const oa = order[a.status] ?? 4;
@@ -5115,6 +6371,17 @@ INDEX_HTML = r"""<!doctype html>
         state.originalTitle = label;
         hChannel.textContent = label;
         updateTitle();
+      }
+      // One-click exit back to the main channel — a DM opens in its own view,
+      // so don't make the operator rely on the browser back button. The link
+      // drops the ?dm= query, loading the main channel in this same tab.
+      if (hChannel && hChannel.parentNode && !document.getElementById('dm-back')) {
+        const back = document.createElement('a');
+        back.id = 'dm-back';
+        back.href = location.pathname;
+        back.textContent = '← #' + state.channel;
+        back.title = 'Back to the main channel';
+        hChannel.parentNode.insertBefore(back, hChannel);
       }
     }
   }
@@ -5178,6 +6445,30 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Set an agent's wake filter (agent detail dropdown, feature #4). POSTs to
+  // /api/member/<id>/filter — one UPDATE members SET filter_mode. The monitor
+  // reads members.filter_mode each tick, so it takes effect on the next poll
+  // with no restart, and wins over the agent's launch --filter seed. Returns
+  // true on success; the caller restores the previous selection on false.
+  async function setMemberFilter(id, mode) {
+    try {
+      const r = await fetch('/api/member/' + encodeURIComponent(id) + '/filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filter_mode: mode }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('wake-filter change failed: ' + (err.error || r.status));
+        return false;
+      }
+      return true;
+    } catch (e) {
+      alert('wake-filter change failed: ' + e.message);
+      return false;
+    }
+  }
+
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
@@ -5229,19 +6520,9 @@ INDEX_HTML = r"""<!doctype html>
         : 'Listening mode: about — wakes on @pings and #pounds. Ambient silent.';
       topRow.appendChild(fmPill);
     }
-    // DM button — opens a filtered-view tab for this agent.
-    // Hide for self, for human operator rows, and inside an existing DM tab.
-    if (!DM_MODE && m.id !== state.operator.id && !m.id.startsWith('_op_')) {
-      const dmBtn = document.createElement('span');
-      dmBtn.className = 'dm-btn';
-      dmBtn.textContent = 'DM';
-      dmBtn.title = `Open DM tab with ${m.name}`;
-      dmBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        window.open('/?dm=' + encodeURIComponent(m.id), '_blank');
-      });
-      topRow.appendChild(dmBtn);
-    }
+    // (The per-row DM button was removed to de-clutter the roster; a "Message"
+    // action now lives in the expanded detail panel below, alongside wakes-on
+    // and Remove. Starting a fresh DM is done from the inbox's "+ New DM".)
     const caret = document.createElement('span');
     caret.className = 'caret';
     caret.textContent = '▶';
@@ -5255,10 +6536,29 @@ INDEX_HTML = r"""<!doctype html>
       row.appendChild(st);
     }
 
+    // Tool-use chip (#1/#2): collapsed "running <Tool>: <target>" while the
+    // member is mid-turn. Only meaningful when it's actually acting, so gate on
+    // the working/active/blocked states (an idle/stale/dead member's last tool
+    // is stale). Click the row to expand the recent-calls detail below.
+    const chip = toolChipFor(m);
+    if (chip) {
+      const tc = document.createElement('div');
+      tc.className = 'tool-chip';
+      tc.innerHTML = chip;
+      row.appendChild(tc);
+    }
+
     const stats = document.createElement('div');
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Expandable recent-calls detail — filled lazily from /api/tools on expand.
+    const toolDetail = document.createElement('div');
+    toolDetail.className = 'tool-detail';
+    toolDetail.innerHTML = '<div class="td-empty">loading…</div>';
+    row.appendChild(toolDetail);
+    if (state.expandedMembers.has(m.id)) loadToolDetail(m.id, toolDetail);
 
     // Remove control — only revealed when the row is expanded (its details are
     // open), so it can't be mis-clicked from the collapsed roster. Not for
@@ -5266,6 +6566,62 @@ INDEX_HTML = r"""<!doctype html>
     if (!DM_MODE && m.id !== state.operator.id) {
       const actions = document.createElement('div');
       actions.className = 'member-actions';
+      // Wake-filter dropdown — operator-adjustable per agent (feature #4).
+      // Only agents run a monitor, so skip human/_op_ rows. Posts to
+      // /api/member/<id>/filter; the monitor reads members.filter_mode each
+      // tick, so the change lands on the agent's next poll with no restart.
+      if (isTargetable(m)) {
+        let prevMode = m.filter_mode || 'all';
+        const ctl = document.createElement('label');
+        ctl.className = 'fmode-ctl';
+        ctl.title = 'Wake filter — which messages wake this agent. '
+                  + 'Applies on the next monitor tick (no restart).';
+        ctl.appendChild(document.createTextNode('wakes on'));
+        const sel = document.createElement('select');
+        sel.className = 'fmode-select';
+        for (const [val, label] of [['all', 'all messages'],
+                                    ['about', '@ping + #pound'],
+                                    ['at', '@ping only']]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (prevMode === val) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        // Don't let interacting with the control toggle the row's expand state.
+        sel.addEventListener('click', (e) => e.stopPropagation());
+        sel.addEventListener('change', async (e) => {
+          e.stopPropagation();
+          const chosen = sel.value;
+          sel.disabled = true;
+          const ok = await setMemberFilter(m.id, chosen);
+          sel.disabled = false;
+          if (ok) {
+            // Keep the cached roster coherent until the next SSE snapshot.
+            m.filter_mode = chosen;
+            prevMode = chosen;
+          } else {
+            sel.value = prevMode;  // server rejected it — restore the shown value
+          }
+        });
+        ctl.appendChild(sel);
+        actions.appendChild(ctl);
+      }
+      // Message action — opens a DM tab with this member (same behavior the old
+      // per-row .dm-btn had). Same guard as that button: skip other web
+      // operators (_op_); self is already excluded by the block above.
+      if (!m.id.startsWith('_op_')) {
+        const dmMsg = document.createElement('button');
+        dmMsg.type = 'button';
+        dmMsg.className = 'dm-msg-btn';
+        dmMsg.textContent = 'Message';
+        dmMsg.title = `Open a DM with ${m.name}`;
+        dmMsg.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openDmTab(m.id);   // marks the thread read + clears the bubble
+        });
+        actions.appendChild(dmMsg);
+      }
       const rm = document.createElement('button');
       rm.type = 'button';
       rm.className = 'rm-btn';
@@ -5286,8 +6642,66 @@ INDEX_HTML = r"""<!doctype html>
       else state.expandedMembers.add(m.id);
       row.classList.toggle('expanded');
       stats.innerHTML = renderMemberStatsHTML(m);
+      if (state.expandedMembers.has(m.id)) loadToolDetail(m.id, toolDetail);
     });
     return row;
+  }
+
+  // Collapsed tool-use chip HTML for a member, or '' if nothing to show.
+  function toolChipFor(m) {
+    const tool = (m.last_tool_name || '').trim();
+    if (!tool) return '';
+    if (!(m.status === 'working' || m.status === 'active' || m.status === 'blocked')) return '';
+    // Freshness gate: last_tool_* is the last tool that STARTED and isn't cleared
+    // on a new turn, so a member that resumed via a prompt/RPC without running a
+    // tool yet would otherwise advertise last turn's tool. Only show it if it
+    // started recently.
+    if (m.last_tool_at) {
+      const toolAge = (Date.now() - new Date(m.last_tool_at).getTime()) / 1000;
+      if (!(toolAge >= 0 && toolAge < 180)) return '';
+    }
+    const tgt = (m.last_tool_target || '').trim();
+    // A Task spawn reads as a sub-agent rather than a bare tool.
+    if (tool === 'Task' || tool === 'Agent') {
+      return '🌿 <span class="tc-sub">sub-agent</span>'
+           + (tgt ? ' <span class="tc-target">' + escapeHtml(tgt) + '</span>' : '');
+    }
+    return '🔧 <span class="tc-tool">' + escapeHtml(tool) + '</span>'
+         + (tgt ? ' <span class="tc-target">' + escapeHtml(tgt) + '</span>' : '');
+  }
+
+  // Lazily fetch the recent-calls detail for an expanded member row. Best-effort:
+  // a failure just leaves the placeholder — this is an at-a-glance aid, not a
+  // source of truth.
+  function loadToolDetail(memberId, el) {
+    const url = '/api/tools?member=' + encodeURIComponent(memberId)
+              + '&channel=' + encodeURIComponent(state.channel || '');
+    fetch(url, { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d || !d.ok) { el.innerHTML = '<div class="td-empty">—</div>'; return; }
+        let html = '';
+        if (d.subagents && d.subagents.length) {
+          html += '<div class="td-head">sub-agents (' + d.subagents.length + ')</div>';
+          for (const e of d.subagents.slice(0, 12)) {
+            html += '<div class="td-row"><span class="td-tgt">'
+                 + escapeHtml(e.target || e.tool_name) + '</span></div>';
+          }
+        }
+        html += '<div class="td-head">recent calls</div>';
+        const calls = (d.events || []).filter(e => e.tool_name !== 'Task' && e.tool_name !== 'Agent');
+        if (!calls.length) {
+          html += '<div class="td-empty">no recent tool calls</div>';
+        } else {
+          for (const e of calls.slice(0, 20)) {
+            html += '<div class="td-row"><span class="td-name">' + escapeHtml(e.tool_name || '?') + '</span>'
+                 + (e.target ? '<span class="td-tgt">' + escapeHtml(e.target) + '</span>' : '')
+                 + '</div>';
+          }
+        }
+        el.innerHTML = html;
+      })
+      .catch(() => { el.innerHTML = '<div class="td-empty">—</div>'; });
   }
 
   function renderMemberStatsHTML(m) {
@@ -6035,11 +7449,17 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     sendBtn.disabled = true;
+    // DM tab = a REAL private message now. Send the DM target as `recipients`
+    // so the server withholds it from every other agent (the operator, being
+    // all-seeing, still sees it in the main tab). Outside DM mode, recipients
+    // is omitted → broadcast, unchanged.
+    const dmRecipients = state.dmTargetId ? [state.dmTargetId] : undefined;
     try {
       const r = await fetch('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, mentions: mentionIds,
+                               recipients: dmRecipients,
                                attachment_ids: readyAtt.map(a => a.id) }),
       });
       if (!r.ok) {
@@ -6154,12 +7574,19 @@ INDEX_HTML = r"""<!doctype html>
     node.classList.toggle('filtered-out', !hit);
   }
   function isRelevantInDm(m) {
-    // Conversation between operator and DM target:
-    //  • authored by target → must @mention operator
-    //  • authored by operator → must @mention target
-    //  • system notices about this target (e.g. task claims) stay visible
+    // Conversation between operator and DM target. Now backed by REAL
+    // recipients (server-enforced) plus the legacy @mention heuristic so
+    // pre-DM backscroll still surfaces:
+    //  • a real DM addressed to the target (or from the target to us)
+    //  • authored by target → @mentions operator
+    //  • authored by operator → @mentions target
     if (!state.dmTargetId) return true;
     const ms = m.mentions || [];
+    const rc = m.recipients || [];
+    // Real DMs: operator → target, or target → operator.
+    if (m.member_id === state.operator.id && rc.includes(state.dmTargetId)) return true;
+    if (m.member_id === state.dmTargetId && rc.includes(state.operator.id)) return true;
+    // Legacy @mention conversation (broadcasts that pinged the counterpart).
     if (m.member_id === state.dmTargetId && ms.includes(state.operator.id)) return true;
     if (m.member_id === state.operator.id && ms.includes(state.dmTargetId)) return true;
     return false;
@@ -6174,6 +7601,266 @@ INDEX_HTML = r"""<!doctype html>
       if (m) applyDmFilterToNode(dom, m);
     }
   }
+
+  // ── DM inbox: unread bubble + thread list ─────────────────────────────
+  // Pure helpers (unit-tested via the harness). They operate ONLY on messages
+  // the operator is a participant of — a DM strictly between other members is
+  // shipped to the all-seeing operator feed but is NOT the operator's DM, so it
+  // is excluded here. That keeps the unread count and inbox derived from the
+  // operator's OWN conversations, never from DMs they merely audit.
+  function dmCounterparty(m, operatorId) {
+    if (!m || !operatorId) return null;
+    const rc = m.recipients || [];
+    if (!rc.length) return null;                  // broadcast — not a DM
+    if (m.member_id === operatorId) {             // operator → someone
+      const other = rc.find((x) => x !== operatorId);
+      return other || null;
+    }
+    if (rc.includes(operatorId)) return m.member_id;  // someone → operator
+    return null;                                   // a DM we merely audit
+  }
+  // Group DMs into threads keyed by counterparty. `messages` is any iterable of
+  // message objects (e.g. state.messages.values()). unread = messages FROM the
+  // counterparty with id above the per-thread read watermark.
+  function dmThreadsFor(messages, operatorId, readMap) {
+    const byCp = new Map();
+    for (const m of messages) {
+      const cp = dmCounterparty(m, operatorId);
+      if (!cp) continue;
+      let t = byCp.get(cp);
+      if (!t) { t = { counterparty: cp, lastId: 0, lastMsg: null, unread: 0, group: false }; byCp.set(cp, t); }
+      if (m.id > t.lastId) { t.lastId = m.id; t.lastMsg = m; }
+      const readId = (readMap && readMap.get(cp)) || 0;
+      if (m.member_id === cp && m.id > readId) t.unread++;
+      // Group flag: any contributing message with >1 non-operator participant
+      // (sender + recipients, minus the operator). The existing DM tab is 1:1,
+      // so a group thread is labelled and opens the 1:1 view with `cp` — a known
+      // limitation, but never silently mislabelled as a plain 1:1.
+      const others = new Set(m.recipients || []);
+      others.add(m.member_id);
+      others.delete(operatorId);
+      if (others.size > 1) t.group = true;
+    }
+    return [...byCp.values()].sort((a, b) => b.lastId - a.lastId);
+  }
+  function unreadDmCount(messages, operatorId, readMap) {
+    let n = 0;
+    for (const t of dmThreadsFor(messages, operatorId, readMap)) n += t.unread;
+    return n;
+  }
+
+  const btnDm = document.getElementById('btn-dm');
+  const dmPanel = document.getElementById('dm-panel');
+  const dmListEl = document.getElementById('dm-list');
+  const dmCountEl = document.getElementById('dm-count');
+  const dmNewBtn = document.getElementById('dm-new-btn');
+  const dmPickerEl = document.getElementById('dm-picker');
+
+  function dmReadKey() { return 'trio.dmRead.' + (state.channel || ''); }
+  function loadDmRead() {
+    try {
+      const o = JSON.parse(localStorage.getItem(dmReadKey()) || '{}');
+      state.dmRead = new Map(Object.entries(o).map(([k, v]) => [k, +v || 0]));
+    } catch (_) { state.dmRead = new Map(); }
+  }
+  function saveDmRead() {
+    try { localStorage.setItem(dmReadKey(), JSON.stringify(Object.fromEntries(state.dmRead))); }
+    catch (_) {}
+  }
+  function markDmRead(cp) {
+    const t = dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead)
+      .find((x) => x.counterparty === cp);
+    if (t) { state.dmRead.set(cp, t.lastId); saveDmRead(); }
+  }
+
+  function refreshDmBadge() {
+    if (!dmCountEl || !btnDm) return;
+    // In a DM view the thread on screen is being read, so it never contributes
+    // to the bubble — the count reflects OTHER conversations needing attention.
+    let n = 0;
+    for (const t of dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead)) {
+      if (DM_MODE && t.counterparty === DM_TARGET_ID) continue;
+      n += t.unread;
+    }
+    if (n > 0) {
+      dmCountEl.textContent = n > 99 ? '99+' : String(n);
+      dmCountEl.hidden = false;
+      btnDm.classList.add('has-unread');
+    } else {
+      dmCountEl.hidden = true;
+      btnDm.classList.remove('has-unread');
+    }
+  }
+
+  function openDmTab(cp) {
+    markDmRead(cp);
+    refreshDmBadge();
+    if (dmPanel.hasAttribute('hidden') === false) renderDmInbox();
+    window.open('/?dm=' + encodeURIComponent(cp), '_blank');
+  }
+
+  function renderDmInbox() {
+    if (!dmListEl) return;
+    dmListEl.textContent = '';
+    const threads = dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead);
+    if (!threads.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.textContent = 'No direct messages yet.';
+      dmListEl.appendChild(empty);
+      return;
+    }
+    for (const t of threads) {
+      const mem = state.members.get(t.counterparty);
+      const nm = mem ? mem.name : t.counterparty;
+      const anim = animalFor(mem || { id: t.counterparty });
+      const isCurrent = DM_MODE && t.counterparty === DM_TARGET_ID;
+      const row = document.createElement('div');
+      row.className = 'dm-thread' + (isCurrent ? ' dm-current' : '');
+      row.title = isCurrent ? 'This DM (already open)' : ('Open DM with ' + nm);
+      // Keyboard-accessible like the settings drawer's real controls.
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+
+      const av = document.createElement('span');
+      av.className = 'dm-av';
+      av.textContent = anim.emoji;
+      row.appendChild(av);
+
+      const meta = document.createElement('div');
+      meta.className = 'dm-meta';
+      const name = document.createElement('div');
+      name.className = 'dm-name';
+      name.textContent = t.group ? (nm + ' · group') : nm;
+      if (isCurrent) name.textContent = nm + ' · here';
+      else if (t.group) row.title = 'Open DM with ' + nm + ' (part of a group DM — opens the 1:1 view)';
+      meta.appendChild(name);
+      const prev = document.createElement('div');
+      prev.className = 'dm-prev';
+      const last = t.lastMsg || {};
+      const who = last.member_id === state.operator.id ? 'You: ' : '';
+      const body = humanizeIdSigils((last.content || '').replace(/\s+/g, ' ')).trim();
+      prev.textContent = body ? (who + body.slice(0, 60)) : '(no preview)';
+      meta.appendChild(prev);
+      row.appendChild(meta);
+
+      const badge = document.createElement('span');
+      badge.className = 'dm-unread';
+      // The thread on screen never shows an unread badge — it mirrors the bubble,
+      // which unconditionally excludes it (its watermark can lag the backscroll).
+      if (t.unread > 0 && !isCurrent) { badge.textContent = t.unread > 99 ? '99+' : String(t.unread); }
+      else { badge.hidden = true; }
+      row.appendChild(badge);
+
+      // The thread you're already viewing just closes the drawer — no point
+      // spawning a duplicate tab of the DM already on screen.
+      const activate = isCurrent ? () => toggleDmPanel(false) : () => openDmTab(t.counterparty);
+      row.addEventListener('click', activate);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+      });
+      dmListEl.appendChild(row);
+    }
+  }
+
+  // Members the operator can start a NEW DM with: everyone in the roster except
+  // themselves (agents AND other human operators). Distinct from the roster's
+  // per-agent Message action, which — like the old .dm-btn — skips _op_ humans;
+  // the picker is the deliberate "reach anyone" surface. Sorted by name.
+  function dmPickerMembers() {
+    return [...state.members.values()]
+      // Exclude the operator, and — inside a DM view — the counterparty already
+      // on screen (you're in that thread; picking it would just dup the tab).
+      .filter((m) => m && m.id && m.id !== state.operator.id
+                     && !(DM_MODE && m.id === DM_TARGET_ID))
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  }
+
+  function renderDmPicker() {
+    if (!dmPickerEl) return;
+    dmPickerEl.textContent = '';
+    const members = dmPickerMembers();
+    if (!members.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-pick-empty';
+      empty.textContent = 'No one else in the channel yet.';
+      dmPickerEl.appendChild(empty);
+      return;
+    }
+    for (const m of members) {
+      const anim = animalFor(m);
+      const row = document.createElement('div');
+      row.className = 'dm-pick-row';
+      row.dataset.memberId = m.id;
+      row.title = 'Start a DM with ' + m.name;
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+
+      const av = document.createElement('span');
+      av.className = 'dm-av';
+      av.textContent = anim.emoji;
+      row.appendChild(av);
+
+      const nm = document.createElement('span');
+      nm.className = 'dm-pick-name';
+      nm.textContent = m.name;
+      row.appendChild(nm);
+
+      const start = () => { toggleDmPicker(false); openDmTab(m.id); toggleDmPanel(false); };
+      row.addEventListener('click', start);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); start(); }
+      });
+      dmPickerEl.appendChild(row);
+    }
+  }
+
+  function toggleDmPicker(force) {
+    if (!dmPickerEl || !dmNewBtn) return;
+    const show = (force !== undefined) ? force : dmPickerEl.hasAttribute('hidden');
+    if (show) {
+      renderDmPicker(); dmPickerEl.removeAttribute('hidden'); dmNewBtn.classList.add('on');
+      // Drop focus onto the first recipient so the picker is keyboard-drivable
+      // straight away (it's the primary "start a DM" surface).
+      const first = dmPickerEl.querySelector('.dm-pick-row');
+      if (first) first.focus();
+    }
+    else { dmPickerEl.setAttribute('hidden', ''); dmNewBtn.classList.remove('on'); }
+  }
+  if (dmNewBtn) {
+    dmNewBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPicker(); });
+  }
+
+  function toggleDmPanel(force) {
+    if (!dmPanel) return;
+    const show = (force !== undefined) ? force : dmPanel.hasAttribute('hidden');
+    if (show) {
+      // Both drawers share the same top-right slot — only one at a time.
+      if (typeof toggleSettings === 'function') toggleSettings(false);
+      renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
+    } else { toggleDmPicker(false); dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
+  }
+  if (btnDm) {
+    btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
+    document.addEventListener('click', (e) => {
+      if (dmPanel.hasAttribute('hidden')) return;
+      if (dmPanel.contains(e.target) || btnDm.contains(e.target)) return;
+      toggleDmPanel(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !dmPanel.hasAttribute('hidden')) toggleDmPanel(false);
+    });
+    // Cross-tab sync: a DM opened/marked-read in another dashboard tab (or the
+    // spawned /?dm= tab writing this key) updates our read watermark too.
+    window.addEventListener('storage', (e) => {
+      if (e.key === dmReadKey()) {
+        loadDmRead();
+        refreshDmBadge();
+        if (!dmPanel.hasAttribute('hidden')) renderDmInbox();
+      }
+    });
+  }
+
   filterEl.addEventListener('input', () => setFilter(filterEl.value));
   filterBanner.addEventListener('click', () => setFilter(''));
 
@@ -6235,6 +7922,15 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { _audioCtx = null; }
     return _audioCtx;
   }
+  // Does a peer message qualify for the chime under the current scope?
+  //   'all'     → every peer message chimes.
+  //   'mention' → only messages that @mention the operator chime.
+  // Pure (no DOM/state) so it can be unit-tested via the harness hook. The
+  // on/off master is state.soundEnabled + the btn-sound pill; this only refines
+  // an already-enabled chime, and stays independent of notifyScope.
+  function chimeScopeAllows(scope, mentionsOperator) {
+    return scope === 'all' ? true : !!mentionsOperator;
+  }
   function playChime() {
     const ctx = ensureAudio();
     if (!ctx) return;
@@ -6260,7 +7956,37 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { /* ignore */ }
   }
 
-  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  // #6: a distinct, urgent low-high beep when a peer transitions into `blocked`
+  // (frozen on a host prompt). Deliberately different from the message chime so
+  // it reads as "someone is stuck and needs you", and only when sound is on.
+  function alertBlocked() {
+    if (!state.soundEnabled) return;
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
+    const vol = Math.max(0, Math.min(1, state.chimeVolume));
+    if (vol <= 0) return;
+    try {
+      const now = ctx.currentTime;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(vol, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
+      gain.connect(ctx.destination);
+      // urgent two-note fall A5 -> D5 on a square wave — cuts through.
+      [[880.0, 0], [587.33, 0.16]].forEach(([freq, t]) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'square';
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        osc.start(now + t);
+        osc.stop(now + t + 0.30);
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  // ── Sound (chime) toggle — off by default; the pill is the on/off master and
+  //    state.soundScope (settings drawer) refines which peer messages chime. ──
   btnSound.addEventListener('click', () => {
     state.soundEnabled = !state.soundEnabled;
     btnSound.querySelector('.lbl').textContent = state.soundEnabled ? 'on' : 'off';
@@ -6358,6 +8084,36 @@ INDEX_HTML = r"""<!doctype html>
     return row;
   }
 
+  // Build a <select> preloaded with `options` ([value, label] pairs) and the
+  // `current` value pre-selected. Shared by the chime + notification prefs.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+
+  // Chime scope — off is the btn-sound pill; this refines an enabled chime to
+  // fire on every message or only @mentions. Independent of the notify scope.
+  try {
+    const ss = localStorage.getItem('trio.soundScope'); if (ss) state.soundScope = ss;
+  } catch (_) {}
+  // Wording ('all messages' / '@mentions only') and the mention-first vs
+  // all-first default are matched to the notify-scope select so the two read as
+  // siblings; the title spells out that they're independent controls.
+  const soundScopeSel = prefSelect(
+    [['all', 'all messages'], ['mention', '@mentions only']], state.soundScope);
+  soundScopeSel.title = 'Chime scope — independent of desktop notifications';
+  soundScopeSel.addEventListener('change', () => {
+    state.soundScope = soundScopeSel.value;
+    try { localStorage.setItem('trio.soundScope', state.soundScope); } catch (_) {}
+  });
+  const soundScopeRow = addSettingRow('Chime for', soundScopeSel);
+
   // Chime volume slider — drives state.chimeVolume; previews on release.
   try {
     const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
@@ -6374,17 +8130,7 @@ INDEX_HTML = r"""<!doctype html>
   volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
   const chimeVolRow = addSettingRow('Chime volume', volSlider);
 
-  // Notification preference dropdowns.
-  function prefSelect(options, current) {
-    const sel = document.createElement('select');
-    options.forEach(([val, label]) => {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      if (val === current) o.selected = true;
-      sel.appendChild(o);
-    });
-    return sel;
-  }
+  // Notification preference dropdowns (reuse prefSelect defined above).
   try {
     const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
     const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
@@ -6577,6 +8323,7 @@ INDEX_HTML = r"""<!doctype html>
 
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
+    if (soundScopeRow) soundScopeRow.hidden = !state.soundEnabled;
     if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
     if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
     if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
@@ -6585,6 +8332,8 @@ INDEX_HTML = r"""<!doctype html>
 
   function toggleSettings(force) {
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
+    // Both drawers share the same top-right slot — only one at a time.
+    if (show && typeof toggleDmPanel === 'function') toggleDmPanel(false);
     if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
     else { stopTestRecording(); settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
@@ -6829,6 +8578,154 @@ INDEX_HTML = r"""<!doctype html>
     updateTitle();
   });
 
+  // ── Task board ──
+  // Reads GET /api/tasks and renders the channel's tasks in the sidebar,
+  // grouped by status. The tasks table is authoritative server-side; this is
+  // a pure read view refreshed off the SSE feed (see below).
+  const TASK_GROUPS = [
+    ['open',      'Open'],
+    ['claimed',   'Claimed'],
+    ['blocked',   'Blocked'],
+    ['completed', 'Completed'],
+    ['cancelled', 'Cancelled'],
+  ];
+  // A task lifecycle event IS an ordinary chat message today (e.g. "[claimed
+  // #3] by X" — see nth_server.py), so there's no dedicated SSE task event to
+  // key on. We re-fetch the board whenever an incoming message looks like a
+  // lifecycle marker. Brittle (string match); the durable fix is a structured
+  // kind/task_id column on messages so the client keys on data, not a prefix.
+  const TASK_LIFECYCLE_RE = /^\[(task|claimed|done|released|cancelled) #?\d+/;
+  function isTaskLifecycle(content) {
+    return TASK_LIFECYCLE_RE.test(content || '');
+  }
+
+  function renderTaskRow(t) {
+    const div = document.createElement('div');
+    div.className = 'task status-' + (t.status || '');
+    div.dataset.taskId = String(t.id);
+
+    const row = document.createElement('div');
+    row.className = 'task-row';
+    const idEl = document.createElement('span');
+    idEl.className = 'task-id';
+    idEl.textContent = '#' + t.id;
+    row.appendChild(idEl);
+    const desc = document.createElement('span');
+    desc.className = 'task-desc';
+    desc.textContent = t.description || '';
+    desc.title = t.description || '';
+    row.appendChild(desc);
+    const badge = document.createElement('span');
+    badge.className = 'task-badge ' + (t.status || '');
+    badge.textContent = t.status || '';
+    row.appendChild(badge);
+    div.appendChild(row);
+
+    // Meta line: claimer avatar + name, age, deps.
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+    if (t.claimed_by) {
+      const mem = state.members.get(t.claimed_by);
+      const anim = animalForId(t.claimed_by);
+      const av = document.createElement('span');
+      av.className = 'task-animal';
+      av.textContent = anim.emoji || '';
+      meta.appendChild(av);
+      const who = document.createElement('span');
+      who.className = 'task-claimer';
+      who.textContent = (mem && mem.name) || anim.name || t.claimed_by.slice(0, 8);
+      who.style.color = colorFor(t.claimed_by);
+      meta.appendChild(who);
+    }
+    const age = document.createElement('span');
+    age.className = 'task-age';
+    const created = t.created_at ? Date.parse(t.created_at) : NaN;
+    if (isFinite(created)) {
+      age.textContent = fmtRel((Date.now() - created) / 1000);
+      age.title = t.created_at;
+    } else {
+      age.textContent = '—';
+    }
+    meta.appendChild(age);
+    if (Array.isArray(t.blocked_by) && t.blocked_by.length) {
+      const deps = document.createElement('span');
+      deps.className = 'task-deps';
+      deps.textContent = '⛓ ' + t.blocked_by.map(n => '#' + n).join(' ');
+      deps.title = 'blocked by ' + t.blocked_by.map(n => '#' + n).join(', ');
+      meta.appendChild(deps);
+    }
+    // Only append the meta line if it carries something.
+    if (meta.childNodes.length) div.appendChild(meta);
+
+    if (t.result) {
+      const res = document.createElement('div');
+      res.className = 'task-result';
+      res.textContent = '→ ' + t.result;
+      res.title = t.result;
+      div.appendChild(res);
+    }
+    return div;
+  }
+
+  function renderTasks(tasks) {
+    tasks = tasks || [];
+    tasksHeading.textContent = 'Tasks (' + tasks.length + ')';
+    const frag = document.createDocumentFragment();
+    if (!tasks.length) {
+      const empty = document.createElement('div');
+      empty.className = 'task-empty';
+      empty.textContent = 'no tasks yet';
+      frag.appendChild(empty);
+    } else {
+      const byStatus = new Map();
+      for (const t of tasks) {
+        const k = t.status || 'other';
+        if (!byStatus.has(k)) byStatus.set(k, []);
+        byStatus.get(k).push(t);
+      }
+      for (const [status, label] of TASK_GROUPS) {
+        const group = byStatus.get(status);
+        if (!group || !group.length) continue;
+        const head = document.createElement('div');
+        head.className = 'task-group-head';
+        head.innerHTML = '';
+        const lbl = document.createElement('span');
+        lbl.textContent = label;
+        head.appendChild(lbl);
+        const cnt = document.createElement('span');
+        cnt.className = 'task-group-count';
+        cnt.textContent = group.length;
+        head.appendChild(cnt);
+        const wrap = document.createElement('div');
+        wrap.className = 'task-group';
+        wrap.appendChild(head);
+        for (const t of group) {
+          try { wrap.appendChild(renderTaskRow(t)); }
+          catch (err) { console.error('renderTaskRow failed for', t && t.id, err); }
+        }
+        frag.appendChild(wrap);
+      }
+    }
+    tasksEl.innerHTML = '';
+    tasksEl.appendChild(frag);
+  }
+
+  let tasksInFlight = false;
+  async function refreshTasks() {
+    if (tasksInFlight) return;  // coalesce bursts of lifecycle messages
+    tasksInFlight = true;
+    try {
+      const r = await fetch('/api/tasks?channel=' + encodeURIComponent(state.channel || ''));
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.ok) renderTasks(data.tasks);
+    } catch (e) {
+      console.error('refreshTasks failed', e);
+    } finally {
+      tasksInFlight = false;
+    }
+  }
+
   // ── SSE ──
   let es = null;
   let reconnectTimer = null;
@@ -6843,7 +8740,12 @@ INDEX_HTML = r"""<!doctype html>
     es.onmessage = (ev) => {
       try {
         const payload = JSON.parse(ev.data);
-        if (payload.type === 'message') appendMessage(payload);
+        if (payload.type === 'message') {
+          appendMessage(payload);
+          // A task lifecycle event arrives as an ordinary message; refresh the
+          // board when one does. (v1: string-match the marker — see isTaskLifecycle.)
+          if (isTaskLifecycle(payload.content)) refreshTasks();
+        }
         else if (payload.type === 'message_update') updateMessageDom(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
       } catch (e) { console.error('bad event', e); }
@@ -6936,6 +8838,7 @@ INDEX_HTML = r"""<!doctype html>
       const meta = await r.json();
       state.channel = meta.channel;
       state.server_host = meta.server_host;
+      loadDmRead();
       loadPersistedTargets();
       renderComposerTargets();
       hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
@@ -6958,6 +8861,8 @@ INDEX_HTML = r"""<!doctype html>
     input.focus();
     updatePreview();
     updateChanStats();
+    refreshTasks();
+    refreshDmBadge();
   }
 
   // __TRIO_TEST_HOOK_START__
@@ -6974,9 +8879,17 @@ INDEX_HTML = r"""<!doctype html>
     globalThis.__TRIO_TEST__ = {
       state,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
-      paintBody, applyTargetBars, formatTime,
+      paintBody, applyTargetBars, formatTime, confBadge, applyConfBadge,
+      detectFilePathCandidates, linkifyValidatedPaths, decorateFilePaths,
+      revealPath, filePathCache,
+      isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
+      taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
-      isTargetable, targetableMembers, soleAgentId, directAt,
+      isTargetable, targetableMembers, soleAgentId, directAt, renderMemberRow,
+      colorFor, rememberColors, chimeScopeAllows,
+      dmCounterparty, dmThreadsFor, unreadDmCount,
+      renderDmInbox, refreshDmBadge, markDmRead, dmListEl, dmCountEl,
+      dmPickerMembers, renderDmPicker, openDmTab, dmPickerEl,
     };
   }
   // __TRIO_TEST_HOOK_END__

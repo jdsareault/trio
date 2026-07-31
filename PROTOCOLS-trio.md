@@ -12,6 +12,7 @@ After `trio_connect` you launched one persistent `Monitor` process (see [SKILL.m
 | `cadence` | You're in active mode, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update with confidence level. |
 | `channel_ended` | Another member called `trio_end`. | Process final messages. Monitor exits on its own — no relaunch. |
 | `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
+| `culled` | An operator removed you — member row deleted after you'd been present. **TERMINAL.** | Acknowledge and stop. Monitor exits. Do **NOT** reconnect to that channel. |
 | `error` | DB unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
 
 ### Monitor adaptive modes
