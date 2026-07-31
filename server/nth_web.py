@@ -3323,10 +3323,12 @@ INDEX_HTML = r"""<!doctype html>
                    padding: 3px 8px; border-radius: 3px; font-family: inherit; font-size: 11px;
                    width: 160px; }
   header #filter:focus { outline: none; border-color: var(--accent); }
-  #font-picker, #theme-picker {
+  #font-picker, #theme-picker, #chan-picker {
                         background: var(--panel); color: var(--fg); border: 1px solid var(--border);
                         padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px;
                         cursor: pointer; }
+  #chan-picker { font-weight: 600; max-width: 220px; }
+  #chan-picker[hidden] { display: none; }
   #font-picker:focus, #theme-picker:focus { outline: none; border-color: var(--accent); }
 
   /* ── Settings panel (drawer) ── */
@@ -4294,7 +4296,7 @@ INDEX_HTML = r"""<!doctype html>
 <div id="app">
   <header>
     <span class="title" id="h-channel">trio#…</span>
-    <select id="chan-picker" title="switch channel" aria-label="switch channel"></select>
+    <select id="chan-picker" title="switch channel" aria-label="switch channel" hidden></select>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
     <select id="theme-picker" title="color theme">
@@ -6601,7 +6603,10 @@ INDEX_HTML = r"""<!doctype html>
       if (hChannel && hChannel.parentNode && !document.getElementById('dm-back')) {
         const back = document.createElement('a');
         back.id = 'dm-back';
-        back.href = location.pathname;
+        // Preserve ?channel= so "← #CODE" returns to THIS channel, not whatever
+        // boot() would otherwise pick.
+        back.href = location.pathname
+          + (state.channel ? '?channel=' + encodeURIComponent(state.channel) : '');
         back.textContent = '← #' + state.channel;
         back.title = 'Back to the main channel';
         hChannel.parentNode.insertBefore(back, hChannel);
@@ -7919,7 +7924,11 @@ INDEX_HTML = r"""<!doctype html>
     markDmRead(cp);
     refreshDmBadge();
     if (dmPanel.hasAttribute('hidden') === false) renderDmInbox();
-    window.open('/?dm=' + encodeURIComponent(cp), '_blank');
+    // Carry the current channel into the DM tab — without it, multi-channel
+    // boot() would redirect to some other channel and drop the ?dm= entirely.
+    var u = '/?dm=' + encodeURIComponent(cp);
+    if (state.channel) u += '&channel=' + encodeURIComponent(state.channel);
+    window.open(u, '_blank');
   }
 
   function renderDmInbox() {
@@ -9060,10 +9069,17 @@ INDEX_HTML = r"""<!doctype html>
   // stream to the new channel with no stateful teardown to get wrong.
   async function loadChannelPicker() {
     if (!chanPicker) return;
+    // No switcher in a DM view or in single-channel back-compat mode.
+    if (DM_MODE || !state.multi) { chanPicker.setAttribute('hidden', ''); return; }
     try {
       const r = await fetch('/api/channels');
+      if (!r.ok) { chanPicker.setAttribute('hidden', ''); return; }
       const j = await r.json();
-      if (!j.ok || !j.channels) return;
+      // Hide rather than show an empty/one-option control.
+      if (!j.ok || !j.channels || j.channels.length <= 1) {
+        chanPicker.setAttribute('hidden', '');
+        return;
+      }
       chanPicker.innerHTML = '';
       for (const c of j.channels) {
         const opt = document.createElement('option');
@@ -9073,13 +9089,19 @@ INDEX_HTML = r"""<!doctype html>
         if (c.code === state.channel) opt.selected = true;
         chanPicker.appendChild(opt);
       }
+      chanPicker.removeAttribute('hidden');
       chanPicker.onchange = () => {
         const code = chanPicker.value;
-        if (code && code !== state.channel) {
-          location.assign('/?channel=' + encodeURIComponent(code));
+        if (!code || code === state.channel) return;
+        // A full reload discards an in-progress compose — guard it.
+        if (input && input.value.trim() &&
+            !confirm('Switch channel? Your unsent message will be lost.')) {
+          chanPicker.value = state.channel;  // revert the selection
+          return;
         }
+        location.assign('/?channel=' + encodeURIComponent(code));
       };
-    } catch (e) { /* leave picker empty */ }
+    } catch (e) { chanPicker.setAttribute('hidden', ''); }
   }
 
   // ── Bootstrap ──
@@ -9088,6 +9110,7 @@ INDEX_HTML = r"""<!doctype html>
       const r = await fetch(apiUrl('/api/meta'));
       const meta = await r.json();
       state.channel = URL_CHANNEL || meta.default_channel || meta.channel || '';
+      state.multi = !!meta.multi;
       state.server_host = meta.server_host;
       // Multi-channel mode with no channel chosen yet: land on the
       // most-recently-active channel so the page always shows something.
@@ -9100,6 +9123,11 @@ INDEX_HTML = r"""<!doctype html>
             return;
           }
         } catch (e) { /* fall through to empty state */ }
+        // Nothing to show (empty DB, or a guest with no default channel): render
+        // an explicit empty state instead of opening SSE to no channel and
+        // spinning "reconnecting…" forever.
+        showNoChannel();
+        return;
       }
       loadChannelPicker();
       loadDmRead();
@@ -9127,6 +9155,16 @@ INDEX_HTML = r"""<!doctype html>
     updateChanStats();
     refreshTasks();
     refreshDmBadge();
+  }
+  // Explicit no-channel state — does NOT open the SSE stream (nothing to
+  // stream), so there's no perpetual "reconnecting…" dead-end.
+  function showNoChannel() {
+    if (hChannel) hChannel.textContent = 'trio — no channel';
+    if (hMeta) hMeta.textContent = state.multi
+      ? 'No channels available yet.'
+      : 'No channel selected.';
+    if (chanPicker) chanPicker.setAttribute('hidden', '');
+    if (hConn) { hConn.textContent = '● idle'; hConn.classList.remove('bad', 'ok'); }
   }
 
   // __TRIO_TEST_HOOK_START__
