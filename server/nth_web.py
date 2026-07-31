@@ -8871,7 +8871,7 @@ INDEX_HTML = r"""<!doctype html>
       isTaskLifecycle, renderTasks, renderTaskRow, tasksEl,
       taskEventInfo, renderTaskEventCard,
       askQuestions, isAskChoices, askAnswers, answerStringFor, composeAnswer,
-      isTargetable, targetableMembers, soleAgentId, directAt,
+      isTargetable, targetableMembers, soleAgentId, directAt, renderMemberRow,
       colorFor, rememberColors, chimeScopeAllows,
       dmCounterparty, dmThreadsFor, unreadDmCount,
       renderDmInbox, refreshDmBadge, markDmRead, dmListEl, dmCountEl,

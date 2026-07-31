@@ -582,6 +582,101 @@ check('markDmRead clears a thread\'s unread and drops the bubble to 0', () => {
     'reading the thread clears its unread');
 });
 
+// ── New-DM picker (inbox "+ New DM" affordance) ──────────────────────────────
+function seedPickerState(members, opId) {
+  H.state.operator = { id: opId, name: 'me' };
+  H.state.members = new Map(Object.entries(members).map(([id, name]) => [id, { id, name }]));
+  H.state.dmTargetId = '';
+}
+
+check('dmPickerMembers: excludes the operator, includes agents AND other humans', () => {
+  seedPickerState({ '_op_l_me': 'me', 'a1': 'alice', 'a2': 'bob', '_op_g_guest': 'guest' }, '_op_l_me');
+  // NB: dmPickerMembers() returns a vm-realm Array, so deepStrictEqual would
+  // reject it on prototype identity — compare joined primitives instead.
+  const names = H.dmPickerMembers().map((m) => m.name).join(',');
+  assert.ok(!/(^|,)me(,|$)/.test(names), 'the operator must not be a DM candidate: ' + names);
+  // Agents (a1/a2) plus the other human operator (_op_g_guest), sorted by name.
+  assert.strictEqual(names, 'alice,bob,guest', 'name-sorted candidates: ' + names);
+});
+
+check('renderDmPicker: one row per non-self member, each carrying its member id', () => {
+  seedPickerState({ '_op_l_me': 'me', 'a1': 'alice', 'a2': 'bob' }, '_op_l_me');
+  H.renderDmPicker();
+  const rows = H.dmPickerEl.querySelectorAll('.dm-pick-row');
+  assert.strictEqual(rows.length, 2, 'a row per candidate: ' + H.dmPickerEl.innerHTML);
+  const ids = rows.map((r) => r.dataset.memberId).sort();
+  assert.ok(!ids.includes('_op_l_me'), 'no row for the operator');
+  assert.deepStrictEqual(ids, ['a1', 'a2']);
+});
+
+check('renderDmPicker: empty notice when the operator is alone in the channel', () => {
+  seedPickerState({ '_op_l_me': 'me' }, '_op_l_me');
+  H.renderDmPicker();
+  assert.strictEqual(H.dmPickerEl.querySelectorAll('.dm-pick-row').length, 0);
+  assert.strictEqual(H.dmPickerEl.querySelectorAll('.dm-pick-empty').length, 1, 'shows empty notice');
+});
+
+check('renderDmPicker: selecting a member opens a DM tab targeting THAT id', () => {
+  seedPickerState({ '_op_l_me': 'me', 'a1': 'alice', 'a2': 'bob' }, '_op_l_me');
+  H.state.messages = new Map(); H.state.dmRead = new Map(); H.state.channel = 'unit';
+  const opened = [];
+  const prevOpen = cx.window.open;
+  cx.window.open = (url) => { opened.push(url); };
+  try {
+    H.renderDmPicker();
+    const bob = H.dmPickerEl.querySelectorAll('.dm-pick-row').find((r) => r.dataset.memberId === 'a2');
+    assert.ok(bob, 'bob row present');
+    bob._listeners.click[0]({ stopPropagation() {} });
+  } finally { cx.window.open = prevOpen; }
+  assert.strictEqual(opened.length, 1, 'exactly one DM tab opened');
+  assert.ok(/[?&]dm=a2(\b|$)/.test(opened[0]), 'opened the DM for bob (a2): ' + opened[0]);
+});
+
+// ── Roster: DM moved off the row and into the expanded detail panel ──────────
+function memberRowFor(m, opId) {
+  H.state.operator = { id: opId || '_op_l_me', name: 'me' };
+  H.state.expandedMembers = new Set();
+  H.state.members = new Map([[m.id, m]]);
+  return H.renderMemberRow(m);
+}
+const AGENT = { id: 'a1', name: 'alice', status: 'active', filter_mode: 'all', last_read: 0 };
+
+check('renderMemberRow: the always-visible per-row .dm-btn is gone', () => {
+  const row = memberRowFor(AGENT);
+  assert.strictEqual(row.querySelectorAll('.dm-btn').length, 0, 'no per-row DM button anymore');
+});
+
+check('renderMemberRow: an agent gets a Message action in its detail panel', () => {
+  const row = memberRowFor(AGENT);
+  assert.strictEqual(row.querySelectorAll('.member-actions').length, 1, 'detail panel present');
+  const msg = row.querySelectorAll('.dm-msg-btn');
+  assert.strictEqual(msg.length, 1, 'exactly one Message action');
+  assert.strictEqual(msg[0].textContent, 'Message');
+});
+
+check('renderMemberRow: the Message action opens a DM with that member id', () => {
+  H.state.messages = new Map(); H.state.dmRead = new Map(); H.state.channel = 'unit';
+  const row = memberRowFor(AGENT);
+  const msg = row.querySelectorAll('.dm-msg-btn')[0];
+  const opened = [];
+  const prevOpen = cx.window.open;
+  cx.window.open = (url) => { opened.push(url); };
+  try { msg._listeners.click[0]({ stopPropagation() {} }); }
+  finally { cx.window.open = prevOpen; }
+  assert.ok(/[?&]dm=a1(\b|$)/.test(opened[0] || ''), 'DM opened for alice (a1): ' + (opened[0] || '(none)'));
+});
+
+check('renderMemberRow: no Message action for another web operator (_op_)', () => {
+  const row = memberRowFor({ id: '_op_g_guest', name: 'guest', status: 'active', last_read: 0 });
+  assert.strictEqual(row.querySelectorAll('.dm-msg-btn').length, 0, 'no Message action for an _op_ human');
+});
+
+check("renderMemberRow: the operator's own row has no detail-panel actions", () => {
+  const row = memberRowFor({ id: '_op_l_me', name: 'me', status: 'active', last_read: 0 });
+  assert.strictEqual(row.querySelectorAll('.member-actions').length, 0, 'no actions block on self');
+  assert.strictEqual(row.querySelectorAll('.dm-msg-btn').length, 0);
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
