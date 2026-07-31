@@ -4237,6 +4237,7 @@ INDEX_HTML = r"""<!doctype html>
 <div id="app">
   <header>
     <span class="title" id="h-channel">trio#…</span>
+    <select id="chan-picker" title="switch channel" aria-label="switch channel"></select>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
     <select id="theme-picker" title="color theme">
@@ -4369,6 +4370,7 @@ INDEX_HTML = r"""<!doctype html>
   const chanStatsEl = document.getElementById('chanstats');
   const sparkEl = document.getElementById('sparkline');
   const hChannel = document.getElementById('h-channel');
+  const chanPicker = document.getElementById('chan-picker');
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
   const input = document.getElementById('input');
@@ -4431,6 +4433,16 @@ INDEX_HTML = r"""<!doctype html>
   const URL_PARAMS = new URLSearchParams(location.search);
   const DM_TARGET_ID = URL_PARAMS.get('dm') || '';
   const DM_MODE = !!DM_TARGET_ID;
+  // Multi-channel: which channel this page is viewing, from ?channel=. Empty
+  // means "server default / pick one". apiUrl() appends it to channel-scoped
+  // endpoints so one page can talk to any channel the hub serves.
+  const URL_CHANNEL = URL_PARAMS.get('channel') || '';
+  function apiUrl(path) {
+    const ch = (typeof state !== 'undefined' && state.channel) || URL_CHANNEL || '';
+    if (!ch) return path;
+    return path + (path.indexOf('?') >= 0 ? '&' : '?')
+         + 'channel=' + encodeURIComponent(ch);
+  }
 
   // ── State ──
   const state = {
@@ -5746,7 +5758,7 @@ INDEX_HTML = r"""<!doctype html>
       submitBtn.disabled = true;
       submitBtn.textContent = 'Sending…';
       try {
-        const r = await fetch('/api/send', {
+        const r = await fetch(apiUrl('/api/send'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: answerText, reply_to: msg.id,
@@ -5882,7 +5894,7 @@ INDEX_HTML = r"""<!doctype html>
   async function deleteOwnMessage(m) {
     if (!confirm('Delete this message? It will show as "[deleted]" to everyone.')) return;
     try {
-      const r = await fetch('/api/delete', {
+      const r = await fetch(apiUrl('/api/delete'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message_id: m.id }),
       });
@@ -5931,7 +5943,7 @@ INDEX_HTML = r"""<!doctype html>
       if (!content) { alert('empty — use delete instead'); return; }
       save.disabled = true;
       try {
-        const r = await fetch('/api/edit', {
+        const r = await fetch(apiUrl('/api/edit'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message_id: m.id, content }),
         });
@@ -6095,7 +6107,7 @@ INDEX_HTML = r"""<!doctype html>
       const wrap = document.createElement('div');
       wrap.className = 'msg-attachments';
       for (const att of m.attachments) {
-        const url = '/api/attachment/' + att.id;
+        const url = apiUrl('/api/attachment/' + att.id);
         const a = document.createElement('a');
         a.href = url; a.target = '_blank'; a.rel = 'noopener';
         const img = document.createElement('img');
@@ -6585,7 +6597,7 @@ INDEX_HTML = r"""<!doctype html>
         + 'Their claimed tasks are released. This does not stop a running agent '
         + 'process — it just removes them from the roster.')) return;
     try {
-      const r = await fetch('/api/cull', {
+      const r = await fetch(apiUrl('/api/cull'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_member_id: id }),
@@ -6606,7 +6618,7 @@ INDEX_HTML = r"""<!doctype html>
   // true on success; the caller restores the previous selection on false.
   async function setMemberFilter(id, mode) {
     try {
-      const r = await fetch('/api/member/' + encodeURIComponent(id) + '/filter', {
+      const r = await fetch(apiUrl('/api/member/' + encodeURIComponent(id) + '/filter'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filter_mode: mode }),
@@ -7224,7 +7236,7 @@ INDEX_HTML = r"""<!doctype html>
         revokeBlob(slot);                       // free the local preview blob
         slot.id = data.id;
         slot.uploading = false;
-        slot.url = '/api/attachment/' + data.id;
+        slot.url = apiUrl('/api/attachment/' + data.id);
       }
     } catch (e) {
       alert('upload failed: ' + e.message);
@@ -7609,7 +7621,7 @@ INDEX_HTML = r"""<!doctype html>
     // is omitted → broadcast, unchanged.
     const dmRecipients = state.dmTargetId ? [state.dmTargetId] : undefined;
     try {
-      const r = await fetch('/api/send', {
+      const r = await fetch(apiUrl('/api/send'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, mentions: mentionIds,
@@ -8885,7 +8897,7 @@ INDEX_HTML = r"""<!doctype html>
   let reconnectTimer = null;
   function connect() {
     if (es) try { es.close(); } catch (e) {}
-    es = new EventSource('/api/events');
+    es = new EventSource(apiUrl('/api/events'));
     es.onopen = () => {
       hConn.textContent = '● connected';
       hConn.classList.remove('bad');
@@ -8985,18 +8997,59 @@ INDEX_HTML = r"""<!doctype html>
     hMeta.textContent = `posting as ${opAnimal.emoji} ${op.name} (${op.id}) — the ${opAnimal.name} ${srcTag}  ·  ${state.server_host}`;
   }
 
+  // ── Channel picker (multi-channel switcher) ──
+  // Populates the header <select> from /api/channels. Switching navigates to
+  // /?channel=CODE — a full reload rebinds every channel-scoped fetch + the SSE
+  // stream to the new channel with no stateful teardown to get wrong.
+  async function loadChannelPicker() {
+    if (!chanPicker) return;
+    try {
+      const r = await fetch('/api/channels');
+      const j = await r.json();
+      if (!j.ok || !j.channels) return;
+      chanPicker.innerHTML = '';
+      for (const c of j.channels) {
+        const opt = document.createElement('option');
+        opt.value = c.code;
+        const ended = (c.status && c.status !== 'active') ? ' (' + c.status + ')' : '';
+        opt.textContent = 'trio#' + c.code + ended;
+        if (c.code === state.channel) opt.selected = true;
+        chanPicker.appendChild(opt);
+      }
+      chanPicker.onchange = () => {
+        const code = chanPicker.value;
+        if (code && code !== state.channel) {
+          location.assign('/?channel=' + encodeURIComponent(code));
+        }
+      };
+    } catch (e) { /* leave picker empty */ }
+  }
+
   // ── Bootstrap ──
   async function boot() {
     try {
-      const r = await fetch('/api/meta');
+      const r = await fetch(apiUrl('/api/meta'));
       const meta = await r.json();
-      state.channel = meta.channel;
+      state.channel = URL_CHANNEL || meta.default_channel || meta.channel || '';
       state.server_host = meta.server_host;
+      // Multi-channel mode with no channel chosen yet: land on the
+      // most-recently-active channel so the page always shows something.
+      if (!state.channel) {
+        try {
+          const cr = await fetch('/api/channels');
+          const cj = await cr.json();
+          if (cj.ok && cj.channels && cj.channels.length) {
+            location.replace('/?channel=' + encodeURIComponent(cj.channels[0].code));
+            return;
+          }
+        } catch (e) { /* fall through to empty state */ }
+      }
+      loadChannelPicker();
       loadDmRead();
       loadPersistedTargets();
       renderComposerTargets();
-      hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
-      state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
+      hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + state.channel;
+      state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + state.channel;
       if (DM_MODE) document.body.classList.add('dm-mode');
       updateTitle();
       if (meta.operator.pending) {
