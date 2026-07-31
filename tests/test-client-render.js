@@ -35,6 +35,28 @@ check('escapeHtml escapes the five entities', () => {
     '&lt;a href=&quot;x&quot; data=&#39;y&#39;&gt;&amp;');
 });
 
+// ── apiUrl: channel-scoped URL builder ───────────────────────────────────────
+// Misrouting risk: apiUrl silently omitting ?channel= on any call site would
+// send a request to the wrong channel with no error.
+check('apiUrl: no channel → path unchanged', () => {
+  H.state.channel = '';
+  assert.strictEqual(H.apiUrl('/api/send'), '/api/send');
+});
+check('apiUrl: with channel → appends ?channel=', () => {
+  H.state.channel = 'alpha';
+  assert.strictEqual(H.apiUrl('/api/send'), '/api/send?channel=alpha');
+});
+check('apiUrl: existing query → appends with &', () => {
+  H.state.channel = 'alpha';
+  assert.strictEqual(H.apiUrl('/api/attachment/1?x=2'),
+    '/api/attachment/1?x=2&channel=alpha');
+});
+check('apiUrl: channel is URI-encoded', () => {
+  H.state.channel = 'a b';
+  assert.strictEqual(H.apiUrl('/api/send'), '/api/send?channel=a%20b');
+  H.state.channel = '';
+});
+
 // ── renderMarkdown: inline ───────────────────────────────────────────────────
 check('renderMarkdown bold + italic', () => {
   assert.strictEqual(H.renderMarkdown('**b** and *i*'),

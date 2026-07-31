@@ -9179,7 +9179,7 @@ INDEX_HTML = r"""<!doctype html>
   // available even if boot() throws against the harness's minimal DOM.
   if (typeof globalThis !== 'undefined' && globalThis.__TRIO_TEST__) {
     globalThis.__TRIO_TEST__ = {
-      state,
+      state, apiUrl,
       renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
       paintBody, applyTargetBars, formatTime, confBadge, applyConfBadge,
       detectFilePathCandidates, linkifyValidatedPaths, decorateFilePaths,

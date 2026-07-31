@@ -3,7 +3,11 @@
 
 Verifies the additive schema is valid SQL and supports the load-bearing
 queries: placement (agent in N channels), the per-channel members join, and
-the 'abandoned agent' detection (an agent in zero channels).
+the 'abandoned agent' detection (an agent in zero channels). The PK
+(duplicate-placement) constraint IS enforced and tested; the declared FOREIGN
+KEYs are NOT — get_db() doesn't set PRAGMA foreign_keys=ON, so they're advisory
+(orphan agent_channels rows are insertable). That's an accepted Phase-2
+property (integrity is app-enforced), not verified here.
 
 Runs against a throwaway DB via nth_server.get_db (monkeypatched path), so it
 also proves get_db() creates the new tables on a fresh database.
