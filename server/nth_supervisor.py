@@ -284,8 +284,9 @@ class AgentSupervisor:
         self.db_path = db_path
         self.on_event = on_event
         self._procs: Dict[str, AgentProc] = {}
-        self._agent_locks: Dict[str, threading.Lock] = {}
+        self._agent_locks: Dict[str, threading.RLock] = {}
         self._lock = threading.Lock()
+        self._accepting = True
 
     # ── db helpers ──
     def _db(self) -> sqlite3.Connection:
@@ -294,12 +295,30 @@ class AgentSupervisor:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _plock(self, agent_id: str) -> threading.Lock:
+    def _plock(self, agent_id: str) -> threading.RLock:
         with self._lock:
             lk = self._agent_locks.get(agent_id)
             if lk is None:
-                lk = self._agent_locks[agent_id] = threading.Lock()
+                lk = self._agent_locks[agent_id] = threading.RLock()
             return lk
+
+    def _handle_event(self, agent_id: str, evt: Dict[str, Any]) -> None:
+        """Keep activity/state current, then forward the event to the hub.
+
+        Claude emits a terminal ``result`` event after a turn.  Treat that as
+        idle (eligible for hibernation); all other output is active work.
+        """
+        state = ST_IDLE if evt.get("type") == "result" else ST_RUNNING
+        # A reader thread can deliver its final buffered event while stop() /
+        # shutdown() is tearing the process down. Never let that late event
+        # resurrect a deliberately stopped DB row.
+        if self.is_running(agent_id):
+            try:
+                self._set_state(agent_id, state)
+            except Exception:
+                pass
+        if self.on_event is not None:
+            self.on_event(agent_id, evt)
 
     def _persist_session(self, agent_id: str, session_id: str) -> None:
         """Called from the reader thread the instant a session_id is captured,
@@ -317,7 +336,7 @@ class AgentSupervisor:
 
     def _set_state(self, agent_id: str, state: str, *,
                    pid: Optional[int] = None, session_id: Optional[str] = None,
-                   clear_pid: bool = False) -> int:
+                   clear_pid: bool = False, clear_session: bool = False) -> int:
         """Update an agent's row. Returns rows affected (0 = unknown agent)."""
         db = self._db()
         try:
@@ -331,6 +350,8 @@ class AgentSupervisor:
             if session_id:
                 sets.append("session_id = ?")
                 vals.append(session_id)
+            elif clear_session:
+                sets.append("session_id = NULL")
             vals.append(agent_id)
             cur = db.execute(
                 f"UPDATE agents SET {', '.join(sets)} WHERE id = ?", vals)
@@ -348,6 +369,8 @@ class AgentSupervisor:
         event; the reader thread also persists it directly, so a slow init
         doesn't lose --resume continuity."""
         with self._plock(agent_id):
+            if not self._accepting:
+                raise RuntimeError("agent supervisor is shutting down")
             with self._lock:
                 existing = self._procs.get(agent_id)
                 if existing and existing.alive():
@@ -355,7 +378,7 @@ class AgentSupervisor:
             argv = build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
                 resume_session_id=resume_session_id, effort=effort)
-            proc = AgentProc(agent_id, argv, on_event=self.on_event,
+            proc = AgentProc(agent_id, argv, on_event=self._handle_event,
                              on_session=self._persist_session)
             self._set_state(agent_id, ST_SPAWNING)
             proc.start()
@@ -418,6 +441,48 @@ class AgentSupervisor:
             rows = self._set_state(agent_id, ST_STOPPED, clear_pid=True)
             return bool(proc) or rows > 0
 
+    def clear(self, agent_id: str, **spawn_kw) -> Optional[AgentProc]:
+        """Discard transcript continuity and launch a fresh session.
+
+        Durable agent identity and placements remain unchanged; only the Claude
+        session id/context is cleared.  The caller supplies the rebuilt Trio
+        preamble/MCP config just as it does for wake.
+        """
+        with self._plock(agent_id):
+            db = self._db()
+            try:
+                row = db.execute(
+                    "SELECT model, effort FROM agents WHERE id = ?", (agent_id,)
+                ).fetchone()
+            finally:
+                db.close()
+            if row is None:
+                return None
+            with self._lock:
+                proc = self._procs.pop(agent_id, None)
+            if proc:
+                proc.stop()
+            self._set_state(agent_id, ST_STOPPED, clear_pid=True, clear_session=True)
+            return self.spawn(
+                agent_id,
+                model=spawn_kw.get("model", row["model"] or ""),
+                effort=spawn_kw.get("effort", row["effort"] or ""),
+                system_prompt=spawn_kw.get("system_prompt", ""),
+                mcp_config=spawn_kw.get("mcp_config", ""),
+                resume_session_id="",
+            )
+
+    def compact(self, agent_id: str) -> bool:
+        """Ask a live Claude Code session to run its built-in /compact flow."""
+        with self._lock:
+            proc = self._procs.get(agent_id)
+        if not proc or not proc.alive():
+            return False
+        ok = proc.send_user("/compact")
+        if ok:
+            self._set_state(agent_id, ST_RUNNING)
+        return ok
+
     def feed(self, agent_id: str, channel: str, text: str) -> bool:
         """Route an inbound channel message into the agent, channel-tagged
         (hybrid context). The agent replies to a specific channel via its
@@ -427,7 +492,10 @@ class AgentSupervisor:
             proc = self._procs.get(agent_id)
         if not proc:
             return False
-        return proc.send_user(f"[#{channel}] {text}")
+        ok = proc.send_user(f"[#{channel}] {text}")
+        if ok:
+            self._set_state(agent_id, ST_RUNNING)
+        return ok
 
     def is_running(self, agent_id: str) -> bool:
         with self._lock:
@@ -453,15 +521,18 @@ class AgentSupervisor:
             reaped.append(a)
         return reaped
 
-    def shutdown(self) -> None:
+    def shutdown(self, preserve_sessions: bool = False) -> None:
         """Stop every live agent (process shutdown). Marks rows stopped so a
         later daemon start can decide whether to auto-resume."""
+        self._accepting = False
         with self._lock:
             items = list(self._procs.items())
             self._procs.clear()
         for agent_id, proc in items:
             proc.stop()
-            self._set_state(agent_id, ST_STOPPED, clear_pid=True)
+            self._set_state(agent_id,
+                            ST_SLEEPING if preserve_sessions else ST_STOPPED,
+                            clear_pid=True)
 
 
 if __name__ == "__main__":

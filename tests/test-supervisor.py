@@ -113,6 +113,19 @@ def main() -> int:
     row = _row(db_path, "ag1")
     check("wake: db state=running again", row["state"] == "running")
 
+    # ── compact + clear context ──
+    got_echo.clear()
+    check("compact: sends Claude Code's /compact command", s.compact("ag1"))
+    got_echo.wait(3.0)
+    check("compact: command reaches the live session",
+          any("/compact" in e for e in echoes))
+    before_clear = woke
+    fresh = s.clear("ag1", system_prompt="fresh", mcp_config="{}")
+    check("clear: launches a replacement process", fresh is not None and fresh is not before_clear)
+    check("clear: fresh launch does not pass --resume",
+          fresh is not None and "--resume" not in fresh.argv)
+    check("clear: replacement is live", fresh is not None and fresh.alive())
+
     # ── stop: terminal ──
     s.stop("ag1")
     time.sleep(0.2)
