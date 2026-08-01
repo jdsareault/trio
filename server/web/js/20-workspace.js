@@ -51,17 +51,23 @@
     if (dmPoll) { clearInterval(dmPoll); dmPoll = null; }
     // Temporary polling for DM freshness; remove once a workspace/DM EventSource lands (task 1.7).
     if (!readOnly) dmPoll = setInterval(() => refreshDm(dm.key), 5000);
+    Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
-    api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly ? '&archived=1' : '')).then(data => {
+    const loader = Trio.loader?.load ? Trio.loader : { load: (name, fn) => { const c = { abort() {} }; return fn(c); } };
+    loader.load('dm:' + dm.key, signal => api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly ? '&archived=1' : ''), false, { signal })).then(data => {
       state.dmLoading = false; state.dmError = '';
       if (data && Array.isArray(data.messages)) { data.messages.forEach(Trio.conversation.upsert); }
       if (data && data.ok === false) { state.dmError = data.error || 'Could not load DM'; }
       Trio.conversation?.render?.();
-    }).catch(error => { state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.(); });
+    }).catch(error => {
+      if (error?.name === 'AbortError' || (typeof error === 'string' && error.includes('aborted'))) return;
+      state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.();
+    });
   }
   function refreshDm(key) {
     if (!key || document.hidden) return;
-    api.get('/api/dms?with=' + encodeURIComponent(key)).then(data => {
+    api.get('/api/dms?with=' + encodeURIComponent(key), false).then(data => {
+      if (state.dmKey !== key) return;
       if (data && Array.isArray(data.messages)) data.messages.forEach(Trio.conversation.upsert);
     }).catch(error => console.warn('DM refresh failed', error));
   }

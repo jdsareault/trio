@@ -33,6 +33,7 @@ function loadModule(name, context) {
 const base = baseContext();
 loadModule('01-store.js', base);
 loadModule('02-api.js', base);
+loadModule('05-loader.js', base);
 loadModule('04-events.js', base);
 loadModule('00-core.js', base);
 loadModule('20-workspace.js', base);
