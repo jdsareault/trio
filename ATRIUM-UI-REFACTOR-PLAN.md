@@ -358,13 +358,13 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Keep `reply_to` and structured `selection` unchanged for audit/rendering.
   - Update `tests/test-client-render.js` to assert the readable single- and multi-question content, not `Answered question #…`.
 
-- [ ] **0.2 Add a minimal conversation URL contract for DMs.**
+- [x] **0.2 Add a minimal conversation URL contract for DMs.**
   - Accept a DM thread key in the URL, initially as `?dm=<thread-key>` alongside the existing `?channel=` compatibility parameter.
   - Parse and validate it in `server/web/js/00-core.js`; expose a conversation kind/key rather than inferring everything from `state.channel`.
   - Update DM and audit rail rows in `server/web/js/20-workspace.js` to navigate with their thread key; audit rows must open read-only.
   - Add URL encoding/decoding tests for commas, agent IDs, and malformed/unknown keys.
 
-- [ ] **0.3 Load and render real DM history.**
+- [x] **0.3 Load and render real DM history.**
   - On a DM route, call `/api/dms?with=<thread-key>` and ingest `messages` into the conversation timeline instead of showing the backing channel history.
   - Set the conversation title, participants, private banner, `state.dmTargetId`/recipients, and composer placeholder from the returned thread metadata.
   - Clear old channel messages before the DM response renders; show loading, empty, unauthorized/not-found, and retry states.
