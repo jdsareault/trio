@@ -78,7 +78,14 @@ def main() -> int:
           and cfg["mcpServers"]["nth-trio"]["args"] == ["/x/nth_server.py"]
           and cfg["mcpServers"]["nth-trio"]["type"] == "stdio")
 
-    s = sup.AgentSupervisor(db_path=db_path, on_event=on_event)
+    runtime = sup.ClaudeRuntime()
+    diag = runtime.diagnostics()
+    check("runtime diagnostics recognize the configured fake agent",
+          diag["provider"] == "claude" and diag["override"]
+          and diag["available"] and diag["ready"])
+
+    s = sup.AgentSupervisor(db_path=db_path, on_event=on_event, runtime=runtime)
+    check("supervisor owns the explicit runtime adapter", s.runtime is runtime)
 
     # ── spawn ──
     proc = s.spawn("ag1", model="sonnet")

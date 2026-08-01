@@ -29,6 +29,7 @@ import collections
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -57,6 +58,66 @@ _warned_override = False
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class ClaudeRuntime:
+    """Claude Code process adapter.
+
+    The supervisor owns lifecycle policy; this adapter owns CLI-specific argv,
+    capability checks, and stream semantics. A future Codex adapter can satisfy
+    the same small surface without branching the hub's lifecycle code.
+    """
+
+    name = "claude"
+
+    def binary(self) -> List[str]:
+        return agent_binary()
+
+    def build_spawn_argv(self, **kwargs) -> List[str]:
+        return build_spawn_argv(_runtime=self, **kwargs)
+
+    def diagnostics(self, timeout: float = 5.0) -> Dict[str, Any]:
+        argv = self.binary()
+        override = bool(os.environ.get("TRIO_AGENT_CMD", "").strip())
+        executable = shutil.which(argv[0]) if argv else None
+        result: Dict[str, Any] = {
+            "provider": self.name,
+            "command": argv,
+            "executable": executable or "",
+            "available": bool(executable),
+            "authenticated": None,
+            "auth_method": "",
+            "version": "",
+            "ready": False,
+            "detail": "",
+            "override": override,
+        }
+        if not executable:
+            result["detail"] = f"{argv[0] if argv else 'claude'} was not found on PATH"
+            return result
+        if override:
+            result.update(ready=True, detail="custom agent command configured")
+            return result
+        try:
+            version = subprocess.run(
+                [argv[0], "--version"], check=False, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            result["version"] = (version.stdout or version.stderr).strip()
+            if version.returncode != 0:
+                result["detail"] = "Claude Code version check failed"
+                return result
+            auth = subprocess.run(
+                [argv[0], "auth", "status", "--json"], check=False, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            payload = json.loads(auth.stdout or "{}") if auth.returncode == 0 else {}
+            result["authenticated"] = bool(payload.get("loggedIn"))
+            result["auth_method"] = str(payload.get("authMethod") or "")
+            result["ready"] = bool(result["authenticated"])
+            result["detail"] = ("ready" if result["ready"] else
+                                "Claude Code is not authenticated; run `claude login`")
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+            result["detail"] = f"Claude Code health check failed: {exc}"
+        return result
 
 
 def agent_binary() -> List[str]:
@@ -88,6 +149,7 @@ def build_spawn_argv(
     permission_mode: str = "acceptEdits",
     disallowed_tools: str = "AskUserQuestion",
     effort: str = "",
+    _runtime: Optional[ClaudeRuntime] = None,
 ) -> List[str]:
     """Assemble the headless `claude -p` command for one agent.
 
@@ -98,7 +160,7 @@ def build_spawn_argv(
     `effort` is the reasoning/thinking level (low|medium|high|xhigh|max); more
     effort = more planning before acting, which helps weaker models drive tools.
     """
-    argv = list(agent_binary())
+    argv = list(_runtime.binary() if _runtime is not None else agent_binary())
     argv += [
         "-p",
         "--input-format", "stream-json",
@@ -280,9 +342,11 @@ class AgentSupervisor:
     """
 
     def __init__(self, db_path: Path = DB_PATH,
-                 on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None):
+                 on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+                 runtime: Optional[ClaudeRuntime] = None):
         self.db_path = db_path
         self.on_event = on_event
+        self.runtime = runtime or ClaudeRuntime()
         self._procs: Dict[str, AgentProc] = {}
         self._agent_locks: Dict[str, threading.RLock] = {}
         self._lock = threading.Lock()
@@ -375,7 +439,7 @@ class AgentSupervisor:
                 existing = self._procs.get(agent_id)
                 if existing and existing.alive():
                     return existing
-            argv = build_spawn_argv(
+            argv = self.runtime.build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
                 resume_session_id=resume_session_id, effort=effort)
             proc = AgentProc(agent_id, argv, on_event=self._handle_event,
