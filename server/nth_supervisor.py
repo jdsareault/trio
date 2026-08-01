@@ -38,6 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
+from nth_constants import AGENT_INBOX_CHANNEL, parse_recipients
+
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
 # How many stderr lines to retain per agent for post-mortem diagnostics.
@@ -348,6 +350,7 @@ class AgentSupervisor:
         self.on_event = on_event
         self.runtime = runtime or ClaudeRuntime()
         self._procs: Dict[str, AgentProc] = {}
+        self._pending: Dict[str, Deque[Dict[str, Any]]] = {}
         self._agent_locks: Dict[str, threading.RLock] = {}
         self._lock = threading.Lock()
         self._accepting = True
@@ -366,6 +369,10 @@ class AgentSupervisor:
                 lk = self._agent_locks[agent_id] = threading.RLock()
             return lk
 
+    def _forget_pending(self, agent_id: str) -> None:
+        with self._lock:
+            self._pending.pop(agent_id, None)
+
     def _handle_event(self, agent_id: str, evt: Dict[str, Any]) -> None:
         """Keep activity/state current, then forward the event to the hub.
 
@@ -381,8 +388,71 @@ class AgentSupervisor:
                 self._set_state(agent_id, state)
             except Exception:
                 pass
+        if evt.get("type") == "result":
+            self._bridge_result(agent_id, evt)
         if self.on_event is not None:
             self.on_event(agent_id, evt)
+
+    def _bridge_result(self, agent_id: str, evt: Dict[str, Any]) -> None:
+        """Publish a plain headless result when the model skipped Trio tools.
+
+        MCP-authored replies win: if the agent posted in the source channel
+        after this turn was fed, the result is only lifecycle metadata and is
+        not duplicated. Otherwise the successful result becomes the reply.
+        """
+        with self._lock:
+            pending = self._pending.get(agent_id)
+            context = pending.popleft() if pending else None
+            if pending is not None and not pending:
+                self._pending.pop(agent_id, None)
+        if context is None or evt.get("is_error"):
+            return
+        content = evt.get("result")
+        if not isinstance(content, str) or not content.strip():
+            return
+        channel = context["channel"]
+        baseline = context["baseline"]
+        db = self._db()
+        try:
+            already_posted = db.execute(
+                "SELECT 1 FROM messages WHERE channel=? AND member_id=? AND id>? LIMIT 1",
+                (channel, agent_id, baseline)).fetchone()
+            if already_posted:
+                return
+            agent = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
+            if agent is None:
+                return
+            recipients: List[str] = []
+            if channel == AGENT_INBOX_CHANNEL:
+                recent = db.execute(
+                    "SELECT member_id, recipients FROM messages WHERE channel=? "
+                    "AND member_id != ? ORDER BY id DESC LIMIT 100",
+                    (channel, agent_id)).fetchall()
+                for prior in recent:
+                    if agent_id in parse_recipients(prior["recipients"]):
+                        recipients = [prior["member_id"]]
+                        break
+                if not recipients:
+                    recipients = [r["id"] for r in db.execute(
+                        "SELECT id FROM members WHERE channel=? AND kind='human' "
+                        "AND active=1 ORDER BY joined_at", (channel,)).fetchall()]
+            now = now_iso()
+            db.execute(
+                "INSERT INTO messages (channel,member_id,member_name,content,mentions,"
+                "recipients,created_at) VALUES (?,?,?,?,?,?,?)",
+                (channel, agent_id, agent["name"], content.strip(),
+                 json.dumps(recipients) if recipients else "",
+                 json.dumps(recipients) if recipients else "[]", now))
+            db.execute(
+                "UPDATE members SET last_seen=? WHERE channel=? AND id=?",
+                (now, channel, agent_id))
+            db.commit()
+        except sqlite3.Error:
+            # Supervisor-only unit schemas and pre-migration databases may not
+            # have the messaging tables yet. Lifecycle must remain unaffected.
+            pass
+        finally:
+            db.close()
 
     def _persist_session(self, agent_id: str, session_id: str) -> None:
         """Called from the reader thread the instant a session_id is captured,
@@ -470,6 +540,7 @@ class AgentSupervisor:
                 proc = self._procs.pop(agent_id, None)
             if proc:
                 proc.stop()
+            self._forget_pending(agent_id)
             rows = self._set_state(agent_id, ST_SLEEPING, clear_pid=True)
             return bool(proc) or rows > 0
 
@@ -502,6 +573,7 @@ class AgentSupervisor:
                 proc = self._procs.pop(agent_id, None)
             if proc:
                 proc.stop()
+            self._forget_pending(agent_id)
             rows = self._set_state(agent_id, ST_STOPPED, clear_pid=True)
             return bool(proc) or rows > 0
 
@@ -526,6 +598,7 @@ class AgentSupervisor:
                 proc = self._procs.pop(agent_id, None)
             if proc:
                 proc.stop()
+            self._forget_pending(agent_id)
             self._set_state(agent_id, ST_STOPPED, clear_pid=True, clear_session=True)
             return self.spawn(
                 agent_id,
@@ -556,9 +629,32 @@ class AgentSupervisor:
             proc = self._procs.get(agent_id)
         if not proc:
             return False
+        baseline = 0
+        try:
+            db = self._db()
+            try:
+                baseline = db.execute(
+                    "SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
+            finally:
+                db.close()
+        except sqlite3.Error:
+            pass
+        context = {"channel": channel, "baseline": baseline}
+        with self._lock:
+            self._pending.setdefault(agent_id, collections.deque()).append(context)
         ok = proc.send_user(f"[#{channel}] {text}")
         if ok:
             self._set_state(agent_id, ST_RUNNING)
+        else:
+            with self._lock:
+                pending = self._pending.get(agent_id)
+                if pending:
+                    try:
+                        pending.remove(context)
+                    except ValueError:
+                        pass
+                    if not pending:
+                        self._pending.pop(agent_id, None)
         return ok
 
     def is_running(self, agent_id: str) -> bool:
@@ -592,6 +688,7 @@ class AgentSupervisor:
         with self._lock:
             items = list(self._procs.items())
             self._procs.clear()
+            self._pending.clear()
         for agent_id, proc in items:
             proc.stop()
             self._set_state(agent_id,

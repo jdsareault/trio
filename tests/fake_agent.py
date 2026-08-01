@@ -62,6 +62,8 @@ def main() -> int:
               "message": {"role": "assistant",
                           "content": f"echo: {content}"},
               "session_id": session_id})
+        emit({"type": "result", "subtype": "success", "is_error": False,
+              "result": f"echo: {content}", "session_id": session_id})
     return 0
 
 
