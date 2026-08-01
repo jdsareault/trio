@@ -8,7 +8,12 @@
   function setConnection(text, failed = false) {
     const el = document.getElementById('h-conn');
     const cls = failed ? (text === 'offline' ? 'offline' : 'reconnect') : 'live';
-    if (el) { el.textContent = `● ${text}`; el.className = 'conn ' + cls; }
+    if (el) {
+      el.className = 'conn ' + cls;
+      const label = el.querySelector('.conn-label');
+      if (label) label.textContent = text;
+      else el.textContent = text;
+    }
     if (Trio.store) Trio.store.set('connection', { text, failed, state });
     if (failed) Trio.ui?.setLive?.('Connection ' + text);
   }
