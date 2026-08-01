@@ -66,8 +66,8 @@
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
     panel.hidden = false;
-    if (view === 'tasks') panel.innerHTML = `<h2>Tasks</h2>${(state.meta?.tasks || []).map(t => `<article class="task-row"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks yet.</p>'}`;
-    else if (view === 'attention') panel.innerHTML = `<h2>Attention</h2><p>${attentionCount()} items need attention.</p>`;
+    if (view === 'tasks') panel.innerHTML = `<h2>Tasks</h2><div class="task-filters"><button data-filter="open">Open</button><button data-filter="claimed">Claimed</button><button data-filter="all">All</button></div><div id="trio-task-list">${(state.tasks || state.meta?.tasks || []).map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks yet.</p>'}</div>`;
+    else if (view === 'attention') panel.innerHTML = `<h2>Attention</h2><section class="attention-cards">${(state.approvals || []).map(a => `<article class="attention-card"><b>${esc(a.title || a.agent_name || 'Approval requested')}</b><p>${esc(a.reason || a.command || '')}</p><button data-approval="${esc(a.id)}" data-decision="accept">Allow</button><button data-approval="${esc(a.id)}" data-decision="decline">Decline</button></article>`).join('') || '<p>Nothing needs attention.</p>'}</section>`;
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
   }
   async function createChannel() {
@@ -85,8 +85,9 @@
   }
   async function refresh() {
     try {
-      const [channels, dms, meta] = await Promise.all([api.get('/api/channels'), api.get('/api/dms'), api.get('/api/meta' + (state.channel ? '?channel=' + encodeURIComponent(state.channel) : ''))]);
-      state.channels = channels.channels || []; state.dms = dms; state.meta = {...state.meta, ...meta}; renderRail();
+      const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
+      const [channels, dms, meta, tasks, approvals] = await Promise.all([api.get('/api/channels'), api.get('/api/dms'), api.get('/api/meta' + query), api.get('/api/tasks' + query).catch(() => ({tasks:[]})), api.get('/api/approvals').catch(() => ({approvals:[]}))]);
+      state.channels = channels.channels || []; state.dms = dms; state.meta = {...state.meta, ...meta}; state.tasks=tasks.tasks||[]; state.approvals=approvals.approvals||[]; renderRail();
       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     } catch (error) { console.warn('workspace refresh failed', error); }
   }
