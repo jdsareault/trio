@@ -1821,6 +1821,7 @@ def ensure_agents_schema(conn) -> None:
         "cwd": "TEXT NOT NULL DEFAULT ''",
         "permission_profile": "TEXT NOT NULL DEFAULT 'balanced'",
         "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
+        "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
     }
     for column, definition in agent_columns.items():
         try:
@@ -1908,6 +1909,20 @@ def runtime_health(refresh: bool = False, provider: str = "claude",
     return payload
 
 
+def _rotate_reclaim_secret(db_path: Path, agent_id: str) -> str:
+    """Mint a fresh reclaim capability for agent_id and persist it, invalidating
+    any previous one. Called on every (re)spawn so a stale secret leaked from an
+    old process/transcript can't reclaim a currently-running agent."""
+    secret = secrets.token_hex(16)
+    db = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        with db:
+            db.execute("UPDATE agents SET reclaim_secret=? WHERE id=?", (secret, agent_id))
+    finally:
+        db.close()
+    return secret
+
+
 def wake_agent(agent_id: str, supervisor, db_path: Path):
     """Wake a hibernated agent, RE-INJECTING its Trio MCP config + reclaim
     preamble. supervisor.wake() alone would resume with an empty mcp_config and
@@ -1927,8 +1942,10 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
     finally:
         db.close()
     base = (row["base_prompt"] or "").strip()
+    reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
     preamble = (base + "\n\n" if base else "") + \
-        build_agent_preamble(row["name"], channels, member_id=agent_id)
+        build_agent_preamble(row["name"], channels, member_id=agent_id,
+                             reclaim_secret=reclaim_secret)
     return supervisor.wake(agent_id, system_prompt=preamble,
                            mcp_config=build_mcp_config_for_hub())
 
@@ -1948,8 +1965,10 @@ def clear_agent(agent_id: str, supervisor, db_path: Path):
     finally:
         db.close()
     base = (row["base_prompt"] or "").strip()
+    reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
     preamble = (base + "\n\n" if base else "") + \
-        build_agent_preamble(row["name"], channels, member_id=agent_id)
+        build_agent_preamble(row["name"], channels, member_id=agent_id,
+                             reclaim_secret=reclaim_secret)
     return supervisor.clear(agent_id, system_prompt=preamble,
                             mcp_config=build_mcp_config_for_hub())
 
@@ -2185,12 +2204,16 @@ def pick_agent_name(db, desired: str = "") -> str:
     return f"{_AGENT_NAMES[0]}-{i}"
 
 
-def build_agent_preamble(name: str, channels: List[str], member_id: str = "") -> str:
+def build_agent_preamble(name: str, channels: List[str], member_id: str = "",
+                         reclaim_secret: str = "") -> str:
     """The 'always told at start' bootstrap system prompt injected on spawn.
 
     Tells the agent to reclaim its pre-assigned identity (member_id) on each of
     its channels — trio_connect(resume_member_id=…) re-attaches instead of
-    minting a duplicate (B1)."""
+    minting a duplicate (B1). reclaim_secret is a supervisor-issued, per-spawn
+    capability (never exposed via the public roster or any API response) that
+    nth_connect requires alongside resume_member_id — knowing a public
+    member_id alone is not enough to reclaim an agent's identity."""
     public_channels = [c for c in channels if c != AGENT_INBOX_CHANNEL]
     chans = ", ".join("#" + c for c in public_channels) if public_channels else "(none yet)"
     has_inbox = AGENT_INBOX_CHANNEL in channels
@@ -2198,7 +2221,8 @@ def build_agent_preamble(name: str, channels: List[str], member_id: str = "") ->
     if member_id and channels:
         joins = " ".join(
             f'trio_connect(channel="{c}", name="{name}", '
-            f'resume_member_id="{member_id}")' for c in channels)
+            f'resume_member_id="{member_id}", '
+            f'reclaim_secret="{reclaim_secret}")' for c in channels)
         connect_lines = (
             f" Your Trio member_id is {member_id}. On startup, connect to each "
             f"of your channels reclaiming that identity: {joins} — keep the "
@@ -3708,6 +3732,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 return
         db = None
         agent_id = _gen_agent_id()
+        reclaim_secret = secrets.token_hex(16)
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
@@ -3721,9 +3746,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 db.execute(
                     "INSERT INTO agents (id, name, model, base_prompt, state, "
                     "managed, effort, runtime_provider, cwd, permission_profile, "
-                    "wake_mode, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?)",
+                    "wake_mode, reclaim_secret, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?)",
                     (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
-                     provider, cwd, permission_profile, wake_mode, now))
+                     provider, cwd, permission_profile, wake_mode, reclaim_secret, now))
                 for c in channels + [AGENT_INBOX_CHANNEL]:
                     db.execute(
                         "INSERT OR IGNORE INTO members (id, channel, name, summary, "
@@ -3745,7 +3770,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         all_channels = channels + [AGENT_INBOX_CHANNEL]
         preamble = (prompt + "\n\n" if prompt else "") + \
-            build_agent_preamble(name, all_channels, member_id=agent_id)
+            build_agent_preamble(name, all_channels, member_id=agent_id,
+                                 reclaim_secret=reclaim_secret)
         mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
         try:
             proc = get_supervisor().spawn(agent_id, provider=provider, model=model,

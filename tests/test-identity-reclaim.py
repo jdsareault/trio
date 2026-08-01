@@ -31,16 +31,31 @@ def main() -> int:
     check("normal connect unchanged (action=created, id minted)",
           r.get("action") == "created" and bool(r.get("member_id")))
 
-    # Hub pre-creates the agent's member row, then the agent reclaims it.
+    # Hub pre-creates the agent's member row (and its supervisor-issued
+    # reclaim secret), then the agent reclaims it.
     db = srv.get_db()
     db.execute("INSERT INTO members (id, channel, name, summary, skills, "
                "last_seen, joined_at, active) VALUES "
                "('ag_x','rt','Aragorn','','',?,?,1)", (srv.now_iso(), srv.now_iso()))
+    db.execute("INSERT INTO agents (id, name, reclaim_secret, created_at) VALUES "
+               "('ag_x','Aragorn','sekrit-x',?)", (srv.now_iso(),))
     db.commit(); db.close()
     before = srv.get_db().execute(
         "SELECT COUNT(*) FROM members WHERE channel='rt'").fetchone()[0]
+
+    # SECURITY: without the reclaim secret, a caller who only knows the public
+    # member_id must NOT be able to reclaim the identity.
+    r2_nosecret = json.loads(srv.nth_connect(summary="agent", name="Aragorn",
+                                             channel="rt", resume_member_id="ag_x"))
+    check("reclaim without reclaim_secret is REFUSED", "error" in r2_nosecret)
+    r2_wrongsecret = json.loads(srv.nth_connect(summary="agent", name="Aragorn",
+                                                channel="rt", resume_member_id="ag_x",
+                                                reclaim_secret="not-it"))
+    check("reclaim with wrong reclaim_secret is REFUSED", "error" in r2_wrongsecret)
+
     r2 = json.loads(srv.nth_connect(summary="agent", name="Aragorn",
-                                    channel="rt", resume_member_id="ag_x"))
+                                    channel="rt", resume_member_id="ag_x",
+                                    reclaim_secret="sekrit-x"))
     after = srv.get_db().execute(
         "SELECT COUNT(*) FROM members WHERE channel='rt'").fetchone()[0]
     check("reclaim: connects AS the fixed id (no re-mint)", r2.get("member_id") == "ag_x")
@@ -83,6 +98,8 @@ def main() -> int:
     db.execute("INSERT INTO members (id,channel,name,summary,skills,last_seen,"
                "joined_at,active,kind) VALUES ('ag_cap',?,'CapBot','','',?,?,1,'agent')",
                (cap, srv.now_iso(), srv.now_iso()))
+    db.execute("INSERT INTO agents (id, name, reclaim_secret, created_at) VALUES "
+               "('ag_cap','CapBot','sekrit-cap',?)", (srv.now_iso(),))
     # pad up to MAX_MEMBERS distinct members (including host + ag_cap).
     have = db.execute("SELECT COUNT(*) FROM members WHERE channel=?", (cap,)).fetchone()[0]
     for i in range(srv.MAX_MEMBERS - have):
@@ -91,7 +108,8 @@ def main() -> int:
                    (f"pad{i}", cap, f"Pad{i}", srv.now_iso(), srv.now_iso()))
     db.commit(); db.close()
     rc = json.loads(srv.nth_connect(summary="a", name="CapBot",
-                                    channel=cap, resume_member_id="ag_cap"))
+                                    channel=cap, resume_member_id="ag_cap",
+                                    reclaim_secret="sekrit-cap"))
     check("reclaim of own row succeeds even when channel is full",
           rc.get("action") == "reclaimed")
 

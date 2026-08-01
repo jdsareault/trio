@@ -495,6 +495,7 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         "cwd": "TEXT NOT NULL DEFAULT ''",
         "permission_profile": "TEXT NOT NULL DEFAULT 'balanced'",
         "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
+        "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
     }
     for column, definition in agent_columns.items():
         try:
@@ -817,6 +818,7 @@ def nth_connect(
     pin_topic: bool = False,
     model: str = "",
     resume_member_id: str = "",
+    reclaim_secret: str = "",
 ) -> str:
     """Join an nth channel. Creates the channel if it doesn't exist.
 
@@ -848,6 +850,10 @@ def nth_connect(
                supervisor so a spawned agent connects as the row the hub already
                created — no duplicate member (bug B1). Empty for normal callers;
                action is "reclaimed" on a silent re-attach to an existing row.
+        reclaim_secret: Required alongside resume_member_id. The supervisor-issued,
+               per-spawn capability from your system prompt — proves you ARE the
+               spawned process, not just someone who read your member_id off the
+               public roster.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -902,6 +908,23 @@ def nth_connect(
                         (existing_row["kind"] if "kind" in existing_row.keys()
                          else "agent") or "agent") != "agent":
                     return json.dumps({"error": "Cannot reclaim this identity."})
+                # Reclaim also requires the supervisor-issued per-spawn secret
+                # (never exposed via the public roster or any API response) —
+                # knowing a public member_id alone must not be enough to mint a
+                # second primary session as that agent.
+                if reclaimed_existing:
+                    agent_row = db.execute(
+                        "SELECT reclaim_secret FROM agents WHERE id = ?",
+                        (member_id,)).fetchone()
+                    stored_secret = ((agent_row["reclaim_secret"]
+                                      if agent_row and "reclaim_secret" in agent_row.keys()
+                                      else "") or "")
+                    supplied_secret = (reclaim_secret or "").strip()
+                    if not stored_secret or not supplied_secret or not \
+                            secrets.compare_digest(stored_secret, supplied_secret):
+                        return json.dumps({
+                            "error": "Cannot reclaim this identity: invalid or "
+                                     "missing reclaim_secret."})
 
             # Check member count (all members who ever joined). Skip for a
             # reclaim of an already-counted own row — otherwise a placed agent
