@@ -89,3 +89,48 @@ are now fixed and tested.
   cull/filter over every channel from one process (was per-channel). Intended
   for the single-user local console; team/remote scoping is the `agents.owner`
   column, enforced later.
+
+---
+
+# LOTC Review 2 — hub-wiring delta (2026-08-01)
+
+**Scope:** `git diff cc29444..HEAD` — agent control-plane, identity reclaim,
+AgentRouter, spawn/roster UI, MCP wiring. **Reviewers:** Sauron, Aragorn,
+Legolas, Ents, Uruk-Hai.
+
+| Reviewer | Findings | Status |
+|----------|----------|--------|
+| Aragorn (security) | 1 crit, 1 note, 3 clean | fixed / deferred |
+| Sauron (correctness) | 1 crit, 3 warn, 4 note | fixed / deferred |
+| Legolas (perf) | 1 crit, 2 warn, 5 note | fixed / deferred |
+| Ents (tests) | 2 crit (reproduced), 5 warn, 5 note | fixed / covered |
+| Uruk-Hai (bugs) | 2 crit (input validation) | fixed |
+
+## Fixed
+- **CRIT reclaim identity hijack (Aragorn):** `resume_member_id` had zero auth —
+  an MCP caller could read the operator's member_id off the roster and reclaim
+  it (mint a valid token, read their DMs). Now reclaim is restricted to
+  `kind='agent'` rows; human/operator rows are refused.
+- **CRIT wake deaf-mutes agents (Sauron/Ents, reproduced):** a woken agent lost
+  its MCP tools + reclaim preamble. `wake_agent()` rebuilds both.
+- **CRIT router head-of-line stall (Legolas):** inline wake blocked the poll
+  thread ~10s. Wake+feed moved to a worker queue; one long-lived connection.
+- **CRIT capacity blocks reclaim (Sauron/Ents, reproduced):** MAX_MEMBERS counted
+  the reclaimer's own row. Skipped for a reclaim of an existing own row.
+- **CRIT input validation (Uruk-Hai):** non-list `channels` crashed
+  `_handle_agent_create`. Validated; inserts now transactional; spawn-fail marks
+  the row errored.
+- **WARN routing membership scope (Sauron/Ents):** an agent mentioned in a
+  channel it isn't placed in is no longer fed; messages enqueued not dropped.
+
+Tests added: reclaim auth + capacity; router membership-scope + wake-path +
+wake-keeps-mcp; web-agents channels-validation + abandoned + wake-endpoint.
+Final sweep: 12 suites green.
+
+## Deferred (noted)
+- Agent-vs-agent live-session reclaim guard (conflicts with wake; wants a
+  hub-minted reclaim secret) — kind guard covers the high-value operator case.
+- Bash left enabled for spawned agents (operator-spawned + local; documented).
+- Runtime idle-eviction; `_agent_locks`/`_RUNTIMES` never pruned; `_handle_agents_list`
+  N+1 (panel-open only); reclaim name/last_read reconciliation; concurrent-reclaim
+  cosmetic `[joined]`; router backpressure gauge; a few pure-function unit tests.
