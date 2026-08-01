@@ -66,6 +66,7 @@ DEFAULT_PORT = 8765
 DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 # ── Image attachments (Phase-1 prototype) ──
 ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
@@ -1678,6 +1679,7 @@ def channel_exists(channel: str, db_path: Optional[Path] = None) -> bool:
 _SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
+_IDLE_REAPER = None
 
 # Auto-assigned friendly agent names (editable later).
 _AGENT_NAMES = ["Aragorn", "Boromir", "Celeborn", "Denethor", "Eomer",
@@ -1742,6 +1744,97 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
         build_agent_preamble(row["name"], channels, member_id=agent_id)
     return supervisor.wake(agent_id, system_prompt=preamble,
                            mcp_config=build_mcp_config_for_hub())
+
+
+def clear_agent(agent_id: str, supervisor, db_path: Path):
+    """Start a fresh Claude context while preserving durable Trio identity."""
+    db = sqlite3.connect(str(db_path), timeout=5)
+    db.row_factory = sqlite3.Row
+    try:
+        row = db.execute("SELECT name, base_prompt FROM agents WHERE id = ?",
+                         (agent_id,)).fetchone()
+        if row is None:
+            return None
+        channels = [r[0] for r in db.execute(
+            "SELECT channel FROM agent_channels WHERE agent_id = ? ORDER BY channel",
+            (agent_id,)).fetchall()]
+    finally:
+        db.close()
+    base = (row["base_prompt"] or "").strip()
+    preamble = (base + "\n\n" if base else "") + \
+        build_agent_preamble(row["name"], channels, member_id=agent_id)
+    return supervisor.clear(agent_id, system_prompt=preamble,
+                            mcp_config=build_mcp_config_for_hub())
+
+
+def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
+    """Resume agents that were live/sleeping when the prior hub exited."""
+    db = sqlite3.connect(str(db_path), timeout=5)
+    db.row_factory = sqlite3.Row
+    try:
+        ids = [r["id"] for r in db.execute(
+            "SELECT id FROM agents WHERE managed=1 AND state IN (?,?,?,?)",
+            (nsup.ST_SPAWNING, nsup.ST_RUNNING, nsup.ST_IDLE, nsup.ST_SLEEPING)
+        ).fetchall()]
+    finally:
+        db.close()
+    resumed = []
+    for agent_id in ids:
+        try:
+            if wake_agent(agent_id, supervisor, db_path) is not None:
+                resumed.append(agent_id)
+        except Exception:
+            try:
+                supervisor._set_state(agent_id, nsup.ST_ERRORED, clear_pid=True)
+            except Exception:
+                pass
+    return resumed
+
+
+class AgentIdleReaper(threading.Thread):
+    """Hibernate live managed agents after a tunable idle interval."""
+
+    def __init__(self, db_path: Path, supervisor, idle_seconds: float,
+                 interval: float = 15.0):
+        super().__init__(daemon=True)
+        self.db_path = db_path
+        self.sup = supervisor
+        self.idle_seconds = max(0.0, idle_seconds)
+        self.interval = interval
+        self._stop = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval):
+            if self.idle_seconds <= 0:
+                continue
+            try:
+                self.tick()
+            except Exception:
+                pass
+
+    def tick(self) -> List[str]:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.idle_seconds)
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            rows = db.execute(
+                "SELECT id, last_active_at FROM agents WHERE managed=1 "
+                "AND state = ?", (nsup.ST_IDLE,)).fetchall()
+        finally:
+            db.close()
+        slept = []
+        for r in rows:
+            try:
+                last = datetime.fromisoformat(r["last_active_at"] or "")
+            except (ValueError, TypeError):
+                continue
+            if last <= cutoff and self.sup.is_running(r["id"]):
+                if self.sup.hibernate(r["id"]):
+                    slept.append(r["id"])
+        return slept
+
+    def stop(self) -> None:
+        self._stop.set()
 
 
 def build_mcp_config_for_hub() -> str:
@@ -2058,6 +2151,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             }, set_cookie_token=token if is_new else None)
         elif path == "/api/channels":
             self._handle_channels()
+        elif path == "/api/dms":
+            self._handle_dms(parsed)
         elif path == "/api/agents":
             self._handle_agents_list()
         elif path == "/api/events":
@@ -2088,7 +2183,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._resolved_channel = None
         parsed = urlparse(self.path)
-        if parsed.path == "/api/agents":
+        if parsed.path == "/api/channels":
+            self._handle_channel_create()
+        elif parsed.path == "/api/agents":
             self._handle_agent_create()
         elif (parsed.path.startswith("/api/agents/")
               and parsed.path.count("/") == 4):
@@ -2796,6 +2893,149 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "count": len(channels), "channels": channels})
 
+    def _handle_channel_create(self) -> None:
+        """Create a channel from the operator console.
+
+        MCP ``trio_connect`` still owns agent-created channels.  This endpoint
+        is the human-facing equivalent: it creates the channel, places the
+        authenticated operator in it, and optionally pins a short objective.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        topic = (body.get("topic") or "").strip()[:500]
+        code = (body.get("code") or "").strip().lower()
+        if not code and topic:
+            code = re.sub(r"[^a-z0-9-]", "-", topic.lower())
+            code = re.sub(r"-+", "-", code).strip("-")[:32]
+        if not code:
+            code = "channel-" + secrets.token_hex(3)
+        if not CHANNEL_CODE_PATTERN.fullmatch(code):
+            self._error(400, "channel code must be lowercase alphanumeric with hyphens, 1-32 chars")
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            if db.execute("SELECT 1 FROM channels WHERE code = ?", (code,)).fetchone():
+                self._error(409, "channel already exists")
+                return
+            now = now_iso()
+            with db:
+                db.execute(
+                    "INSERT INTO channels (code, status, created_at, updated_at) "
+                    "VALUES (?, 'active', ?, ?)", (code, now, now))
+                op_id, op_name = ensure_operator_row(db, code, ident)
+                created = db.execute(
+                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (code, op_id, op_name,
+                     f"[channel created] {topic}" if topic else "[channel created]", now))
+                if topic:
+                    db.execute("UPDATE channels SET pinned_message_id = ? WHERE code = ?",
+                               (created.lastrowid, code))
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            db.close()
+        self._json({"ok": True, "channel": {"code": code, "topic": topic}}, status=201)
+
+    def _handle_dms(self, parsed) -> None:
+        """Return the operator's unified, cross-channel DM surface.
+
+        Messages remain channel-backed for protocol compatibility.  This view
+        groups those rows above the channel dimension, yielding one operator
+        thread per agent plus a separate agent-to-agent audit section.  Passing
+        ``?with=<member_id>`` also returns the merged history for that thread.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        qs = parse_qs(parsed.query)
+        with_id = (qs.get("with", [""])[0] or "").strip()
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT * FROM messages WHERE recipients IS NOT NULL "
+                "AND recipients NOT IN ('', '[]') ORDER BY id DESC LIMIT 2000"
+            ).fetchall()
+            names: Dict[str, str] = {}
+            for r in db.execute("SELECT id, name FROM agents").fetchall():
+                names[r["id"]] = r["name"]
+            for r in db.execute(
+                    "SELECT id, MAX(name) AS name FROM members GROUP BY id").fetchall():
+                names.setdefault(r["id"], r["name"] or r["id"])
+            names[operator_id] = ident.display_name
+
+            yours: Dict[str, Dict[str, Any]] = {}
+            agent_threads: Dict[str, Dict[str, Any]] = {}
+            merged = []
+            for r in rows:
+                recips = parse_recipients(r["recipients"])
+                participants = set(recips)
+                participants.add(r["member_id"])
+                if with_id and operator_id in participants and with_id in participants:
+                    evt = _message_event(db, r)
+                    evt["channel"] = r["channel"]
+                    merged.append(evt)
+                if operator_id in participants:
+                    others = sorted(participants - {operator_id})
+                    if not others:
+                        continue
+                    key = others[0] if len(others) == 1 else "group:" + ",".join(others)
+                    if key not in yours:
+                        yours[key] = {
+                            "key": key, "member_ids": others,
+                            "name": ", ".join(names.get(i, i) for i in others),
+                            "channel": r["channel"], "last_id": r["id"],
+                            "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
+                            "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                        }
+                else:
+                    ids = sorted(participants)
+                    key = ",".join(ids)
+                    if key and key not in agent_threads:
+                        agent_threads[key] = {
+                            "key": key, "member_ids": ids,
+                            "name": " ↔ ".join(names.get(i, i) for i in ids),
+                            "channel": r["channel"], "last_id": r["id"],
+                            "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
+                            "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                        }
+
+            targets = []
+            agent_rows = db.execute(
+                "SELECT id, name, state, model FROM agents ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+            for a in agent_rows:
+                channels = [c[0] for c in db.execute(
+                    "SELECT channel FROM agent_channels WHERE agent_id=? ORDER BY channel",
+                    (a["id"],)).fetchall()]
+                targets.append({"id": a["id"], "name": a["name"],
+                                "state": a["state"], "model": a["model"],
+                                "channels": channels})
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            db.close()
+        merged.reverse()
+        self._json({
+            "ok": True,
+            "your_dms": list(yours.values()),
+            "agent_dms": list(agent_threads.values()),
+            "targets": targets,
+            "with": with_id,
+            "messages": merged,
+        })
+
     # ── agent control plane (operator-only) ──
     def _require_operator(self):
         _t, ident, _n = self._resolve_identity()
@@ -2934,14 +3174,66 @@ class NthWebHandler(BaseHTTPRequestHandler):
         }})
 
     def _handle_agent_action(self, agent_id: str, action: str) -> None:
-        """stop / wake / delete an agent. Operator-only."""
+        """Lifecycle/context/placement operations for a managed agent."""
         if self._require_operator() is None:
             return
         sup = get_supervisor()
         if action == "stop":
             ok = sup.stop(agent_id)
+        elif action == "hibernate":
+            ok = sup.hibernate(agent_id)
         elif action == "wake":
             ok = wake_agent(agent_id, sup, self.db_path) is not None
+        elif action == "clear":
+            ok = clear_agent(agent_id, sup, self.db_path) is not None
+        elif action == "compact":
+            if not sup.is_running(agent_id):
+                wake_agent(agent_id, sup, self.db_path)
+            ok = sup.compact(agent_id)
+        elif action == "placement":
+            body = self._read_json_body(max_bytes=4096)
+            if body is None:
+                return
+            channel = (body.get("channel") or "").strip()
+            present = bool(body.get("present", True))
+            if not channel_exists(channel, self.db_path):
+                self._error(400, "unknown channel")
+                return
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                agent = db.execute(
+                    "SELECT name, model, base_prompt FROM agents WHERE id=?", (agent_id,)
+                ).fetchone()
+                if agent is None:
+                    self._error(404, "agent not found")
+                    return
+                now = now_iso()
+                with db:
+                    if present:
+                        db.execute(
+                            "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, "
+                            "last_seen, last_read, joined_at, active, kind, model) "
+                            "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+                            (agent_id, channel, agent["name"],
+                             (agent["base_prompt"] or "")[:200], "", now, now, agent["model"]))
+                        db.execute("UPDATE members SET active=1 WHERE id=? AND channel=?",
+                                   (agent_id, channel))
+                        db.execute(
+                            "INSERT OR IGNORE INTO agent_channels "
+                            "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+                            (agent_id, channel, agent_id, now))
+                    else:
+                        db.execute("DELETE FROM agent_channels WHERE agent_id=? AND channel=?",
+                                   (agent_id, channel))
+                        db.execute("UPDATE members SET active=0 WHERE id=? AND channel=?",
+                                   (agent_id, channel))
+            finally:
+                db.close()
+            if present and sup.is_running(agent_id):
+                sup.feed(agent_id, channel,
+                         "Your placement was updated. Connect to this channel with your existing Trio identity, then acknowledge here.")
+            ok = True
         elif action == "delete":
             sup.stop(agent_id)
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
@@ -3698,13 +3990,63 @@ INDEX_HTML = r"""<!doctype html>
   #chat, #chat .msg, #chat .msg * { font-family: var(--msg-font); }
   button { font-family: inherit; }
 
-  #app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 42px 1fr auto;
+  #app { display: grid; grid-template-columns: 236px minmax(0, 1fr) 300px;
+         grid-template-rows: 52px 1fr auto;
          height: 100vh; }
-  #app.side-collapsed { grid-template-columns: 1fr 0; }
+  #app.side-collapsed { grid-template-columns: 236px minmax(0, 1fr) 0; }
   #app.side-collapsed #side { display: none; }
 
+  /* ── Workspace rail ── Persistent Slack-like navigation for the hub. */
+  #workspace-rail { grid-column: 1 / 2; grid-row: 1 / 4; min-width: 0;
+    background: color-mix(in srgb, var(--bg2) 88%, var(--accent) 12%);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    overflow: hidden; }
+  #workspace-rail[hidden] { display: none; }
+  .rail-brand { min-height: 52px; display: flex; align-items: center; gap: 9px;
+    padding: 0 14px; border-bottom: 1px solid var(--border); font-weight: 800;
+    letter-spacing: .02em; }
+  .rail-mark { width: 27px; height: 27px; border-radius: 8px; display: grid;
+    place-items: center; background: var(--accent); color: var(--bg); font-size: 15px; }
+  .rail-scroll { overflow-y: auto; padding: 12px 8px 20px; }
+  .rail-section { margin-bottom: 15px; }
+  .rail-section-head { display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 0 7px 6px; color: var(--dim); font-size: 10px;
+    font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+  .rail-add { border: 0; background: transparent; color: var(--dim); cursor: pointer;
+    font: inherit; font-size: 17px; line-height: 1; border-radius: 4px; }
+  .rail-add:hover { color: var(--fg); background: rgba(var(--ov), .08); }
+  .rail-item { width: 100%; min-height: 34px; display: flex; align-items: center;
+    gap: 8px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent;
+    color: var(--dim); cursor: pointer; text-align: left; font: inherit; }
+  .rail-item:hover { background: rgba(var(--ov), .07); color: var(--fg); }
+  .rail-item.active { background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--fg); font-weight: 700; }
+  .rail-item .rail-icon { width: 18px; text-align: center; flex: 0 0 auto; }
+  .rail-item .rail-copy { min-width: 0; flex: 1; }
+  .rail-item .rail-name { display: block; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .rail-item .rail-preview { display: block; font-size: 10px; color: var(--dimmer);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+  .rail-state { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--dimmer); }
+  .rail-state.running, .rail-state.idle { background: var(--accent2); }
+  .rail-state.sleeping { background: var(--warn); }
+  .rail-state.errored { background: var(--err); }
+  #rail-channel-form { margin: 2px 6px 8px; padding: 8px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg); display: grid; gap: 6px; }
+  #rail-channel-form[hidden] { display: none; }
+  #rail-channel-form input { width: 100%; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 6px 7px; font: inherit; }
+  #rail-channel-form input:focus { outline: none; border-color: var(--accent); }
+  .rail-form-actions { display: flex; gap: 6px; }
+  .rail-form-actions button { flex: 1; border: 1px solid var(--border); border-radius: 4px;
+    background: var(--panel); color: var(--fg); padding: 5px; cursor: pointer; font: inherit; }
+  .rail-form-actions button.primary { background: var(--accent); border-color: var(--accent);
+    color: var(--bg); font-weight: 700; }
+  #rail-channel-msg { min-height: 14px; color: var(--err); font-size: 10px; }
+
   /* ── Header ── */
-  header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
+  header { grid-column: 2 / 4; background: var(--bg2); border-bottom: 1px solid var(--border);
            display: flex; align-items: center; padding: 0 14px; gap: 12px;
            font-weight: 600; }
   header .title { color: var(--accent); }
@@ -3783,11 +4125,14 @@ INDEX_HTML = r"""<!doctype html>
   #agent-new button { background: var(--accent, #3b82f6); color: #fff; border: 0;
     border-radius: 3px; padding: 5px 8px; cursor: pointer; font-size: 12px; }
   #agent-create-msg { font-size: 11px; color: var(--muted, #999); }
-  .agent-row { display: flex; align-items: center; gap: 6px; padding: 5px 0;
+  .agent-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 0;
     border-bottom: 1px solid var(--border); font-size: 12px; }
   .agent-row .a-name { font-weight: 600; }
   .agent-row .a-state { font-size: 10px; text-transform: uppercase; opacity: .8; }
   .agent-row .a-spacer { flex: 1; }
+  .agent-row .a-channels { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 4px; }
+  .agent-row .a-channel { font-size: 10px; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 9px; padding: 1px 6px; cursor: pointer; background: transparent; }
   .agent-row button { background: transparent; color: var(--fg);
     border: 1px solid var(--border); border-radius: 3px; padding: 2px 6px;
     cursor: pointer; font-size: 11px; }
@@ -3832,7 +4177,7 @@ INDEX_HTML = r"""<!doctype html>
   .dm-thread .dm-unread[hidden] { display: none; }
 
   /* ── Chat ── */
-  #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
+  #chat-wrap { grid-row: 2 / 3; grid-column: 2 / 3; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
   .msg { margin-bottom: 10px; word-wrap: break-word; cursor: pointer; padding: 4px 8px 6px;
          border-radius: 3px; border-left: 3px solid transparent; margin-left: -8px; }
@@ -3867,6 +4212,8 @@ INDEX_HTML = r"""<!doctype html>
                display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
+  .msg-channel { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+                 border-radius: 8px; padding: 0 6px; font-size: 9px; }
   /* Structured confidence badge — rendered in the head only when a message
      carries a confidence value. Absent confidence renders NO badge at all
      (never an empty chip). Colors mirror the task-badge palette. */
@@ -4265,7 +4612,7 @@ INDEX_HTML = r"""<!doctype html>
                     background: var(--mention); opacity: 0.5; }
 
   /* ── Roster sidebar ── */
-  #side { grid-row: 2 / 3; grid-column: 2 / 3;
+  #side { grid-row: 2 / 4; grid-column: 3 / 4;
           background: var(--panel); border-left: 1px solid var(--border);
           overflow-y: auto; display: flex; flex-direction: column; }
   #side section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
@@ -4446,7 +4793,7 @@ INDEX_HTML = r"""<!doctype html>
   #filter-banner.active { display: block; }
 
   /* ── Composer ── */
-  #composer { grid-row: 3 / 4; grid-column: 1 / 3;
+  #composer { grid-row: 3 / 4; grid-column: 2 / 3;
               background: var(--bg2); border-top: 1px solid var(--border);
               padding: 8px 14px; display: flex; flex-direction: column; gap: 4px;
               position: relative; }
@@ -4657,11 +5004,27 @@ INDEX_HTML = r"""<!doctype html>
   #side-backdrop { display: none; }
   #side-drawer-head { display: none; }   /* only shown as a drawer header on phones */
   @media (max-width: 1000px) {
-    #app { grid-template-columns: 1fr 240px; }
+    #app { grid-template-columns: 210px minmax(0, 1fr) 240px; }
+    #app.side-collapsed { grid-template-columns: 210px minmax(0, 1fr) 0; }
   }
   @media (max-width: 760px) {
     /* Header can't fit on one 42px row — let it wrap and give it an auto row. */
-    #app { grid-template-columns: 1fr 210px; grid-template-rows: auto 1fr auto; }
+    #app, #app.side-collapsed { grid-template-columns: 176px minmax(0, 1fr);
+      grid-template-rows: auto 1fr auto; }
+    #workspace-rail { grid-column: 1; }
+    header { grid-column: 2; }
+    #chat-wrap, #composer { grid-column: 2; }
+    #side { position: fixed; top: 0; right: 0; bottom: 0; width: min(300px, 85vw);
+      z-index: 60; border-left: 1px solid var(--border); grid-column: auto;
+      transform: translateX(0); transition: transform .2s ease; }
+    #app.side-collapsed #side { display: flex; transform: translateX(100%); }
+    #side-drawer-head { display: flex; justify-content: flex-end; position: sticky; top: 0;
+      background: var(--panel); padding: 6px 8px; z-index: 1; border-bottom: 1px solid var(--border); }
+    #side-close { background: none; border: none; color: var(--dim); cursor: pointer;
+      font-size: 22px; line-height: 1; padding: 2px 8px; border-radius: 4px; }
+    #side-backdrop { position: fixed; inset: 0; z-index: 55; background: rgba(0,0,0,.45); }
+    #app.side-collapsed ~ #side-backdrop { display: none; }
+    #app:not(.side-collapsed) ~ #side-backdrop { display: block; }
     header { flex-wrap: wrap; height: auto; min-height: 42px; padding: 6px 10px; row-gap: 6px; }
     header .meta { flex-basis: 100%; order: 9; }   /* meta drops to its own line */
     #filter { flex: 1 1 120px; min-width: 90px; }
@@ -4669,6 +5032,8 @@ INDEX_HTML = r"""<!doctype html>
   @media (max-width: 560px) {
     /* True phone: single column, roster is a right-side drawer over the chat. */
     #app, #app.side-collapsed { grid-template-columns: 1fr; }
+    #workspace-rail { display: none; }
+    header, #chat-wrap, #composer { grid-column: 1; }
     #side { position: fixed; top: 0; right: 0; bottom: 0; width: min(300px, 85vw);
             z-index: 60; border-left: 1px solid var(--border);
             box-shadow: -8px 0 24px rgba(0,0,0,0.4);
@@ -4711,6 +5076,32 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </div>
 <div id="app">
+  <nav id="workspace-rail" aria-label="Workspace" hidden>
+    <div class="rail-brand"><span class="rail-mark">n</span><span>nth workspace</span></div>
+    <div class="rail-scroll">
+      <section class="rail-section">
+        <div class="rail-section-head"><span>Direct messages</span><button class="rail-add" id="rail-dm-add" title="Start a direct message">+</button></div>
+        <div id="rail-dms"></div>
+      </section>
+      <section class="rail-section">
+        <div class="rail-section-head"><span>Channels</span><button class="rail-add" id="rail-channel-add" title="Create a channel">+</button></div>
+        <form id="rail-channel-form" hidden>
+          <input id="rail-channel-code" type="text" maxlength="32" placeholder="channel-name" spellcheck="false">
+          <input id="rail-channel-topic" type="text" maxlength="500" placeholder="What is this channel for?">
+          <div class="rail-form-actions">
+            <button type="button" id="rail-channel-cancel">Cancel</button>
+            <button type="submit" class="primary">Create</button>
+          </div>
+          <span id="rail-channel-msg"></span>
+        </form>
+        <div id="rail-channels"></div>
+      </section>
+      <section class="rail-section">
+        <div class="rail-section-head"><span>Agents</span><button class="rail-add" id="rail-agent-add" title="Create an agent">+</button></div>
+        <div id="rail-agents"></div>
+      </section>
+    </div>
+  </nav>
   <header>
     <span class="title" id="h-channel">trio#…</span>
     <select id="chan-picker" title="switch channel" aria-label="switch channel" hidden></select>
@@ -4891,6 +5282,11 @@ INDEX_HTML = r"""<!doctype html>
   const jumpCount = document.getElementById('jump-count');
   const newBar = document.getElementById('new-bar');
   const targetBar = document.getElementById('target-bar');
+  const workspaceRail = document.getElementById('workspace-rail');
+  const railChannels = document.getElementById('rail-channels');
+  const railDms = document.getElementById('rail-dms');
+  const railAgents = document.getElementById('rail-agents');
+  const railChannelForm = document.getElementById('rail-channel-form');
 
   // Message-font picker — persists per-origin via localStorage.
   try {
@@ -4995,6 +5391,8 @@ INDEX_HTML = r"""<!doctype html>
     // DM inbox read-state: counterparty id → highest DM id the operator has
     // opened. Drives the unread bubble; persisted per-channel in localStorage.
     dmRead: new Map(),
+    unifiedDms: null,              // cross-channel API snapshot
+    dmTargets: new Map(),          // global agent id → target + placements
   };
   const PALETTE = ['#62d7ef','#d070d7','#7ede7e','#e5d35e',
                    '#8eb9ff','#ff8470','#9ef0f0','#f79fea'];
@@ -6551,6 +6949,13 @@ INDEX_HTML = r"""<!doctype html>
       author.textContent = m.member_name;
       author.style.color = colorFor(m.member_id);
       head.appendChild(author);
+    }
+    if (DM_MODE && m.channel) {
+      const origin = document.createElement('span');
+      origin.className = 'msg-channel';
+      origin.textContent = '#' + m.channel;
+      origin.title = 'Message origin';
+      head.appendChild(origin);
     }
     // Structured confidence badge — only when a value is present. Absent /
     // unknown confidence adds nothing (no empty badge). System/task rows carry
@@ -8327,7 +8732,109 @@ INDEX_HTML = r"""<!doctype html>
   const dmNewBtn = document.getElementById('dm-new-btn');
   const dmPickerEl = document.getElementById('dm-picker');
 
-  function dmReadKey() { return 'trio.dmRead.' + (state.channel || ''); }
+  async function loadUnifiedDms(includeMessages) {
+    if (!state.isOperator) return null;
+    let path = '/api/dms';
+    if (includeMessages && state.dmTargetId) path += '?with=' + encodeURIComponent(state.dmTargetId);
+    try {
+      const r = await fetch(path);
+      if (!r.ok) return null;
+      const data = await r.json();
+      state.unifiedDms = data;
+      state.dmTargets.clear();
+      for (const t of (data.targets || [])) state.dmTargets.set(t.id, t);
+      if (includeMessages) {
+        for (const m of (data.messages || [])) appendMessage(m);
+      }
+      return data;
+    } catch (_) { return null; }
+  }
+
+  function railItem(label, icon, preview, active, onClick) {
+    const b = document.createElement('button'); b.type = 'button';
+    b.className = 'rail-item' + (active ? ' active' : '');
+    const ic = document.createElement('span'); ic.className = 'rail-icon'; ic.textContent = icon;
+    const copy = document.createElement('span'); copy.className = 'rail-copy';
+    const nm = document.createElement('span'); nm.className = 'rail-name'; nm.textContent = label;
+    copy.appendChild(nm);
+    if (preview) { const p = document.createElement('span'); p.className = 'rail-preview'; p.textContent = preview; copy.appendChild(p); }
+    b.appendChild(ic); b.appendChild(copy); b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function renderWorkspaceRail(channels, dms, agents) {
+    if (!workspaceRail || !state.isOperator || !state.multi) return;
+    workspaceRail.removeAttribute('hidden');
+    railChannels.textContent = '';
+    for (const c of (channels || [])) {
+      railChannels.appendChild(railItem(c.code, '#', c.preview,
+        !DM_MODE && c.code === state.channel, () => {
+          if (c.code === state.channel && !DM_MODE) return;
+          if (input && input.value.trim() && !confirm('Switch channel? Your unsent message will be lost.')) return;
+          location.assign('/?channel=' + encodeURIComponent(c.code));
+        }));
+    }
+    railDms.textContent = '';
+    for (const t of ((dms && dms.your_dms) || [])) {
+      const cp = t.member_ids && t.member_ids[0];
+      if (!cp) continue;
+      railDms.appendChild(railItem(t.name, animalForId(cp).emoji, t.preview,
+        DM_MODE && cp === DM_TARGET_ID, () => openDmTab(cp, t.channel)));
+    }
+    if (!railDms.children.length) {
+      const empty = document.createElement('div'); empty.className = 'rail-item'; empty.style.cursor = 'default';
+      empty.textContent = 'No DMs yet'; railDms.appendChild(empty);
+    }
+    railAgents.textContent = '';
+    for (const a of (agents || [])) {
+      const row = railItem(a.name, '●', (a.model || '') + (a.channels && a.channels.length ? ' · #' + a.channels[0] : ''), false,
+        () => { toggleAgentsPanel(true); });
+      row.querySelector('.rail-icon').className = 'rail-state ' + (a.live ? 'running' : a.state);
+      row.title = 'Manage ' + a.name;
+      railAgents.appendChild(row);
+    }
+  }
+
+  async function loadWorkspaceRail() {
+    if (!workspaceRail || !state.isOperator || !state.multi) return;
+    try {
+      const [cr, dr, ar] = await Promise.all([fetch('/api/channels'), fetch('/api/dms'), fetch('/api/agents')]);
+      const [c, d, a] = await Promise.all([cr.json(), dr.json(), ar.json()]);
+      state.unifiedDms = d;
+      state.dmTargets.clear();
+      for (const t of (d.targets || [])) state.dmTargets.set(t.id, t);
+      renderWorkspaceRail(c.channels || [], d, a.agents || []);
+    } catch (_) { /* rail is progressive enhancement */ }
+  }
+
+  const railChannelAdd = document.getElementById('rail-channel-add');
+  const railChannelCancel = document.getElementById('rail-channel-cancel');
+  const railChannelCode = document.getElementById('rail-channel-code');
+  const railChannelTopic = document.getElementById('rail-channel-topic');
+  const railChannelMsg = document.getElementById('rail-channel-msg');
+  function showRailChannelForm(show) {
+    if (!railChannelForm) return;
+    railChannelForm.toggleAttribute('hidden', !show);
+    if (show) railChannelCode.focus();
+  }
+  if (railChannelAdd) railChannelAdd.addEventListener('click', () => showRailChannelForm(true));
+  if (railChannelCancel) railChannelCancel.addEventListener('click', () => showRailChannelForm(false));
+  if (railChannelForm) railChannelForm.addEventListener('submit', async (e) => {
+    e.preventDefault(); railChannelMsg.textContent = 'Creating…';
+    try {
+      const r = await fetch('/api/channels', { method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({code: railChannelCode.value.trim(), topic: railChannelTopic.value.trim()}) });
+      const data = await r.json();
+      if (!r.ok) { railChannelMsg.textContent = data.error || ('Error ' + r.status); return; }
+      location.assign('/?channel=' + encodeURIComponent(data.channel.code));
+    } catch (err) { railChannelMsg.textContent = 'Could not create channel'; }
+  });
+  const railAgentAdd = document.getElementById('rail-agent-add');
+  if (railAgentAdd) railAgentAdd.addEventListener('click', () => toggleAgentsPanel(true));
+  const railDmAdd = document.getElementById('rail-dm-add');
+  if (railDmAdd) railDmAdd.addEventListener('click', () => { toggleDmPanel(true); toggleDmPicker(true); });
+
+  function dmReadKey() { return 'trio.dmRead.global'; }
   function loadDmRead() {
     try {
       const o = JSON.parse(localStorage.getItem(dmReadKey()) || '{}');
@@ -8363,20 +8870,64 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
-  function openDmTab(cp) {
+  function dmChannelFor(cp, preferred) {
+    if (preferred) return preferred;
+    const t = state.dmTargets.get(cp);
+    if (t && t.channels && t.channels.includes(state.channel)) return state.channel;
+    if (t && t.channels && t.channels.length) return t.channels[0];
+    return state.channel || '';
+  }
+
+  function openDmTab(cp, channel) {
     markDmRead(cp);
     refreshDmBadge();
     if (dmPanel.hasAttribute('hidden') === false) renderDmInbox();
-    // Carry the current channel into the DM tab — without it, multi-channel
-    // boot() would redirect to some other channel and drop the ?dm= entirely.
+    // DMs are unified above channels, but sends still use the counterpart's
+    // placement channel so the existing Trio protocol remains unchanged.
     var u = '/?dm=' + encodeURIComponent(cp);
-    if (state.channel) u += '&channel=' + encodeURIComponent(state.channel);
-    window.open(u, '_blank');
+    const ch = dmChannelFor(cp, channel);
+    if (ch) u += '&channel=' + encodeURIComponent(ch);
+    if (input && input.value.trim() && !confirm('Open this DM? Your unsent message will be lost.')) return;
+    if (location && typeof location.assign === 'function') location.assign(u);
+    else window.open(u, '_blank');  // minimal DOM/test harness fallback
   }
 
   function renderDmInbox() {
     if (!dmListEl) return;
     dmListEl.textContent = '';
+    const apiThreads = state.unifiedDms && state.unifiedDms.your_dms;
+    if (apiThreads && apiThreads.length) {
+      for (const t of apiThreads) {
+        const cp = t.member_ids && t.member_ids[0];
+        if (!cp) continue;
+        const row = document.createElement('div');
+        row.className = 'dm-thread' + (DM_MODE && cp === DM_TARGET_ID ? ' dm-current' : '');
+        row.tabIndex = 0; row.setAttribute('role', 'button');
+        const av = document.createElement('span'); av.className = 'dm-av';
+        av.textContent = animalForId(cp).emoji; row.appendChild(av);
+        const meta = document.createElement('div'); meta.className = 'dm-meta';
+        const name = document.createElement('div'); name.className = 'dm-name'; name.textContent = t.name;
+        const prev = document.createElement('div'); prev.className = 'dm-prev';
+        prev.textContent = (t.from ? t.from + ': ' : '') + (t.preview || '');
+        meta.appendChild(name); meta.appendChild(prev); row.appendChild(meta);
+        const go = () => openDmTab(cp, t.channel);
+        row.addEventListener('click', go);
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+        dmListEl.appendChild(row);
+      }
+      if (state.unifiedDms.agent_dms && state.unifiedDms.agent_dms.length) {
+        const label = document.createElement('h3'); label.textContent = 'Agent ↔ Agent';
+        label.style.marginTop = '8px'; dmListEl.appendChild(label);
+        for (const t of state.unifiedDms.agent_dms) {
+          const row = document.createElement('div'); row.className = 'dm-thread';
+          const meta = document.createElement('div'); meta.className = 'dm-meta';
+          const name = document.createElement('div'); name.className = 'dm-name'; name.textContent = t.name;
+          const prev = document.createElement('div'); prev.className = 'dm-prev'; prev.textContent = t.preview || '';
+          meta.appendChild(name); meta.appendChild(prev); row.appendChild(meta); dmListEl.appendChild(row);
+        }
+      }
+      return;
+    }
     const threads = dmThreadsFor(state.messages.values(), state.operator.id, state.dmRead);
     if (!threads.length) {
       const empty = document.createElement('div');
@@ -8443,7 +8994,13 @@ INDEX_HTML = r"""<!doctype html>
   // per-agent Message action, which — like the old .dm-btn — skips _op_ humans;
   // the picker is the deliberate "reach anyone" surface. Sorted by name.
   function dmPickerMembers() {
-    return [...state.members.values()]
+    const all = new Map();
+    for (const m of state.members.values()) all.set(m.id, m);
+    for (const t of state.dmTargets.values()) all.set(t.id, Object.assign({}, t, {
+      channel: dmChannelFor(t.id), animal_emoji: animalForId(t.id).emoji,
+      animal_name: animalForId(t.id).name,
+    }));
+    return [...all.values()]
       // Exclude the operator, and — inside a DM view — the counterparty already
       // on screen (you're in that thread; picking it would just dup the tab).
       .filter((m) => m && m.id && m.id !== state.operator.id
@@ -8481,7 +9038,7 @@ INDEX_HTML = r"""<!doctype html>
       nm.textContent = m.name;
       row.appendChild(nm);
 
-      const start = () => { toggleDmPicker(false); openDmTab(m.id); toggleDmPanel(false); };
+      const start = () => { toggleDmPicker(false); openDmTab(m.id, m.channel); toggleDmPanel(false); };
       row.addEventListener('click', start);
       row.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); start(); }
@@ -8512,6 +9069,7 @@ INDEX_HTML = r"""<!doctype html>
     if (show) {
       // Both drawers share the same top-right slot — only one at a time.
       if (typeof toggleSettings === 'function') toggleSettings(false);
+      loadUnifiedDms(false).then(renderDmInbox);
       renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
     } else { toggleDmPicker(false); dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
   }
@@ -8564,22 +9122,48 @@ INDEX_HTML = r"""<!doctype html>
       stt.textContent = (a.live ? 'live' : a.state) + (a.model ? ' · ' + a.model : '')
         + (a.effort ? ' · ' + a.effort : '');
       const sp = document.createElement('span'); sp.className = 'a-spacer';
-      const ch = document.createElement('span'); ch.className = 'a-state';
-      ch.textContent = (a.channels || []).map(c => '#' + c).join(' ');
-      row.appendChild(nm); row.appendChild(stt); row.appendChild(sp); row.appendChild(ch);
-      for (const act of (a.live ? ['stop', 'delete'] : ['wake', 'delete'])) {
+      row.appendChild(nm); row.appendChild(stt); row.appendChild(sp);
+      if (a.channels && a.channels.length) {
+        const msg = document.createElement('button'); msg.textContent = 'message';
+        msg.title = 'Open a direct message with ' + a.name;
+        msg.onclick = () => openDmTab(a.id, a.channels.includes(state.channel) ? state.channel : a.channels[0]);
+        row.appendChild(msg);
+      }
+      for (const act of (a.live
+        ? ['hibernate', 'stop', 'compact', 'clear', 'delete']
+        : ['wake', 'clear', 'delete'])) {
         const b = document.createElement('button');
         b.textContent = act; b.onclick = () => agentAction(a.id, act);
         row.appendChild(b);
       }
+      const chans = document.createElement('div'); chans.className = 'a-channels';
+      for (const c of (a.channels || [])) {
+        const chip = document.createElement('button'); chip.className = 'a-channel';
+        chip.textContent = '#' + c + ' ×'; chip.title = 'Remove from #' + c;
+        chip.onclick = () => agentPlacement(a.id, c, false); chans.appendChild(chip);
+      }
+      const add = document.createElement('button'); add.className = 'a-channel'; add.textContent = '+ channel';
+      add.onclick = () => { const c = prompt('Channel code to add:'); if (c) agentPlacement(a.id, c.trim(), true); };
+      chans.appendChild(add); row.appendChild(chans);
       agentsListEl.appendChild(row);
     }
   }
   async function agentAction(id, action) {
     if (action === 'delete' && !confirm('Delete this agent?')) return;
+    if (action === 'clear' && !confirm('Clear this agent\'s entire context and start fresh?')) return;
     try { await fetch('/api/agents/' + encodeURIComponent(id) + '/' + action, { method: 'POST' }); }
     catch (e) {}
-    loadAgents();
+    loadAgents(); loadWorkspaceRail();
+  }
+  async function agentPlacement(id, channel, present) {
+    if (!present && !confirm('Remove this agent from #' + channel + '?')) return;
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(id) + '/placement', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({channel, present}) });
+      if (!r.ok) { const d = await r.json(); alert(d.error || ('Error ' + r.status)); }
+    } catch (_) {}
+    loadAgents(); loadWorkspaceRail();
   }
   async function createAgent() {
     if (!agentModelSel) return;
@@ -8598,7 +9182,7 @@ INDEX_HTML = r"""<!doctype html>
       if (r.ok && j.ok) {
         agentCreateMsg.textContent = 'spawned ' + j.agent.name;
         agentNameInp.value = ''; agentPromptInp.value = '';
-        loadAgents();
+        loadAgents(); loadWorkspaceRail();
       } else { agentCreateMsg.textContent = (j.error || ('error ' + r.status)); }
     } catch (e) { if (agentCreateMsg) agentCreateMsg.textContent = 'error'; }
   }
@@ -9605,8 +10189,11 @@ INDEX_HTML = r"""<!doctype html>
   // stream to the new channel with no stateful teardown to get wrong.
   async function loadChannelPicker() {
     if (!chanPicker) return;
-    // No switcher in a DM view or in single-channel back-compat mode.
-    if (DM_MODE || !state.multi) { chanPicker.setAttribute('hidden', ''); return; }
+    // The persistent workspace rail is the desktop switcher. Keep the compact
+    // select as a phone fallback and for single-channel compatibility.
+    if (DM_MODE || !state.multi || !window.matchMedia('(max-width: 560px)').matches) {
+      chanPicker.setAttribute('hidden', ''); return;
+    }
     try {
       const r = await fetch('/api/channels');
       if (!r.ok) { chanPicker.setAttribute('hidden', ''); return; }
@@ -9648,6 +10235,7 @@ INDEX_HTML = r"""<!doctype html>
       state.channel = URL_CHANNEL || meta.default_channel || meta.channel || '';
       state.multi = !!meta.multi;
       state.server_host = meta.server_host;
+      if (!meta.operator.pending) applyOperator(meta.operator);
       // Multi-channel mode with no channel chosen yet: land on the
       // most-recently-active channel so the page always shows something.
       if (!state.channel) {
@@ -9663,6 +10251,7 @@ INDEX_HTML = r"""<!doctype html>
         // an explicit empty state instead of opening SSE to no channel and
         // spinning "reconnecting…" forever.
         showNoChannel();
+        loadWorkspaceRail();
         return;
       }
       loadChannelPicker();
@@ -9678,13 +10267,14 @@ INDEX_HTML = r"""<!doctype html>
         showGuestModal();
         return;
       }
-      applyOperator(meta.operator);
       afterBoot();
     } catch (e) {
       hMeta.textContent = 'bootstrap failed: ' + e.message;
     }
   }
-  function afterBoot() {
+  async function afterBoot() {
+    await loadUnifiedDms(DM_MODE);
+    loadWorkspaceRail();
     connect();
     input.focus();
     updatePreview();
@@ -9805,6 +10395,11 @@ def main() -> int:
                     help=f"Port to bind (default {DEFAULT_PORT}).")
     ap.add_argument("--db", default=str(DB_PATH),
                     help=f"Path to nth.db (default {DB_PATH}).")
+    ap.add_argument("--agent-idle-minutes", type=float,
+                    default=float(os.environ.get("NTH_AGENT_IDLE_MINUTES", "10")),
+                    help="Hibernate managed agents after this many idle minutes (0 disables; default 10).")
+    ap.add_argument("--no-agent-resume", action="store_true",
+                    help="Do not resume agents that were running/sleeping before hub restart.")
     args = ap.parse_args()
 
     db_path = Path(args.db)
@@ -9846,8 +10441,16 @@ def main() -> int:
     # Inbound routing for managed agents (feeds directed messages to their
     # processes). Cheap single poll loop; harmless when there are no agents.
     global _ROUTER
-    _ROUTER = AgentRouter(db_path, get_supervisor())
+    supervisor = get_supervisor()
+    _ROUTER = AgentRouter(db_path, supervisor)
     _ROUTER.start()
+    global _IDLE_REAPER
+    _IDLE_REAPER = AgentIdleReaper(
+        db_path, supervisor, idle_seconds=max(0.0, args.agent_idle_minutes * 60.0))
+    _IDLE_REAPER.start()
+    if not args.no_agent_resume:
+        threading.Thread(target=resume_managed_agents,
+                         args=(db_path, supervisor), daemon=True).start()
 
     # Let multiple channel dashboards start without manual port coordination.
     requested_port = args.port
@@ -9874,11 +10477,14 @@ def main() -> int:
         stop_all_runtimes()
         if _ROUTER is not None:
             _ROUTER.stop()
+        if _IDLE_REAPER is not None:
+            _IDLE_REAPER.stop()
         if _SUPERVISOR is not None:
-            _SUPERVISOR.shutdown()
+            _SUPERVISOR.shutdown(preserve_sessions=True)
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
 
     # Banner
     ts_ip = get_tailscale_ip()
@@ -9904,6 +10510,8 @@ def main() -> int:
         stop_all_runtimes()
         if _ROUTER is not None:
             _ROUTER.stop()
+        if _IDLE_REAPER is not None:
+            _IDLE_REAPER.stop()
         if _SUPERVISOR is not None:
             _SUPERVISOR.shutdown()
 

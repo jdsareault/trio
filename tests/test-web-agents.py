@@ -161,6 +161,35 @@ try:
     time.sleep(0.3)
     check("wake endpoint -> 200 + agent live again",
           st == 200 and web.get_supervisor().is_running(wid))
+    st, _ = http(port, f"/api/agents/{wid}/compact", "POST")
+    check("compact endpoint -> 200 for live agent", st == 200)
+    old_proc = web.get_supervisor()._procs.get(wid)
+    st, _ = http(port, f"/api/agents/{wid}/clear", "POST")
+    new_proc = web.get_supervisor()._procs.get(wid)
+    check("clear endpoint -> fresh live process without --resume",
+          st == 200 and new_proc is not None and new_proc is not old_proc
+          and "--resume" not in new_proc.argv)
+    st, _ = http(port, f"/api/agents/{wid}/hibernate", "POST")
+    check("hibernate endpoint -> sleeping + not live",
+          st == 200 and row(wid)["state"] == "sleeping"
+          and not web.get_supervisor().is_running(wid))
+
+    # Placement add/remove. Create a second real channel first.
+    json.loads(srv.nth_connect(summary="t", name="Host2", channel="chan-y"))
+    st, _ = http(port, f"/api/agents/{wid}/placement", "POST",
+                 {"channel": "chan-y", "present": True})
+    db = sqlite3.connect(str(srv.DB_PATH))
+    placed = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=? AND channel='chan-y'",
+                        (wid,)).fetchone()[0]
+    db.close()
+    check("placement endpoint adds channel membership", st == 200 and placed == 1)
+    st, _ = http(port, f"/api/agents/{wid}/placement", "POST",
+                 {"channel": "chan-y", "present": False})
+    db = sqlite3.connect(str(srv.DB_PATH))
+    placed = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=? AND channel='chan-y'",
+                        (wid,)).fetchone()[0]
+    db.close()
+    check("placement endpoint removes channel membership", st == 200 and placed == 0)
     st, _ = http(port, "/api/agents/nope/wake", "POST")
     check("wake bogus agent -> 404", st == 404)
     http(port, f"/api/agents/{wid}/delete", "POST")

@@ -33,6 +33,9 @@ check("served bundle: hook markers stripped", "TRIO_TEST_HOOK" not in served)
 check("served bundle: still a complete page", served.rstrip().endswith("</html>"))
 check("served bundle: client script intact (boot present)", "boot();" in served)
 check("served bundle: placeholders all substituted", "/*__" not in served)
+check("served bundle: persistent workspace rail present", 'id="workspace-rail"' in served)
+check("served bundle: channel creation form present", 'id="rail-channel-form"' in served)
+check("served bundle: unified rail loaders present", "loadWorkspaceRail" in served and "loadUnifiedDms" in served)
 
 # The raw source keeps the block (with both sentinel markers) so the DOM
 # harness, which reads this file directly, still sees the hook.
