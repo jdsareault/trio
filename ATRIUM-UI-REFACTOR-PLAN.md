@@ -598,11 +598,11 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Make every card route to its filtered destination and retain a calm empty state when nothing needs action.
   - Show partial-data and provider-unavailable states without failing the entire view.
 
-- [ ] **4.3 Define the Attention item model.**
+- [x] **4.3 Define the Attention item model.**
   - Normalize approvals, unanswered questions, agent errors/blocks, usage warnings, and lock conflicts into common identity, severity, source, timestamp, status, and action fields.
   - Separate active and resolved/history items and define stable ordering/deduplication.
 
-- [ ] **4.4 Complete approval interaction.**
+- [~] **4.4 Complete approval interaction.**
   - Render risk/context details from the real approval payload.
   - Support `accept`, `acceptForSession`, `decline`, and `cancel` only where valid; disable duplicate submissions and reconcile server conflicts.
   - Move resolved items to history and update all counts without waiting for the 15-second refresh.

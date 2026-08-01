@@ -22,6 +22,22 @@
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     attention(src = state) { return selectors.pendingApprovals(src) + selectors.openTasks(src) + selectors.blockedAgents(src); },
+    attentionItems(src = state) {
+      const items = [];
+      for (const a of src.approvals || []) {
+        if (a.status === 'resolved' || a.status === 'accepted') continue;
+        items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline','cancel'] });
+      }
+      for (const t of src.tasks || []) {
+        if (t.status !== 'blocked') continue;
+        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
+      }
+      for (const a of src.agents || []) {
+        if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
+        items.push({ id: 'agent-' + a.id, kind: 'agent', severity: 'high', title: (a.name || a.id) + ' needs help', source: a.id, timestamp: a.last_active, status: a.status, body: a.status_text || a.error || '', actions: [] });
+      }
+      return items.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+    },
   };
   function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }) + selectors.openTasks({ tasks: meta.tasks }); }
   function openChannel(code, extra = '') {
@@ -143,6 +159,32 @@
     for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.textContent = c.code; b.addEventListener('click', () => openChannel(c.code)); recent.append(b); }
     panel.append(grid, recent);
   }
+  function renderAttention(panel) {
+    panel.replaceChildren();
+    const heading = document.createElement('h2'); heading.textContent = 'Attention'; panel.append(heading);
+    const items = selectors.attentionItems();
+    if (!items.length) { const p = document.createElement('p'); p.textContent = 'Nothing needs attention.'; p.className = 'home-empty'; panel.append(p); return; }
+    const list = document.createElement('section'); list.className = 'attention-list';
+    for (const item of items) {
+      const article = document.createElement('article'); article.className = 'attention-item severity-' + item.severity;
+      const title = document.createElement('b'); title.textContent = item.title;
+      const meta = document.createElement('small'); meta.textContent = [item.kind, item.source, timeAgo(item.timestamp)].filter(Boolean).join(' · ');
+      const body = document.createElement('p'); body.textContent = item.body;
+      article.append(title, meta, body);
+      if (item.actions.length) {
+        const row = document.createElement('div'); row.className = 'attention-actions';
+        for (const d of item.actions) {
+          const b = document.createElement('button'); b.type = 'button'; b.textContent = d === 'acceptForSession' ? 'Allow this session' : d;
+          b.addEventListener('click', () => resolveApproval(item.id, d));
+          row.append(b);
+        }
+        article.append(row);
+      }
+      list.append(article);
+    }
+    panel.append(list);
+  }
+  function timeAgo(iso) { if (!iso) return ''; try { const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; return Math.floor(h / 24) + 'd'; } catch { return ''; } }
   function showView(view) {
     state.view = view;
     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
@@ -157,10 +199,7 @@
       panel.innerHTML = `<h2>Tasks</h2><div class="task-filters" id="trio-task-filters"><button data-filter="open" ${filter === 'open' ? 'class="active"' : ''}>Open</button><button data-filter="claimed" ${filter === 'claimed' ? 'class="active"' : ''}>Claimed</button><button data-filter="all" ${filter === 'all' ? 'class="active"' : ''}>All</button></div><div id="trio-task-list">${tasks.map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks match.</p>'}</div>`;
       panel.querySelectorAll('#trio-task-filters [data-filter]').forEach(b => b.addEventListener('click', () => { state.taskFilter = b.dataset.filter; showView('tasks'); }));
     }
-    else if (view === 'attention') {
-      panel.innerHTML = `<h2>Attention</h2><section class="attention-cards" id="trio-attention-cards">${(state.approvals || []).map(a => `<article class="attention-card"><b>${esc(a.title || a.agent_name || 'Approval requested')}</b><p>${esc(a.reason || a.command || '')}</p><div class="decision-row"><button data-approval="${esc(a.id)}" data-decision="accept" ${a.status === 'resolved' ? 'disabled' : ''}>Allow</button><button data-approval="${esc(a.id)}" data-decision="decline" ${a.status === 'resolved' ? 'disabled' : ''}>Decline</button>${a.status === 'resolved' ? `<small>Resolved: ${esc(a.resolved_decision || '')}</small>` : ''}</div></article>`).join('') || '<p>Nothing needs attention.</p>'}</section>`;
-      panel.querySelectorAll('#trio-attention-cards [data-approval]').forEach(b => b.addEventListener('click', () => resolveApproval(b.dataset.approval, b.dataset.decision)));
-    }
+    else if (view === 'attention') { renderAttention(panel); }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
   }
   async function createChannel() {
