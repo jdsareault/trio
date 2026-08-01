@@ -402,7 +402,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Persist the footer theme toggle through `Trio.preferences.save()`.
   - Remove, disable with explanatory copy, or implement compact, message-number, notification, chime, and dictation preferences; no checkbox may be a no-op.
 
-- [ ] **0.10 Add Phase 0 interaction coverage.**
+- [x] **0.10 Add Phase 0 interaction coverage.**
   - Extend `tests/dom-harness.js` only as needed to boot the shell and trigger real button handlers.
   - Cover DM row → history → private send, audit read-only mode, readable answers, agent drawer visibility, dictation binding, jump-to-latest, approval decisions, task filters, archive View/Restore, and settings persistence.
   - Keep `tests/test-unified-workspace.py`, `tests/test-archives.py`, `tests/test-ask.py`, `tests/test-stt.py`, and `tests/test-web-agents.py` green.
