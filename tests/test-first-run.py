@@ -36,7 +36,8 @@ try:
         check("canonical collaboration tables exist",
               {"channels", "members", "messages", "tasks", "locks", "sessions"}
               <= tables)
-        check("managed-agent tables exist", {"agents", "agent_channels"} <= tables)
+        check("managed-agent tables exist",
+              {"agents", "agent_channels", "agent_runtime_history"} <= tables)
         cols = {r[1] for r in db.execute("PRAGMA table_info(messages)").fetchall()}
         check("current DM and interaction columns exist",
               {"recipients", "reply_to", "choices", "selection", "confidence"}

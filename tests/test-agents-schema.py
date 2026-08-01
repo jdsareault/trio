@@ -47,6 +47,11 @@ def main() -> int:
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     check("get_db creates agents table", "agents" in tbls)
     check("get_db creates agent_channels table", "agent_channels" in tbls)
+    check("get_db creates runtime history table", "agent_runtime_history" in tbls)
+    agent_cols = {r[1] for r in db.execute("PRAGMA table_info(agents)").fetchall()}
+    check("agents carry provider-neutral runtime settings",
+          {"runtime_provider", "runtime_ref", "cwd", "permission_profile",
+           "wake_mode"} <= agent_cols)
 
     # A channel + a managed agent placed in two channels.
     for code in ("alpha", "beta"):
@@ -96,6 +101,12 @@ def main() -> int:
         "WHERE ac.agent_id='ag1' ORDER BY ac.channel").fetchall()
     check("placement carries per-channel member_id",
           rows[0]["member_id"] == "m_ag1_alpha" and rows[1]["member_id"] == "m_ag1_beta")
+
+    defaults = db.execute(
+        "SELECT runtime_provider, permission_profile, wake_mode "
+        "FROM agents WHERE id='ag1'").fetchone()
+    check("existing create paths receive safe runtime defaults",
+          tuple(defaults) == ("claude", "balanced", "at"))
 
     db.close()
     print(f"\n{'OK' if failures == 0 else 'FAILED'} — {failures} failure(s)")

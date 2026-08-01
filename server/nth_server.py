@@ -467,15 +467,46 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             pid            INTEGER,
             owner          TEXT,
             effort         TEXT NOT NULL DEFAULT '',
+            runtime_provider TEXT NOT NULL DEFAULT 'claude',
+            runtime_ref    TEXT,
+            cwd            TEXT NOT NULL DEFAULT '',
+            permission_profile TEXT NOT NULL DEFAULT 'balanced',
+            wake_mode      TEXT NOT NULL DEFAULT 'at',
             created_at     TEXT NOT NULL,
             last_active_at TEXT
         )
     """)
-    # Additive migration for agents tables created before the effort column.
-    try:
-        conn.execute("ALTER TABLE agents ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # already present
+    # Additive migrations for databases created by earlier unified-hub phases.
+    agent_columns = {
+        "effort": "TEXT NOT NULL DEFAULT ''",
+        "runtime_provider": "TEXT NOT NULL DEFAULT 'claude'",
+        "runtime_ref": "TEXT",
+        "cwd": "TEXT NOT NULL DEFAULT ''",
+        "permission_profile": "TEXT NOT NULL DEFAULT 'balanced'",
+        "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
+    }
+    for column, definition in agent_columns.items():
+        try:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError:
+            pass  # already present
+    conn.execute(
+        "UPDATE agents SET runtime_ref=session_id "
+        "WHERE runtime_ref IS NULL AND session_id IS NOT NULL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runtime_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id    TEXT NOT NULL,
+            provider    TEXT NOT NULL,
+            runtime_ref TEXT NOT NULL,
+            disposition TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_runtime_history_agent
+        ON agent_runtime_history (agent_id, id)
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_channels (
             agent_id    TEXT NOT NULL,
