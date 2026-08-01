@@ -92,7 +92,14 @@ try:
     check("create: 200 + live", st == 200 and agent.get("live"))
     check("create: auto themed name assigned", bool(agent.get("name")))
     check("create: placed in chan-x", agent.get("channels") == ["chan-x"])
+    # The supervisor's spawn() flips state to "running" only after the process
+    # proves alive, which lands slightly after the HTTP response — poll briefly
+    # instead of asserting on a race between the response and that DB commit.
     r = row(aid)
+    deadline = time.monotonic() + 1.0
+    while (not r or r["state"] != "running") and time.monotonic() < deadline:
+        time.sleep(0.05)
+        r = row(aid)
     check("create: agents row running", r and r["state"] == "running")
     check("create: session_id captured", r and r["session_id"] == "sess-fake-sonnet-001")
     db = sqlite3.connect(str(srv.DB_PATH))
