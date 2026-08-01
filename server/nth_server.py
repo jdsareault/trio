@@ -2579,6 +2579,9 @@ def nth_retract(channel: str, member_id: str, message_id: int, reason: str = "",
         db.close()
 
 
+HISTORY_FROM_ID_LIMIT = 500  # max rows returned per from_id page; use the next message's id to continue
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_history")
 def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, member_id: str = "") -> str:
     """Replay recent messages from a channel. Does NOT advance any read
@@ -2626,8 +2629,8 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
                 rows = db.execute(
                     "SELECT id, member_id, member_name, content, created_at, "
                     "retracted_at, retracted_by, retraction_reason, reply_to, recipients "
-                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
-                    (channel, from_id),
+                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id LIMIT ?",
+                    (channel, from_id, HISTORY_FROM_ID_LIMIT + 1),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -2642,8 +2645,8 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
                 rows = db.execute(
                     "SELECT id, member_id, member_name, content, created_at, "
                     "retracted_at, retracted_by, retraction_reason, reply_to "
-                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
-                    (channel, from_id),
+                    "FROM messages WHERE channel = ? AND id >= ? ORDER BY id LIMIT ?",
+                    (channel, from_id, HISTORY_FROM_ID_LIMIT + 1),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -2653,6 +2656,10 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
                     (channel, last_n),
                 ).fetchall()
                 rows = list(reversed(rows))
+
+        truncated = from_id is not None and len(rows) > HISTORY_FROM_ID_LIMIT
+        if truncated:
+            rows = rows[:HISTORY_FROM_ID_LIMIT]
 
         rows = [
             m for m in rows
@@ -2695,6 +2702,9 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
         if retracted_ids:
             resp["retracted_count"] = len(retracted_ids)
             resp["retracted_ids"] = retracted_ids
+        if truncated:
+            resp["truncated"] = True
+            resp["next_from_id"] = messages[-1]["id"] + 1 if messages else from_id
         return json.dumps(resp)
     finally:
         db.close()
@@ -2988,11 +2998,12 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
 
+        result = result.strip()[:MAX_MESSAGE_LENGTH] if result else ""
         now = now_iso()
         cur = db.execute(
             "UPDATE tasks SET status = 'done', result = ?, updated_at = ? "
             "WHERE id = ? AND channel = ? AND claimed_by = ? AND status = 'claimed'",
-            (result.strip() if result else None, now, task_id, channel, member_id),
+            (result or None, now, task_id, channel, member_id),
         )
 
         if cur.rowcount == 0:
@@ -3041,7 +3052,7 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
         # omit task_desc to avoid re-echoing it for a third time.
         msg = f"[done #{task_id}] by {member['name']}"
         if result:
-            msg += f" — {result.strip()}"
+            msg += f" — {result}"
         if unblocked:
             msg += f" — unblocked: {', '.join(unblocked)}"
         db.execute(

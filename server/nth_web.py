@@ -818,30 +818,42 @@ class EventHub:
         Defaults keep the operator (and existing callers/tests) all-seeing."""
         q: queue.Queue = queue.Queue(maxsize=200)
         sub = (q, viewer_id, all_seeing)
+        # Compute the priming payloads BEFORE this subscriber is visible to
+        # _broadcast, then register the subscriber and enqueue them together
+        # while holding _lock (the same lock _broadcast takes to iterate
+        # _subs). That makes "start receiving live events" and "primed
+        # history is already queued" atomic, so a message broadcast during
+        # priming can no longer land in q ahead of (or duplicated with) the
+        # snapshot it belongs after.
+        payloads = self._build_prime_payloads(viewer_id, all_seeing)
         with self._lock:
             self._subs.append(sub)
-        # Immediately send a current snapshot so the client renders right away.
-        self._prime_subscriber(q, viewer_id, all_seeing)
+            try:
+                for payload in payloads:
+                    q.put_nowait(payload)
+            except queue.Full:
+                pass
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
             self._subs = [s for s in self._subs if s[0] is not q]
 
-    def _prime_subscriber(self, q: queue.Queue, viewer_id: Optional[str] = None,
-                          all_seeing: bool = True) -> None:
-        # try/finally so queue.Full or a transient sqlite error doesn't leak
-        # the connection. A leaked read connection holds a SHARED lock and,
-        # worse, if Python's default isolation_level has auto-BEGUN any write,
-        # holds the WAL writer lock until GC — which starved the monitor's
-        # 0.5s polls below busy_timeout under contention.
+    def _build_prime_payloads(self, viewer_id: Optional[str] = None,
+                              all_seeing: bool = True) -> List[str]:
+        # try/finally so a transient sqlite error doesn't leak the connection.
+        # A leaked read connection holds a SHARED lock and, worse, if Python's
+        # default isolation_level has auto-BEGUN any write, holds the WAL
+        # writer lock until GC — which starved the monitor's 0.5s polls below
+        # busy_timeout under contention.
         db = None
+        payloads: List[str] = []
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             members = self._fetch_roster(db)
-            q.put_nowait(json.dumps({"type": "roster", "members": members}))
+            payloads.append(json.dumps({"type": "roster", "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
                 "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
@@ -854,8 +866,8 @@ class EventHub:
                 # else a guest sees every past DM on first page load.
                 if not _event_visible_to(ev, viewer_id, all_seeing):
                     continue
-                q.put_nowait(json.dumps(ev))
-        except (sqlite3.Error, queue.Full):
+                payloads.append(json.dumps(ev))
+        except sqlite3.Error:
             pass
         finally:
             if db is not None:
@@ -863,6 +875,7 @@ class EventHub:
                     db.close()
                 except sqlite3.Error:
                     pass
+        return payloads
 
     # ── broadcast ──
     def _broadcast(self, event: Dict[str, Any]) -> None:
@@ -1007,7 +1020,7 @@ class EventHub:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA busy_timeout=2000")
             # Prime last_msg_id so we don't re-fire history on startup —
-            # primed subscribers already got the history through _prime_subscriber.
+            # primed subscribers already got the history through subscribe().
             try:
                 row = db.execute(
                     "SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = ?",

@@ -240,7 +240,9 @@
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = vm.author;
     const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
-    const stamp = document.createElement('time'); stamp.textContent = '#' + vm.id + ' · ' + vm.timestamp;
+    const stamp = document.createElement('time');
+    const idPart = document.createElement('span'); idPart.className = 'message-id'; idPart.textContent = '#' + vm.id + ' · ';
+    stamp.append(idPart, document.createTextNode(vm.timestamp));
     head.append(author, role, stamp);
     if (vm.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + vm.confidence; confidence.textContent = vm.confidence; head.append(confidence); }
     if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
@@ -332,7 +334,15 @@
     const list = dom();
     if (!existing) {
       const card = cardFor(state.messages.get(msg.id));
-      if (list) { list.append(card); state.messageDomById.set(msg.id, card); }
+      if (list) {
+        // Defense in depth against an EventHub prime/live race delivering a
+        // newer id ahead of older history: insert in id order instead of
+        // blindly appending, so a late-arriving older message still lands
+        // before the newer cards already painted.
+        const nextSibling = [...list.children].find(el => el.dataset?.messageId && Number(el.dataset.messageId) > Number(msg.id));
+        if (nextSibling) list.insertBefore(card, nextSibling); else list.append(card);
+        state.messageDomById.set(msg.id, card);
+      }
       else { render(); }
       if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
       pruneMessages();

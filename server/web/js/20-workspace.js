@@ -26,7 +26,7 @@
       return (src.tasks || []).map(t => ({
         id: t.id || t.task_id,
         status: t.status || 'open',
-        title: t.message || t.title || 'Task',
+        title: t.description || t.message || t.title || 'Task',
         owner: t.claimed_by || '',
         blockers: Array.isArray(t.blocked_by) ? t.blocked_by : [],
         channel: t.channel,
@@ -42,7 +42,7 @@
       }
       for (const t of src.tasks || []) {
         if (t.status !== 'blocked') continue;
-        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
+        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.description || t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
       }
       for (const a of src.agents || []) {
         if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
