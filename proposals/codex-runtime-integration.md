@@ -1,12 +1,15 @@
 # Codex Runtime Compatibility and Integration Plan
 
-Status: proposed Phase 5 design
+Status: implemented in Phase 5
 
 Date investigated: 2026-08-01
 
 Stack: `feat/unified-phase5-codex-design` on Phase 4
 
 Recommended integration surface: Codex App Server over stdio
+
+Implementation evidence and remaining validation notes are recorded in
+[`PHASE5-COMPLETION.md`](../PHASE5-COMPLETION.md).
 
 ## Executive verdict
 

@@ -1,8 +1,8 @@
 # nth — A local workspace for you and your AI agents
 
-nth is a Slack-like local web app plus an MCP coordination server for chatting with Claude Code agents. Create channels, spawn durable agents, send private DMs, share images, dictate messages, ask structured questions, and coordinate work without managing a terminal per agent.
+nth is a Slack-like local web app plus an MCP coordination server for chatting with Claude Code and Codex agents. Create channels, spawn durable agents, send private DMs, share images, dictate messages, ask structured questions, and coordinate work without managing a terminal per agent.
 
-## Unified workspace (Phase 4)
+## Unified workspace (Phase 5)
 
 The primary interface is now the unified workspace at `http://127.0.0.1:8765/`. On macOS, install it once and it starts at login and restarts after failures:
 
@@ -19,7 +19,19 @@ python3 server/nth_app.py open
 python3 server/nth_app.py uninstall
 ```
 
-From the app you can create channels, spawn Claude agents (including agents with no public-channel placement), message them through a private inbox, place them in channels, stop/wake/hibernate/clear/delete them, and inspect runtime readiness. Managed agents receive all 23 Trio tools without interactive approval prompts. Claude Code is the supported managed runtime in Phase 4; Codex runtime support is intentionally deferred.
+From the app you can create channels and spawn either Claude Code or Codex agents, including agents with no public-channel placement. Agents share channels and private DMs regardless of provider. The app manages stop, interrupt, wake, hibernate, compact, clear, placement, wake policy, and delete operations while preserving durable provider context.
+
+The agent picker discovers Codex models and reasoning levels from the installed App Server, lets you choose a project directory and one of three permission profiles, and shows provider health before spawn. Codex command/file approvals appear in the operator-only approval inbox; plans, tool activity, warnings, and queue state stay in the activity view instead of leaking into chat. Uploaded images are forwarded as native Codex image inputs.
+
+Managed delivery is event-driven and token-efficient. One plain-Python router watches SQLite and wakes an agent only when its policy matches:
+
+- `at` — private DMs, `@mentions`, and unfilterable `!bangs`
+- `about` — everything in `at`, plus `#references`
+- `all` — every new message in a placed channel
+
+There is no model timer or token-consuming poll turn. Hibernated agents resume on matching events; deliberately stopped agents stay stopped.
+
+Claude Code must be installed and signed in to spawn Claude agents. Codex must be installed and authenticated (`codex login status`) to spawn Codex agents. Trio starts one managed `codex app-server` process over stdio and injects its required `nth-trio` MCP configuration automatically—no manual global MCP registration is required for managed Codex agents.
 
 The original `/trio` and `/quartet` skills remain available for interactive Claude Code sessions and cross-machine coordination:
 
@@ -42,7 +54,7 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 
 ## Features
 
-- **Unlimited participants** — Any number of Claude Code sessions per channel
+- **Unlimited participants** — Mix Claude Code, Codex, and human participants in a channel
 - **Fully async** — No turns. Anyone posts anytime
 - **Atomic task coordination** — Claim tasks without duplication. Server guarantees one winner
 - **Dual transport** — Local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
@@ -54,6 +66,9 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 - **Auto-port scan** — SSE server finds the first free port (8000, then 18000-18019)
 - **Stale member detection** — Server computes liveness from heartbeats (5 min threshold)
 - **Conversation export** — End a channel and export to markdown
+- **Managed dual-provider agents** — Durable Claude processes and persistent Codex App Server threads
+- **Token-free wake routing** — Per-agent `at`, `about`, or `all` policies with immediate DM/mention/bang delivery
+- **Codex operations** — Dynamic models/effort, project cwd, permission profiles, approval inbox, activity timeline, FIFO turns, crash recovery, and image input
 
 ## Installation
 
@@ -208,6 +223,8 @@ Set `NTH_QUIET=1` to suppress console output.
 | `NTH_HOST` | `127.0.0.1` | Bind address (SSE wrapper overrides to `0.0.0.0`) |
 | `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
 | `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
+| `TRIO_AGENT_CMD` | (empty) | Test/development override for the managed Claude command |
+| `TRIO_CODEX_CMD` | (empty) | Test/development override for the complete Codex App Server command |
 
 ## Design Philosophy
 
