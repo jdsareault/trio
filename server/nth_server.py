@@ -27,7 +27,8 @@ from pathlib import Path
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS, can_see, is_all_seeing, parse_recipients
+from nth_constants import (AGENT_INBOX_CHANNEL, SLEEPING_KEYWORDS, can_see,
+                           is_all_seeing, parse_recipients)
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -1326,6 +1327,28 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         # participant (see _inherited_dm_recipients).
         recipients_json = _inherited_dm_recipients(
             db, channel, reply_to, member_id, reader_kind, allow_all_seeing=False)
+        # The managed-agent inbox is never a public room. Models sometimes use
+        # trio_send instead of trio_dm despite the bootstrap instruction; make
+        # privacy a server invariant rather than a prompt-following preference.
+        # Route to the most recent participant who privately addressed this
+        # agent, falling back to trusted human members in the hidden inbox.
+        if (channel == AGENT_INBOX_CHANNEL and reader_kind == "agent"
+                and recipients_json is None):
+            recipient_ids = []
+            recent = db.execute(
+                "SELECT member_id, recipients FROM messages WHERE channel=? "
+                "AND member_id != ? ORDER BY id DESC LIMIT 100",
+                (channel, member_id)).fetchall()
+            for prior in recent:
+                if member_id in parse_recipients(prior["recipients"]):
+                    recipient_ids = [prior["member_id"]]
+                    break
+            if not recipient_ids:
+                recipient_ids = [r["id"] for r in db.execute(
+                    "SELECT id FROM members WHERE channel=? AND kind='human' "
+                    "AND active=1 ORDER BY joined_at", (channel,)).fetchall()]
+            if recipient_ids:
+                recipients_json = json.dumps(list(dict.fromkeys(recipient_ids)))
 
         now = now_iso()
         task_id = None

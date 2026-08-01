@@ -5,6 +5,10 @@ import json
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
+# Hidden transport shared by the managed-agent app. Messages here are always
+# private-scoped by nth_server, even when a model accidentally uses trio_send.
+AGENT_INBOX_CHANNEL = "nth-agent-inbox"
+
 # ── Real DMs: the member-aware visibility predicate ───────────────────
 # Lives here, in the module every side (nth_server, nth_web, nth_monitor)
 # already imports, so the "can this reader see this message" decision is

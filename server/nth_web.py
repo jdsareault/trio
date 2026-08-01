@@ -55,8 +55,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
-                           can_see, is_all_seeing, parse_recipients)
+from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, animal_for,
+                           animal_for_channel, can_see, is_all_seeing,
+                           parse_recipients)
 import nth_supervisor as nsup
 
 
@@ -67,11 +68,6 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
-# Managed agents always have one private transport channel for direct messages.
-# It is a real Trio channel so the existing MCP visibility/routing guarantees
-# apply unchanged, but it is hidden from every public channel/placement surface.
-AGENT_INBOX_CHANNEL = "nth-agent-inbox"
-
 # ── Image attachments (Phase-1 prototype) ──
 ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
@@ -1993,6 +1989,9 @@ class AgentRouter(threading.Thread):
             try:
                 if not self.sup.is_running(aid):
                     wake_agent(aid, self.sup, self.db_path)  # re-injects mcp+preamble
+                if chan == AGENT_INBOX_CHANNEL:
+                    text = ("Private inbox message. Reply privately in "
+                            f"#{AGENT_INBOX_CHANNEL} using trio_dm. " + text)
                 self.sup.feed(aid, chan, text)
             except Exception:
                 pass
