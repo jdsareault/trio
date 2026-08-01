@@ -82,6 +82,7 @@
     try {
       const result = await api.post(apiUrl('/api/send'), body);
       input().value = ''; state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
+      if (state.dmKey) Trio.workspace?.refreshDm?.(state.dmKey);
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
@@ -119,7 +120,10 @@
     text.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } });
     sendButton?.addEventListener('click', send);
     attach?.addEventListener('click', () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => window.alert(error.message)); picker.click(); });
-    byId('dictate-btn')?.addEventListener('click', () => toggleDictation().catch(error => window.alert(error?.message || 'Dictation failed')));
+    const dictation = Trio.preferences?.read?.().dictation !== false;
+    const dictateBtn = byId('dictate-btn');
+    if (dictateBtn) { dictateBtn.hidden = !dictation; }
+    if (dictation && dictateBtn) { dictateBtn.addEventListener('click', () => toggleDictation().catch(error => window.alert(error?.message || 'Dictation failed'))); }
     renderTargets(); renderAttachments(); updateSendState();
   }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
