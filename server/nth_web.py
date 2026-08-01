@@ -1719,6 +1719,50 @@ _ROUTER = None
 _IDLE_REAPER = None
 _RUNTIME_HEALTH: Tuple[float, Dict[str, Any]] = (0.0, {})
 
+
+class UnifiedHubLock:
+    """Cross-process ownership lock for the managed-agent control plane."""
+
+    def __init__(self, db_path: Path):
+        self.path = db_path.parent / "unified-hub.lock"
+        self.handle = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError):
+            handle.close()
+            raise RuntimeError(
+                f"another unified nth hub already owns {self.path.parent}")
+        self.handle = handle
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
+
 # Auto-assigned friendly agent names (editable later).
 _AGENT_NAMES = ["Aragorn", "Boromir", "Celeborn", "Denethor", "Eomer",
                 "Faramir", "Galadriel", "Haldir", "Imrahil", "Nimrodel",
@@ -2079,6 +2123,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
     # from each request's ?channel= param. The `channel` and `hub` properties
     # resolve per-request — see below.
     _default_channel: str = ""
+    _agent_control_enabled: bool = True
     db_path: Path = DB_PATH
 
     # ── per-request channel resolution ──
@@ -3130,10 +3175,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return None
         return ident
 
+    def _require_agent_control(self) -> bool:
+        if not self._agent_control_enabled:
+            self._error(409, "managed agents are available in the unified nth app")
+            return False
+        return True
+
     def _handle_agents_list(self) -> None:
         """Roster of every managed (and external) agent + placements + live
         process state. Operator-only."""
-        if self._require_operator() is None:
+        if self._require_operator() is None or not self._require_agent_control():
             return
         sup = get_supervisor()
         db = None
@@ -3209,7 +3260,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         Inserts the durable agents row, one members row per placement (member_id
         = agent_id -> agent-keyed identity) + agent_channels rows, then launches
         the process. Operator-only."""
-        if self._require_operator() is None:
+        if self._require_operator() is None or not self._require_agent_control():
             return
         runtime = runtime_health(refresh=True)
         if not runtime.get("ready"):
@@ -3307,7 +3358,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_action(self, agent_id: str, action: str) -> None:
         """Lifecycle/context/placement operations for a managed agent."""
-        if self._require_operator() is None:
+        if self._require_operator() is None or not self._require_agent_control():
             return
         sup = get_supervisor()
         if action == "stop":
@@ -10347,7 +10398,7 @@ INDEX_HTML = r"""<!doctype html>
     state.operator = op;
     // Agent control plane is operator-only — reveal it for loopback/tailscale.
     state.isOperator = (op.source === 'loopback' || op.source === 'tailscale');
-    if (btnAgents && state.isOperator) btnAgents.removeAttribute('hidden');
+    if (btnAgents && state.isOperator && state.multi) btnAgents.removeAttribute('hidden');
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
@@ -10584,6 +10635,15 @@ def main() -> int:
         sys.stderr.write(f"Could not initialize nth.db at {db_path}: {exc}\n")
         return 1
 
+    hub_lock = None
+    if args.channel is None:
+        hub_lock = UnifiedHubLock(db_path)
+        try:
+            hub_lock.acquire()
+        except RuntimeError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+
     host = args.host
     if host is None:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
@@ -10608,6 +10668,7 @@ def main() -> int:
     global _DB_PATH_GLOBAL
     _DB_PATH_GLOBAL = db_path
     NthWebHandler._default_channel = args.channel or ""
+    NthWebHandler._agent_control_enabled = args.channel is None
     NthWebHandler.db_path = db_path
 
     # Back-compat single-channel mode: if a channel was named, start its hub +
@@ -10619,16 +10680,18 @@ def main() -> int:
     # Inbound routing for managed agents (feeds directed messages to their
     # processes). Cheap single poll loop; harmless when there are no agents.
     global _ROUTER
-    supervisor = get_supervisor()
-    _ROUTER = AgentRouter(db_path, supervisor)
-    _ROUTER.start()
     global _IDLE_REAPER
-    _IDLE_REAPER = AgentIdleReaper(
-        db_path, supervisor, idle_seconds=max(0.0, args.agent_idle_minutes * 60.0))
-    _IDLE_REAPER.start()
-    if not args.no_agent_resume:
-        threading.Thread(target=resume_managed_agents,
-                         args=(db_path, supervisor), daemon=True).start()
+    supervisor = None
+    if args.channel is None:
+        supervisor = get_supervisor()
+        _ROUTER = AgentRouter(db_path, supervisor)
+        _ROUTER.start()
+        _IDLE_REAPER = AgentIdleReaper(
+            db_path, supervisor, idle_seconds=max(0.0, args.agent_idle_minutes * 60.0))
+        _IDLE_REAPER.start()
+        if not args.no_agent_resume:
+            threading.Thread(target=resume_managed_agents,
+                             args=(db_path, supervisor), daemon=True).start()
 
     # Let multiple channel dashboards start without manual port coordination.
     requested_port = args.port
@@ -10644,6 +10707,8 @@ def main() -> int:
                 continue
             raise
     if server is None:
+        if hub_lock is not None:
+            hub_lock.close()
         sys.stderr.write(
             f"No free port found in {requested_port}..{requested_port + 49}\n")
         return 1
@@ -10694,6 +10759,8 @@ def main() -> int:
             _IDLE_REAPER.stop()
         if _SUPERVISOR is not None:
             _SUPERVISOR.shutdown()
+        if hub_lock is not None:
+            hub_lock.close()
 
     return 0
 

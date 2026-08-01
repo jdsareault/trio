@@ -227,6 +227,15 @@ try:
     finally:
         web.runtime_health = _health
 
+    # Legacy single-channel dashboards are viewers, never a second supervisor.
+    web.NthWebHandler._agent_control_enabled = False
+    try:
+        st, d = http(port, "/api/agents")
+        check("single-channel viewer refuses managed-agent control",
+              st == 409 and "unified nth app" in d.get("error", ""))
+    finally:
+        web.NthWebHandler._agent_control_enabled = True
+
     # ── operator-only ──
     _orig = web.is_all_seeing
     web.is_all_seeing = lambda mid: False
