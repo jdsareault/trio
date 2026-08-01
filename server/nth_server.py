@@ -195,9 +195,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_db() -> sqlite3.Connection:
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+def get_db(db_path: Path | None = None) -> sqlite3.Connection:
+    """Open and migrate an nth database.
+
+    ``db_path`` lets first-run tools initialize a non-default database while
+    keeping this function the single source of truth for the schema. Existing
+    MCP callers continue to use the module-level ``DB_PATH`` unchanged.
+    """
+    path = Path(db_path) if db_path is not None else DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")

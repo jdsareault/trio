@@ -1754,6 +1754,30 @@ def ensure_agents_schema(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_member ON agent_channels (member_id)")
 
 
+def initialize_database(db_path: Path) -> bool:
+    """Create a fresh database with the canonical MCP-server schema.
+
+    Returns True when a new file was created. The MCP SDK is an installer
+    prerequisite and is imported only on this first-run path; established
+    dashboard databases retain the web server's stdlib-only hot path.
+    """
+    if db_path.exists():
+        return False
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_quiet = os.environ.get("NTH_QUIET")
+    os.environ["NTH_QUIET"] = "1"
+    try:
+        import nth_server
+        conn = nth_server.get_db(db_path)
+        conn.close()
+    finally:
+        if previous_quiet is None:
+            os.environ.pop("NTH_QUIET", None)
+        else:
+            os.environ["NTH_QUIET"] = previous_quiet
+    return True
+
+
 def get_supervisor() -> "nsup.AgentSupervisor":
     global _SUPERVISOR
     with _SUPERVISOR_LOCK:
@@ -10466,9 +10490,11 @@ def main() -> int:
                     help="Do not resume agents that were running/sleeping before hub restart.")
     args = ap.parse_args()
 
-    db_path = Path(args.db)
-    if not db_path.exists():
-        sys.stderr.write(f"nth.db not found at {db_path}\n")
+    db_path = Path(args.db).expanduser()
+    try:
+        created_db = initialize_database(db_path)
+    except (ImportError, OSError, sqlite3.Error) as exc:
+        sys.stderr.write(f"Could not initialize nth.db at {db_path}: {exc}\n")
         return 1
 
     host = args.host
@@ -10556,6 +10582,8 @@ def main() -> int:
     print("nth_web serving:")
     print(f"  channel:     {args.channel or '(all channels)'}")
     print(f"  db:          {db_path}")
+    if created_db:
+        print("  first run:   created a new workspace database")
     if port != requested_port:
         print(f"  note:        port {requested_port} was busy — using {port} instead")
     print(f"  bound on:    http://{host}:{port}/")
