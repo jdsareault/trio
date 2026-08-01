@@ -2050,7 +2050,7 @@ class AgentRouter(threading.Thread):
         # Wake+feed happens on a worker, NOT the poll loop — a cold-start wake
         # blocks for up to ~10s and must not stall message DETECTION across all
         # channels (Legolas). One worker keeps per-agent message order.
-        self._q: "queue.Queue" = queue.Queue()
+        self._q: "queue.Queue" = queue.Queue(maxsize=1000)
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
 
     def start(self) -> None:
@@ -2067,8 +2067,8 @@ class AgentRouter(threading.Thread):
             while not self._stop.wait(self.interval):
                 try:
                     self.tick(db)
-                except Exception:
-                    pass
+                except Exception as e:
+                    sys.stderr.write(f"[nth_web] AgentRouter tick error: {e}\n")
         finally:
             db.close()
 
@@ -2105,8 +2105,12 @@ class AgentRouter(threading.Thread):
                         (m["id"],)).fetchall() if r[0]]
                 except sqlite3.OperationalError:
                     pass
-                self._q.put((aid, m["channel"],
-                             f'{m["member_name"]}: {m["content"]}', attachments))
+                try:
+                    self._q.put_nowait((aid, m["channel"],
+                                        f'{m["member_name"]}: {m["content"]}', attachments))
+                except queue.Full:
+                    sys.stderr.write(
+                        f"[nth_web] AgentRouter queue full — dropping message for agent {aid}\n")
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
@@ -2132,8 +2136,8 @@ class AgentRouter(threading.Thread):
                     text = ("Private inbox message. Reply privately in "
                             f"#{AGENT_INBOX_CHANNEL} using trio_dm. " + text)
                 self.sup.feed(aid, chan, text, attachments=attachments)
-            except Exception:
-                pass
+            except Exception as e:
+                sys.stderr.write(f"[nth_web] AgentRouter worker failed for agent {aid}: {e}\n")
 
     def _targets(self, m, chan_agents) -> set:
         parsed = {}

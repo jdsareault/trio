@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
@@ -95,11 +96,21 @@ class CodexAppServerClient:
         self._stderr: Deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
         self._closed = threading.Event()
         self.initialize_result: Dict[str, Any] = {}
+        # Bounds concurrent App Server -> client requests (approval/user-input
+        # prompts); the reader thread must never block on these, but a buggy
+        # or rapid-fire App Server must not be able to spawn unbounded threads.
+        self._request_executor = ThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="codex-req")
+        self._request_executor_closed = False
 
     def start(self, timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any]:
         if self.alive():
             return dict(self.initialize_result)
         self._closed.clear()
+        if self._request_executor_closed:
+            self._request_executor = ThreadPoolExecutor(
+                max_workers=8, thread_name_prefix="codex-req")
+            self._request_executor_closed = False
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
@@ -211,9 +222,7 @@ class CodexAppServerClient:
                     # Approval/user-input handlers may wait on a UI decision.
                     # Never block the one reader responsible for correlating
                     # every other App Server response and notification.
-                    threading.Thread(
-                        target=self._handle_server_request,
-                        args=(message,), daemon=True).start()
+                    self._request_executor.submit(self._handle_server_request, message)
                     continue
                 callback = self.on_notification
                 if callback is not None and message.get("method"):
@@ -273,6 +282,8 @@ class CodexAppServerClient:
                 except OSError:
                     pass
         self._fail_pending("Codex App Server stopped")
+        self._request_executor.shutdown(wait=False)
+        self._request_executor_closed = True
 
 
 def codex_cli_diagnostics(timeout: float = 5.0) -> Dict[str, Any]:

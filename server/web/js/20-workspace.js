@@ -72,6 +72,7 @@
     if (banner) { banner.classList.toggle('hidden', !isDm); banner.textContent = isDm ? (readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
     Trio.conversation?.render?.();
+    Trio.composer?.syncReadOnly?.();
     Trio.startEvents?.(state.channel);
   }
   function openDm(dm, readOnly = false) {
@@ -287,8 +288,16 @@
     const target = state.dmKey ? 'this DM' : (state.channel ? 'this channel' : '');
     if (!target) { Trio.ui.toast('No conversation to archive'); return; }
     Trio.ui.confirmAction(`Archive ${target}?`, () => {
-      if (state.dmKey) { archive('dm', state.dmKey, !state.readOnly).then(() => state.readOnly = !state.readOnly); }
-      else if (state.channel) { archive('channel', state.channel, !state.readOnly).then(() => state.readOnly = !state.readOnly); }
+      const nextArchived = !state.readOnly;
+      if (state.dmKey) {
+        const title = 'DM ' + state.dmName;
+        archive('dm', state.dmKey, nextArchived).then(() =>
+          loadConversation(state.channel, title, nextArchived ? 'Archived private conversation' : 'Private conversation', nextArchived, true));
+      } else if (state.channel) {
+        const title = 'trio#' + state.channel;
+        archive('channel', state.channel, nextArchived).then(() =>
+          loadConversation(state.channel, title, nextArchived ? 'Archived channel — read only' : 'Live agent workspace', nextArchived, false));
+      }
     });
   }
   let unroute = null;

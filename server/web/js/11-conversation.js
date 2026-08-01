@@ -273,7 +273,7 @@
       if (attachments.children.length) card.append(attachments);
     }
     const ask = askCard(msg); if (ask) card.append(ask);
-    if (isOwn(msg) && !msg.retracted_at) {
+    if (isOwn(msg) && !msg.retracted_at && !state.readOnly) {
       const controls = document.createElement('div'); controls.className = 'message-controls';
       for (const [label, fn] of [['edit', () => edit(msg, body)], ['delete', () => retract(msg)]]) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = label;

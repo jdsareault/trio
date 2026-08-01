@@ -100,7 +100,6 @@
     if (!validate()) return false;
     const button = byId('send'); if (button) button.disabled = true;
     const body = buildSendPayload();
-    if (!body.recipients?.length && state.confirmBroadcast && !window.confirm('Send this message to the channel?')) { updateSendState(); return false; }
     try {
       const result = await api.post(apiUrl('/api/send'), body);
       delete state.drafts[conversationId()];
@@ -229,6 +228,7 @@
     text.disabled = !!state.readOnly;
     text.placeholder = state.readOnly ? 'This conversation is archived.' : 'Message…';
   }
+  function syncReadOnly() { setInputState(input()); updateSendState(); }
   function init() {
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
@@ -267,5 +267,5 @@
   function unmount() { domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0; if (unroute) { unroute(); unroute = null; } if (recorder && recorder.state !== 'inactive') stopDictation(); }
   function mount() { init(); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload };
+  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly };
 })();
