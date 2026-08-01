@@ -647,37 +647,37 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Deep-link selected agent state so refresh/back closes or restores the drawer predictably.
   - Load expensive activity only when its section opens.
 
-- [ ] **5.4 Render structured runtime activity.**
+- [x] **5.4 Render structured runtime activity.**
   - Map plans, commands/tools, diffs/files, approvals, warnings, errors, queue transitions, and usage to a typed timeline.
   - Paginate/load more instead of truncating silently to 20 raw JSON lines.
   - Keep operator-only authorization and avoid rendering raw unsafe tool input.
 
-- [ ] **5.5 Implement a lifecycle action matrix.**
+- [x] **5.5 Implement a lifecycle action matrix.**
   - Map stop, interrupt, wake, hibernate, compact, clear, and delete visibility/enabled state to lifecycle/provider capabilities.
   - Add pending state, success reconciliation, provider-specific error copy, and duplicate-click protection.
   - Require explicit confirmation for context-destructive clear and permanent delete; state exactly what is preserved or lost.
 
-- [ ] **5.6 Implement placement and wake-policy editing.**
+- [x] **5.6 Implement placement and wake-policy editing.**
   - Load public channels, prevent use of the hidden inbox, and support add/remove with rollback on failure.
   - Explain `at`, `about`, and `all`; update cards/details immediately after success.
   - Test zero-placement agents and removal from the currently viewed channel.
 
-- [ ] **5.7 Rebuild agent creation from discovery APIs.**
+- [x] **5.7 Rebuild agent creation from discovery APIs.**
   - Load `/api/health` and `/api/agent-models` before enabling create.
   - Implement provider, model, effort/reasoning, name, role/prompt, working directory, permission profile, wake policy, placements, and color/avatar inputs where supported.
   - Show provider-specific fields conditionally while preserving one shared form model.
 
-- [ ] **5.8 Add validation and spawn progress.**
+- [x] **5.8 Add validation and spawn progress.**
   - Validate required fields, names, cwd, provider readiness, model/effort combinations, permissions, and placements before POST.
   - Show creating → starting runtime → connecting → ready stages from real response/state where possible; do not simulate success timers.
   - Preserve form input on failure and offer retry/cancel without duplicate durable rows.
 
-- [ ] **5.9 Connect agent messaging.**
+- [x] **5.9 Connect agent messaging.**
   - Make every Message action open the agent's unified DM route, including zero-placement agents.
   - After successful creation, offer/open the new DM without requiring a public placement.
   - Test privacy, hidden-inbox suppression, and back navigation to the originating agent view.
 
-- [ ] **5.10 Add agent workflow coverage.**
+- [~] **5.10 Add agent workflow coverage.**
   - Extend deterministic tests for capability-state rendering, all lifecycle actions, placements, wake policies, provider discovery, invalid forms, spawn failure/retry, delete confirmation, and Message routing.
   - Keep `tests/test-web-agents.py`, `tests/test-web-codex-agents.py`, supervisor/runtime suites, and mixed-provider routing green.
 
