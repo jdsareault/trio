@@ -1,8 +1,8 @@
 # QA Guide — Unified Interface (multi-channel hub + agent supervisor)
 
 Branch: `feat/unified-phase2-supervisor`. Nothing is merged to `main`.
-This covers spinning up the hub, a manual test checklist, the automated suite,
-gotchas, and known-deferred items (so you don't file those as bugs).
+This covers spinning up the hub, the unified workspace, managed-agent lifecycle,
+the automated suite, and the remaining hardening notes.
 
 ---
 
@@ -12,9 +12,8 @@ gotchas, and known-deferred items (so you don't file those as bugs).
 - Python 3 (stdlib only — no pip deps for the core).
 - `claude` on PATH and authed (only needed to spawn REAL agents). Check:
   `claude --version` and `claude -p "say hi"`.
-- **Use Sonnet or Opus for spawned agents. Haiku is too weak** — in testing it
-  failed to drive the Trio MCP tools (shelled out to Bash instead) and posted
-  nothing. The spawn form defaults to Opus.
+- The spawn form defaults to Opus. Haiku is viable with the current MCP-first
+  bootstrap preamble, though weaker models remain more variable.
 
 ---
 
@@ -26,6 +25,14 @@ python3 server/nth_web.py           # no channel arg → serves ALL channels
 ```
 Open the printed `http://127.0.0.1:8765/`. On loopback you're the **operator**
 (all-seeing). The page lands on the most-recently-active channel.
+
+**Start automatically on macOS:**
+```
+python3 server/nth_launchd.py install
+python3 server/nth_launchd.py status
+```
+The LaunchAgent starts the unified hub at login, restarts it after failures,
+and writes logs under `~/.claude/nth/logs/`. Use `uninstall` to remove it.
 
 **Back-compat single-channel mode (should still work unchanged):**
 ```
@@ -39,15 +46,21 @@ To watch DB activity in a second terminal:
 
 ## 2. Manual checklist
 
-### 2a. Multi-channel client
-- [ ] **Channel switcher** (header dropdown) lists your channels; picking one
-      reloads to `/?channel=CODE` and shows that channel's messages/roster.
-- [ ] The switcher is **hidden** in single-channel mode and when only ≤1 channel
-      exists.
+### 2a. Workspace + channels
+- [ ] The persistent **left workspace rail** lists DMs, channels, and agents.
+- [ ] Picking a channel reloads to `/?channel=CODE` and shows that channel's
+      messages, roster, tasks, and composer without opening another tab.
+- [ ] Click **+** beside Channels, create a channel with an optional objective,
+      and land in the new channel immediately.
+- [ ] The compact header switcher is a phone fallback; the rail is hidden in
+      single-channel compatibility mode.
 - [ ] Sending a message, editing/deleting, culling a member, search, tasks — all
       operate on the **currently selected** channel (not leaking across).
-- [ ] **DMs** open with the channel preserved (the "← #channel" back button
-      returns to the same channel, not a random one).
+- [ ] **DMs are unified across channels**: one thread per durable agent, with
+      `#channel` origin badges in merged history and a separate Agent ↔ Agent
+      audit section.
+- [ ] A newly spawned, placed agent appears in the global New DM picker and has
+      a one-click **message** action in the Agents panel.
 - [ ] Switching channels with **unsent text** in the composer prompts a confirm.
 - [ ] With no channels at all (fresh DB), you get a clean "no channel" state —
       **not** an endless "reconnecting…".
@@ -76,6 +89,10 @@ Open the **agents** pill in the header.
       (zero channels) are flagged.
 - [ ] **Stop** → agent goes not-live. **Wake** → it comes back and can still
       post (it must NOT come back deaf — it should still have its Trio tools).
+- [ ] **Hibernate** parks the process with its session intact; **Clear** starts
+      a fresh context; **Compact** invokes Claude Code's `/compact` flow.
+- [ ] Add/remove channel placements from the agent row. A new placement is
+      immediately explained to a live agent and is included in future wakes.
 - [ ] **Delete** → removed from roster; its member is deactivated; its
       placements are gone.
 - [ ] Creating with an **unknown channel** → clean 400 (no crash).
@@ -87,6 +104,10 @@ Open the **agents** pill in the header.
 - [ ] After it goes idle/hibernated, a **directed** `@mention` wakes it and it
       responds (first message after a cold wake may take a few seconds).
 - [ ] Ambient chatter (no `@`) does **not** wake a sleeping agent.
+- [ ] An idle agent hibernates after 10 minutes by default (tune with
+      `--agent-idle-minutes`; `0` disables it).
+- [ ] Restart the hub: agents that were running/idle/sleeping resume with their
+      saved session and placements. `--no-agent-resume` disables this for QA.
 
 ---
 
@@ -95,7 +116,8 @@ Open the **agents** pill in the header.
 ```
 # Python (stdlib):
 for t in test-identity-reclaim test-agents-schema test-supervisor \
-         test-web-channels test-web-agents test-agent-routing \
+         test-agent-lifecycle-depth test-web-channels test-web-agents \
+         test-unified-workspace test-agent-routing test-launchd \
          test-search test-cull test-dms test-ask; do
   echo "== $t =="; python3 tests/$t.py; done
 
@@ -111,29 +133,27 @@ via `$TRIO_AGENT_CMD`) — they never spawn a real, billed `claude`.
 
 ## 4. Gotchas / expected behavior (not bugs)
 
-- **Haiku agents don't work** for Trio orchestration — use Sonnet/Opus.
+- **Haiku is less deterministic** than Sonnet/Opus. The MCP-first preamble made
+  it viable, but use a stronger model when reliable orchestration matters.
 - **First-turn latency after spawn/wake:** a headless agent's `session_id` /
   first response can lag because the injected Trio MCP handshake runs before the
   init event. The agent shows live; its first post may take a few seconds.
-- **The hub is a persistent daemon in concept** — closing the browser doesn't
-  stop it or its agents. (Launchd autostart is a Phase-3 item, not wired yet;
-  today you start it manually.)
+- Closing the browser doesn't stop the hub or its agents. On macOS, install the
+  included LaunchAgent for login startup and failure restart.
 - **Spawned agents run with Bash enabled** (permission mode `acceptEdits`).
   They're operator-spawned and local — but be aware they can run shell commands.
 
 ---
 
-## 5. Known deferred (in scope, not yet built — see reports/…lotc-review.md)
+## 5. Remaining hardening notes
 
-- **Phase 1 polish:** the Slack-style persistent channel **rail** (today it's a
-  dropdown), and a **unified cross-channel DM inbox** (today DMs are per-channel).
-- **Phase 3:** aggressive-hibernation **idle timer**, **clear/compact** context
-  buttons, launchd autostart.
-- **Lifecycle:** per-channel runtime idle-eviction; agent-vs-agent reclaim
-  secret (the operator-hijack case IS closed); reclaim name/last_read
-  reconciliation.
-- These are tracked in `reports/2026-07-31-unified-interface-lotc-review.md` and
-  `proposals/unified-interface.md`.
+- Per-channel EventHub/watchdog runtime eviction is still a scale optimization;
+  runtimes are cheap but remain cached until hub shutdown.
+- Agent-vs-agent live-session reclaim still relies on the existing kind guard;
+  a future hub-minted reclaim secret would strengthen that boundary.
+- The unified DM view aggregates the existing channel-backed message protocol;
+  a send still uses one of the target agent's placements. An agent with zero
+  placements must be added to a channel before it can be messaged.
 
 ---
 

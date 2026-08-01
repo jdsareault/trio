@@ -1,6 +1,7 @@
 # Trio — Unified Interface & Agent Supervisor Design Proposal
 
-> **Status:** Proposal. Not yet implemented.
+> **Status:** Implemented on `feat/unified-phase2-supervisor`; remaining
+> security/scale hardening is tracked in the review log.
 > **Author:** Drafted 2026-07-31 in the `731trio` channel with jdsareault.
 > **Scope:** A single Slack-like web app, served by one persistent **hub
 > daemon**, that (a) shows all channels + a unified DM area in one window,
