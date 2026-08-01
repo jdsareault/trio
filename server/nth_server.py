@@ -760,6 +760,7 @@ def nth_connect(
     skills: str = "",
     pin_topic: bool = False,
     model: str = "",
+    resume_member_id: str = "",
 ) -> str:
     """Join an nth channel. Creates the channel if it doesn't exist.
 
@@ -786,6 +787,11 @@ def nth_connect(
         model: Your model tier — e.g. "opus", "sonnet", "haiku". Shown in the
                dashboard roster so operators know who to expect fast vs. deep
                answers from. Optional; free-form, lower-cased, capped at 40 chars.
+        resume_member_id: Re-attach AS this existing member_id instead of minting
+               a new one (identity reclaim). Used by the unified-interface
+               supervisor so a spawned agent connects as the row the hub already
+               created — no duplicate member (bug B1). Empty for normal callers;
+               action is "reclaimed" on a silent re-attach to an existing row.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -803,7 +809,14 @@ def nth_connect(
     skills = skills[:MAX_SKILLS_LENGTH] if skills else ""
     model = (model or "").strip().lower()[:40]   # self-reported tier tag
 
-    member_id = generate_member_id()
+    # Identity reclaim (unified-interface): a supervisor-spawned agent connects
+    # AS its pre-assigned member_id instead of minting a new one, so its
+    # trio_connect re-attaches to the row the hub already created rather than
+    # duplicating it (bug B1). When resume_member_id is empty (every existing
+    # caller), behaviour is unchanged.
+    reclaiming = bool(resume_member_id and resume_member_id.strip())
+    reclaimed_existing = False
+    member_id = resume_member_id.strip() if reclaiming else generate_member_id()
     now = now_iso()
     db = get_db()
 
@@ -827,32 +840,49 @@ def nth_connect(
             if count >= MAX_MEMBERS:
                 return json.dumps({"error": f"Channel is full ({MAX_MEMBERS} members)."})
 
-            # Join existing channel (retry once on member_id collision)
-            try:
+            if reclaiming:
+                # Re-attach to the pre-created row (or create it with the fixed
+                # id if absent); never re-mint the id.
+                reclaimed_existing = db.execute(
+                    "SELECT 1 FROM members WHERE id = ? AND channel = ?",
+                    (member_id, channel)).fetchone() is not None
                 db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (member_id, channel, name, summary, skills, now, now),
                 )
-            except sqlite3.IntegrityError:
-                member_id = generate_member_id()
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
+                if reclaimed_existing:
+                    db.execute(
+                        "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                        (now, member_id, channel))
+            else:
+                # Join existing channel (retry once on member_id collision)
+                try:
+                    db.execute(
+                        "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (member_id, channel, name, summary, skills, now, now),
+                    )
+                except sqlite3.IntegrityError:
+                    member_id = generate_member_id()
+                    db.execute(
+                        "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (member_id, channel, name, summary, skills, now, now),
+                    )
             db.execute(
                 "UPDATE channels SET updated_at = ? WHERE code = ?",
                 (now, channel),
             )
-            # Post a system-style join message
-            db.execute(
-                "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
-            )
+            # Post a system-style join message (quiet on a silent re-attach).
+            if not (reclaiming and reclaimed_existing):
+                db.execute(
+                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
+                )
             db.commit()
-            action = "joined"
+            action = "reclaimed" if (reclaiming and reclaimed_existing) else "joined"
         else:
             # Create new channel
             db.execute(
@@ -860,19 +890,28 @@ def nth_connect(
                 "VALUES (?, 'active', ?, ?)",
                 (channel, now, now),
             )
-            try:
+            if reclaiming:
+                # Fresh channel + a fixed reclaim id: insert with that id, no
+                # re-mint (the row can't pre-exist in a channel we just created).
                 db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (member_id, channel, name, summary, skills, now, now),
                 )
-            except sqlite3.IntegrityError:
-                member_id = generate_member_id()
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
+            else:
+                try:
+                    db.execute(
+                        "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (member_id, channel, name, summary, skills, now, now),
+                    )
+                except sqlite3.IntegrityError:
+                    member_id = generate_member_id()
+                    db.execute(
+                        "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (member_id, channel, name, summary, skills, now, now),
+                    )
             db.execute(
                 "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
