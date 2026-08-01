@@ -111,7 +111,7 @@
       body.className = 'message-body plain system';
       body.textContent = M.humanizeIdSigils(vm.content);
     } else {
-      body.className = 'message-body';
+      body.className = 'message-body bubble';
       body.innerHTML = M.renderMarkdown(vm.content);
       decorateSigils(body, vm);
       Trio.fileLinks?.decorateFilePaths?.(body);
@@ -245,8 +245,11 @@
   }
   function cardFor(msg) {
     const vm = viewModel(msg);
-    const card = document.createElement('article'); card.className = 'message' + (vm.isOwn ? ' own' : '') + (vm.isPrivate ? ' private' : '');
+    const card = document.createElement('article'); card.className = 'message msg' + (vm.isOwn ? ' own me' : '') + (vm.isPrivate ? ' private' : '');
     card.dataset.messageId = vm.id;
+    const avatar = document.createElement('div'); avatar.className = 'message-avatar av av-32'; avatar.setAttribute('aria-hidden', 'true');
+    avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = vm.author;
     const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
@@ -258,14 +261,14 @@
     if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
     if (vm.isTask) { const task = document.createElement('span'); task.className = 'task-chip'; task.textContent = 'task #' + vm.taskId; head.append(task); }
     if (vm.isQuestion) card.classList.add('question');
-    card.append(head);
+    content.append(head);
     if (vm.replyTo) {
       const reply = document.createElement('a'); reply.className = 'reply-context'; reply.href = '#m' + vm.replyTo; reply.textContent = 'replying to #' + vm.replyTo;
       reply.addEventListener('click', (e) => { e.preventDefault(); const target = document.querySelector(`[data-message-id="${vm.replyTo}"]`); if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); target.focus(); } });
-      card.append(reply);
+      content.append(reply);
     }
-    const target = renderTargets(vm); if (target) card.append(target);
-    const body = document.createElement('div'); body.className = 'message-body'; paintBody(card, body, vm); card.append(body);
+    const target = renderTargets(vm); if (target) content.append(target);
+    const body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm); content.append(body);
     if (vm.attachments.length) {
       const attachments = document.createElement('div'); attachments.className = 'message-attachments';
       vm.attachments.forEach(attachment => {
@@ -280,17 +283,18 @@
         else link.textContent = attachment.filename || ('Attachment #' + attachment.id);
         attachments.append(link);
       });
-      if (attachments.children.length) card.append(attachments);
+      if (attachments.children.length) content.append(attachments);
     }
-    const ask = askCard(msg); if (ask) card.append(ask);
+    const ask = askCard(msg); if (ask) content.append(ask);
     if (isOwn(msg) && !msg.retracted_at && !state.readOnly) {
       const controls = document.createElement('div'); controls.className = 'message-controls';
       for (const [label, fn] of [['edit', () => edit(msg, body)], ['delete', () => retract(msg)]]) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
         button.addEventListener('click', () => fn()); controls.append(button);
       }
-      card.append(controls);
+      content.append(controls);
     }
+    card.append(avatar, content);
     return card;
   }
 
