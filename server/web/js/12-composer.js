@@ -60,7 +60,7 @@
     }
     return body;
   }
-  function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); }
+  function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); renderReach(); }
 
   async function upload(file) {
     if (!file) return;
@@ -125,6 +125,91 @@
   async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { Trio.ui.toast(error.message); } }
   const domListeners = [];
   let unroute;
+  let modeTabs = null;
+  let reachPreview = null;
+  let ac = null;
+  let acIndex = -1;
+  let acMatches = [];
+  let acToken = null;
+  function acEsc(s) { return Trio.markdown.escapeHtml(String(s ?? '')); }
+  function acContainer() { return (input() || document.getElementById('input'))?.closest('.composer-shell') || document.body; }
+  function closeAutocomplete() { if (ac) { ac.remove(); ac = null; } acIndex = -1; acMatches = []; acToken = null; }
+  function findToken(value, caret) {
+    let i = caret - 1;
+    while (i >= 0 && /[^\s\n]/.test(value[i]) && !/[@#!]/.test(value[i])) i--;
+    if (i < 0 || !/[@#!]/.test(value[i])) return null;
+    const sigil = value[i];
+    if (i > 0 && /[^\s\n]/.test(value[i - 1])) return null;
+    return { sigil, start: i, query: value.slice(i + 1, caret) };
+  }
+  function openAutocomplete(token, matches) {
+    closeAutocomplete();
+    acToken = token; acMatches = matches; acIndex = 0;
+    ac = document.createElement('div'); ac.className = 'ac-pop'; ac.setAttribute('role', 'listbox');
+    ac.innerHTML = `<div class="ac-hd">${acEsc(token.sigil === '@' ? 'Mention' : token.sigil === '#' ? 'Reference' : 'Bang')}</div>` +
+      matches.map((m, i) => `<button class="ac-opt ${i === 0 ? 'hi' : ''}" data-index="${i}" role="option" aria-selected="${i === 0}"><span class="sig">${acEsc(token.sigil)}</span><span class="nm">${acEsc(m.name)}</span><span class="rl">${acEsc(m.kind || 'agent')}</span></button>`).join('');
+    ac.querySelectorAll('button').forEach(b => b.addEventListener('click', () => selectMatch(Number(b.dataset.index))));
+    acContainer().append(ac);
+  }
+  function updateAutocomplete() {
+    const el = input(); if (!el) return;
+    const token = findToken(el.value, el.selectionStart);
+    if (!token || token.query.includes(',')) { closeAutocomplete(); return; }
+    const q = token.query.toLowerCase();
+    const matches = [...(state.members?.values() || [])]
+      .filter(m => m && (m.name || '').toLowerCase().startsWith(q) || (m.id || '').startsWith(q))
+      .slice(0, 6)
+      .map(m => ({ id: m.id, name: m.name || m.id, kind: m.kind || 'agent' }));
+    if (matches.length) openAutocomplete(token, matches); else closeAutocomplete();
+  }
+  function selectMatch(index) {
+    const match = acMatches[index]; const token = acToken; if (!match || !token) return;
+    const el = input(); if (!el) return;
+    const before = el.value.slice(0, token.start);
+    const after = el.value.slice(el.selectionStart);
+    if (token.sigil === '@') {
+      state.selectedTargets.add(match.id);
+      renderTargets();
+      el.value = before + after;
+      el.selectionStart = el.selectionEnd = token.start;
+    } else {
+      el.value = before + token.sigil + match.name + ' ' + after;
+      el.selectionStart = el.selectionEnd = token.start + 1 + match.name.length + 1;
+    }
+    closeAutocomplete(); updateSendState(); saveDraft();
+  }
+  function moveAutocomplete(delta) {
+    if (!ac || !acMatches.length) return;
+    acIndex = (acIndex + delta + acMatches.length) % acMatches.length;
+    const buttons = ac.querySelectorAll('.ac-opt');
+    buttons.forEach((b, i) => { b.classList.toggle('hi', i === acIndex); b.setAttribute('aria-selected', String(i === acIndex)); });
+  }
+  function setMode(mode) {
+    state.composerMode = ['broadcast', 'whisper', 'reply'].includes(mode) ? mode : 'broadcast';
+    if (modeTabs) modeTabs.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.mode === state.composerMode));
+    if (state.composerMode !== 'whisper') state.selectedTargets = new Set();
+    renderTargets(); updateSendState(); renderReach();
+  }
+  function renderReach() {
+    if (!reachPreview) return;
+    const targets = [...state.selectedTargets].map(id => targetName(id));
+    if (state.composerMode === 'reply' && state.composerReply) { reachPreview.textContent = 'Replying to message #' + state.composerReply.id; }
+    else if (state.composerMode === 'whisper' && targets.length) { reachPreview.textContent = 'Whisper to ' + targets.join(', '); }
+    else { reachPreview.textContent = 'Broadcast to the channel'; }
+  }
+  function renderModeTabs(container) {
+    if (!container || !container.querySelector) return;
+    if (modeTabs) { modeTabs.remove(); modeTabs = null; }
+    modeTabs = document.createElement('div'); modeTabs.className = 'mode-tabs';
+    ['broadcast', 'whisper'].forEach(mode => {
+      const b = document.createElement('button'); b.type = 'button'; b.dataset.mode = mode; b.textContent = mode;
+      b.classList.toggle('on', mode === state.composerMode);
+      b.addEventListener('click', () => setMode(mode));
+      modeTabs.append(b);
+    });
+    container.insertBefore(modeTabs, container.firstChild);
+    reachPreview = document.createElement('div'); reachPreview.className = 'reach-preview'; container.insertBefore(reachPreview, container.firstChild);
+  }
   function setInputState(text) {
     if (!text) return;
     text.disabled = !!state.readOnly;
@@ -134,9 +219,20 @@
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
     setInputState(text);
-    const onInput = () => { updateSendState(); saveDraft(); };
+    renderModeTabs(text.parentElement);
+    renderTargets(); renderAttachments(); renderReach();
+    const onInput = () => { updateSendState(); saveDraft(); updateAutocomplete(); };
     text.addEventListener('input', onInput); domListeners.push([text, 'input', onInput]);
-    const onKey = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } };
+    const onKey = event => {
+      if (ac) {
+        if (event.key === 'ArrowDown') { event.preventDefault(); moveAutocomplete(1); }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); moveAutocomplete(-1); }
+        else if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); selectMatch(acIndex); }
+        else if (event.key === 'Escape') { event.preventDefault(); closeAutocomplete(); }
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
+    };
     text.addEventListener('keydown', onKey); domListeners.push([text, 'keydown', onKey]);
     const sendClick = () => send();
     sendButton?.addEventListener('click', sendClick); if (sendButton) domListeners.push([sendButton, 'click', sendClick]);

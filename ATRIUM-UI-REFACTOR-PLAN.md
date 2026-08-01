@@ -542,7 +542,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Advance the read watermark only when the view is active and messages are actually visible.
   - Preserve independent scroll positions for every channel, DM, and audit route.
 
-- [~] **3.5 Implement file and attachment interactions.**
+- [x] **3.5 Implement file and attachment interactions.**
   - Render local file paths as explicit safe actions rather than arbitrary HTML links.
   - Add image thumbnails, alt text, loading/error state, and a lightbox/open-original action.
   - Add paste and drag/drop upload with the same MIME/size validation as the picker.
@@ -552,12 +552,12 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Restore drafts after route changes/reload and clear only after confirmed send.
   - Disable the composer for archived/audit/unavailable conversations with explanatory copy.
 
-- [ ] **3.7 Add sigil autocomplete.**
+- [x] **3.7 Add sigil autocomplete.**
   - Detect `@`, `#`, and `!` tokens at the caret; filter roster targets; support Arrow keys, Enter/Tab, Escape, mouse, and screen readers.
   - Insert the selected canonical display name while preserving member IDs in the payload.
   - Exclude invalid targets and explain listening/filter implications for `@`, `#`, and `!`.
 
-- [ ] **3.8 Add reach controls and preview.**
+- [x] **3.8 Add reach controls and preview.**
   - Implement the prototype mode tabs and recipient preview for room broadcast, targeted channel message, and DM.
   - Show exactly who will receive/wake before send and require confirmation only for the approved broadcast-risk case.
   - Make privacy/reach derive from route and payload state, not CSS alone.
