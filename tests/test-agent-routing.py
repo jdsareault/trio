@@ -80,6 +80,41 @@ def main() -> int:
     check("directed @agent message is routed + [#channel]-tagged",
           any("[#rt]" in e and "please help" in e for e in echoes))
 
+    # Provider-neutral wake policy: all gets ambient, about gets #refs, and
+    # bangs bypass every filter.
+    d = srv.get_db()
+    d.execute("UPDATE agents SET wake_mode='all' WHERE id=?", (aid,))
+    d.commit(); d.close()
+    got.clear(); echoes.clear()
+    srv.nth_send(channel="rt", member_id=host["member_id"], message="ambient for all")
+    got.wait(3.0)
+    check("wake_mode=all routes ambient messages",
+          any("ambient for all" in e for e in echoes))
+
+    d = srv.get_db()
+    d.execute("UPDATE agents SET wake_mode='about' WHERE id=?", (aid,))
+    d.commit(); d.close()
+    got.clear(); echoes.clear()
+    srv.nth_send(channel="rt", member_id=host["member_id"], message="ambient ignored")
+    time.sleep(0.5)
+    check("wake_mode=about ignores ambient messages",
+          not any("ambient ignored" in e for e in echoes))
+    got.clear()
+    srv.nth_send(channel="rt", member_id=host["member_id"],
+                 message=f"#{aid} relevant context")
+    got.wait(3.0)
+    check("wake_mode=about routes pound references",
+          any("relevant context" in e for e in echoes))
+
+    d = srv.get_db()
+    d.execute("UPDATE agents SET wake_mode='at' WHERE id=?", (aid,))
+    d.commit(); d.close()
+    got.clear(); echoes.clear()
+    srv.nth_send(channel="rt", member_id=host["member_id"],
+                 message=f"!{aid} urgent")
+    got.wait(3.0)
+    check("bang routes regardless of wake mode", any("urgent" in e for e in echoes))
+
     # Membership scope: a message mentioning the agent in a channel it is NOT
     # placed in must NOT be fed (inject mentions directly, bypassing sigil parse).
     d = srv.get_db()
@@ -106,6 +141,15 @@ def main() -> int:
           any("wake up please" in e for e in echoes) and sup.is_running(aid))
     check("woken agent re-launched WITH --mcp-config (not deaf-mute)",
           "--mcp-config" in (sup._procs.get(aid).argv if sup._procs.get(aid) else []))
+
+    # Stop is deliberate and must not be undone by the router.
+    sup.stop(aid)
+    got.clear(); echoes.clear()
+    srv.nth_send(channel="rt", member_id=host["member_id"],
+                 message=f"@{aid} stay stopped")
+    time.sleep(0.8)
+    check("stopped agent is not auto-woken",
+          not sup.is_running(aid) and not any("stay stopped" in e for e in echoes))
 
     router.stop()
     sup.shutdown()

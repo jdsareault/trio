@@ -1988,12 +1988,11 @@ def build_mcp_config_for_hub() -> str:
 
 class AgentRouter(threading.Thread):
     """Hub-side inbound routing (hybrid context): watches every channel for
-    messages DIRECTED at a managed agent (@it / !it / DM — via the server-parsed
-    mentions/bangs/recipients columns; member_id == agent_id) and feeds them to
-    the agent's process, `[#channel]`-tagged, waking a sleeping agent first
-    (aggressive-hibernation wake-on-directed). Ambient chatter is ignored, so a
-    busy channel doesn't keep every placed agent hot. One cheap poll loop for
-    all agents — replaces N per-agent monitors."""
+    messages matching each managed agent's wake policy and feeds them to its
+    provider session, `[#channel]`-tagged. Bangs and private DMs always wake;
+    ``at`` accepts mentions, ``about`` also accepts pound references, and
+    ``all`` accepts ambient channel traffic. One cheap, token-free poll loop
+    serves every provider and replaces N per-agent monitors."""
 
     def __init__(self, db_path: Path, supervisor, interval: float = 1.0):
         super().__init__(daemon=True)
@@ -2030,16 +2029,19 @@ class AgentRouter(threading.Thread):
     def tick(self, db) -> None:
         rows = db.execute(
             "SELECT id, channel, member_id, member_name, content, mentions, "
-            "bangs, recipients FROM messages WHERE id > ? ORDER BY id LIMIT 200",
+            "refs, bangs, recipients FROM messages WHERE id > ? ORDER BY id LIMIT 200",
             (self.last_id,)).fetchall()
         if not rows:
             return
         # Placement map: which agents are actually IN each channel. Targeting is
         # membership-scoped so an agent mentioned in a channel it isn't placed in
         # is never fed (Sauron/Ents).
-        placements: Dict[str, set] = {}
-        for r in db.execute("SELECT agent_id, channel FROM agent_channels").fetchall():
-            placements.setdefault(r["channel"], set()).add(r["agent_id"])
+        placements: Dict[str, Dict[str, str]] = {}
+        for r in db.execute(
+                "SELECT ac.agent_id, ac.channel, a.wake_mode "
+                "FROM agent_channels ac JOIN agents a ON a.id=ac.agent_id").fetchall():
+            placements.setdefault(r["channel"], {})[r["agent_id"]] = (
+                r["wake_mode"] or "at")
         for m in rows:
             self.last_id = max(self.last_id, m["id"])
             chan_agents = placements.get(m["channel"])
@@ -2059,6 +2061,17 @@ class AgentRouter(threading.Thread):
             except queue.Empty:
                 continue
             try:
+                db = sqlite3.connect(str(self.db_path), timeout=5)
+                try:
+                    row = db.execute(
+                        "SELECT state FROM agents WHERE id=?", (aid,)).fetchone()
+                finally:
+                    db.close()
+                # Stop and error are operator-visible terminal states. Only a
+                # deliberate Wake should reactivate them; sleeping continuity
+                # remains event-driven and automatic.
+                if row is None or row[0] in (nsup.ST_STOPPED, nsup.ST_ERRORED):
+                    continue
                 if not self.sup.is_running(aid):
                     wake_agent(aid, self.sup, self.db_path)  # re-injects mcp+preamble
                 if chan == AGENT_INBOX_CHANNEL:
@@ -2069,18 +2082,27 @@ class AgentRouter(threading.Thread):
                 pass
 
     def _targets(self, m, chan_agents) -> set:
-        out = set()
-        for col in ("mentions", "bangs", "recipients"):
+        parsed = {}
+        for col in ("mentions", "refs", "bangs", "recipients"):
             try:
                 key = m[col]
             except (IndexError, KeyError):
                 key = ""
             try:
-                for i in json.loads(key or "[]"):
-                    if i in chan_agents:  # membership-scoped
-                        out.add(i)
+                value = json.loads(key or "[]")
+                parsed[col] = set(value if isinstance(value, list) else [])
             except (ValueError, TypeError):
-                pass
+                parsed[col] = set()
+        out = set()
+        for agent_id, mode in chan_agents.items():
+            if agent_id in parsed["bangs"] or agent_id in parsed["recipients"]:
+                out.add(agent_id)
+            elif mode == "all":
+                out.add(agent_id)
+            elif agent_id in parsed["mentions"]:
+                out.add(agent_id)
+            elif mode == "about" and agent_id in parsed["refs"]:
+                out.add(agent_id)
         return out
 
     def stop(self) -> None:

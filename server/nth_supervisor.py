@@ -650,37 +650,38 @@ class AgentSupervisor:
         (hybrid context). The agent replies to a specific channel via its
         injected Trio MCP. Returns False if the agent isn't live (the hub is
         responsible for waking a sleeping agent first — see design doc)."""
-        with self._lock:
-            proc = self._procs.get(agent_id)
-        if not proc:
-            return False
-        baseline = 0
-        try:
-            db = self._db()
-            try:
-                baseline = db.execute(
-                    "SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
-            finally:
-                db.close()
-        except sqlite3.Error:
-            pass
-        context = {"channel": channel, "baseline": baseline}
-        with self._lock:
-            self._pending.setdefault(agent_id, collections.deque()).append(context)
-        ok = proc.send_user(f"[#{channel}] {text}")
-        if ok:
-            self._set_state(agent_id, ST_RUNNING)
-        else:
+        with self._plock(agent_id):
             with self._lock:
-                pending = self._pending.get(agent_id)
-                if pending:
-                    try:
-                        pending.remove(context)
-                    except ValueError:
-                        pass
-                    if not pending:
-                        self._pending.pop(agent_id, None)
-        return ok
+                proc = self._procs.get(agent_id)
+            if not proc:
+                return False
+            baseline = 0
+            try:
+                db = self._db()
+                try:
+                    baseline = db.execute(
+                        "SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
+                finally:
+                    db.close()
+            except sqlite3.Error:
+                pass
+            context = {"channel": channel, "baseline": baseline}
+            with self._lock:
+                self._pending.setdefault(agent_id, collections.deque()).append(context)
+            ok = proc.send_user(f"[#{channel}] {text}")
+            if ok:
+                self._set_state(agent_id, ST_RUNNING)
+            else:
+                with self._lock:
+                    pending = self._pending.get(agent_id)
+                    if pending:
+                        try:
+                            pending.remove(context)
+                        except ValueError:
+                            pass
+                        if not pending:
+                            self._pending.pop(agent_id, None)
+            return ok
 
     def is_running(self, agent_id: str) -> bool:
         with self._lock:
