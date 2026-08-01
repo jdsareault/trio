@@ -150,7 +150,7 @@
     if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d), d.unread ? String(d.unread) : '', state.view === 'conversation' && state.dmKey === d.key))));
     if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent', () => openDm(d, true), '', state.view === 'conversation' && state.dmKey === d.key))));
     const actions = document.createElement('div'); actions.className = 'rail-actions';
-    actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => { const panel = document.getElementById('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); }), railItem('Preferences', '', () => Trio.preferences?.panel?.())); rail.append(actions);
+    actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => showView('roster')), railItem('Preferences', '', () => showView('prefs'))); rail.append(actions);
   }
   function updateTopbar(title, subtitle) {
     const h = $('h-channel'); const m = $('h-meta');
@@ -269,6 +269,8 @@
     if (view === 'home') { renderHome(panel); }
     else if (view === 'tasks') { renderTasks(panel); }
     else if (view === 'attention') { renderAttention(panel); }
+    else if (view === 'roster') { Trio.agents?.renderPage?.(panel); }
+    else if (view === 'prefs') { Trio.preferences?.renderPage?.(panel); }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
   }
   async function createChannel() {

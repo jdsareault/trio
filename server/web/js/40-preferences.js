@@ -50,8 +50,26 @@
     n.showModal();
     checkStt().then(() => { const v = document.getElementById('diag-stt'); if (v) v.textContent = Trio.state.sttHealth; });
   }
+  function renderPage(panel) {
+    panel.replaceChildren();
+    const p = read();
+    const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Settings & diagnostics</h2><p>Shape how Atrium looks, sounds, and keeps you informed.</p>';
+    const appearance = document.createElement('section'); appearance.className = 'pref-group'; appearance.innerHTML = '<h3>Appearance</h3>';
+    const themeRow = document.createElement('div'); themeRow.className = 'pref-row'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme</div><div class="d">A warm light room or deep charcoal after dark.</div></div>';
+    const theme = document.createElement('div'); theme.className = 'theme-choice';
+    [['light','Light'],['dark','Dark']].forEach(([value,label]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p.theme === value ? ' on' : ''); b.innerHTML = `<span class="swatch ${value}"><span class="a"></span><span class="b"></span></span><span class="tl">${label}</span>`; b.addEventListener('click', () => { save({theme:value}); renderPage(panel); }); theme.append(b); }); themeRow.append(theme); appearance.append(themeRow);
+    const accentRow = document.createElement('div'); accentRow.className = 'pref-row'; accentRow.innerHTML = '<div class="pr-txt"><div class="l">Accent color</div><div class="d">A little personality for buttons and highlights.</div></div>';
+    const accents = document.createElement('div'); accents.className = 'accent-dots'; [['eucalyptus','#3d7a63'],['indigo','#4b52a8'],['plum','#8a4f78']].forEach(([value,color]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'accent-dot' + (p.accent === value ? ' on' : ''); b.setAttribute('aria-label', value); b.innerHTML = `<span class="in" style="background:${color}"></span>`; b.addEventListener('click', () => { save({accent:value}); renderPage(panel); }); accents.append(b); }); accentRow.append(accents); appearance.append(accentRow);
+    const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
+    const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Notify me when an agent mentions me or finishes a task.'],['chime','Notification chime','Play a short sound with desktop notifications.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
+    behaviors.forEach(([key,label,description]) => { const row = document.createElement('div'); row.className = 'pref-row'; const text = document.createElement('div'); text.className = 'pr-txt'; text.innerHTML = `<div class="l">${esc(label)}</div><div class="d">${esc(description)}</div>`; const toggle = document.createElement('label'); toggle.className = 'switch'; toggle.innerHTML = `<input type="checkbox" ${p[key] ? 'checked' : ''} aria-label="${esc(label)}"><span class="track"></span><span class="knob"></span>`; toggle.querySelector('input').addEventListener('change', event => save({[key]:event.target.checked})); row.append(text, toggle); behavior.append(row); });
+    const diagnosticsGroup = document.createElement('section'); diagnosticsGroup.className = 'pref-group'; diagnosticsGroup.innerHTML = '<h3>Diagnostics</h3>';
+    const diagnostic = diagnostics(); Object.entries(diagnostic).forEach(([key,value]) => { const row = document.createElement('div'); row.className = 'diag-card'; row.innerHTML = `<span class="di ${key === 'online' || key === 'stt' ? 'ok' : 'off'}">●</span><div class="dtxt"><div class="dl">${esc(key.replace(/([A-Z])/g,' $1'))}<span class="stat-chip-sm ${key === 'online' ? 'ok' : 'off'}">${esc(String(value))}</span></div></div>`; diagnosticsGroup.append(row); });
+    const resetButton = document.createElement('button'); resetButton.type = 'button'; resetButton.className = 'reset-prefs'; resetButton.textContent = 'Reset to defaults'; resetButton.addEventListener('click', () => { reset(); renderPage(panel); }); diagnosticsGroup.append(resetButton);
+    panel.append(hero, appearance, behavior, diagnosticsGroup);
+  }
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, reset, read, diagnostics, panel };
+  Trio.preferences = { init, mount, unmount, apply, save, reset, read, diagnostics, panel, renderPage };
 })();

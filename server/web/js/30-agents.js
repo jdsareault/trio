@@ -90,6 +90,33 @@
     if (f === 'needs-attention') return vm.needsAttention;
     return true;
   }
+  function directoryCard(vm) {
+    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '');
+    const initials = (vm.name || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    const tone = vm.needsAttention ? 'var(--danger)' : vm.busy ? 'var(--warn)' : vm.live ? 'var(--ok)' : 'var(--accent)';
+    article.style.setProperty('--card-accent', tone);
+    article.innerHTML = `<div class="ac-top"><span class="directory-avatar">${esc(initials)}</span><span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
+    const actions = document.createElement('div'); actions.className = 'agent-actions';
+    const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); actions.append(detail);
+    const message = document.createElement('button'); message.type = 'button'; message.textContent = 'Message'; message.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); actions.append(message);
+    article.append(actions); return article;
+  }
+  function renderPage(panel) {
+    panel.replaceChildren();
+    const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Agent roster</h2><p>Everyone working in this workspace</p>';
+    const toolbar = document.createElement('div'); toolbar.className = 'roster-toolbar';
+    const segment = document.createElement('div'); segment.className = 'seg';
+    [['all','All'],['active','Active'],['working','Working'],['resting','Resting'],['needs-attention','Needs attention']].forEach(([filter,label]) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.className = state.agentFilter === filter ? 'on' : ''; b.addEventListener('click', () => { state.agentFilter = filter; renderPage(panel); }); segment.append(b); });
+    const search = document.createElement('input'); search.className = 'agent-page-search'; search.placeholder = 'Search agents…'; search.value = state.agentsSearch || ''; search.setAttribute('aria-label', 'Search agents'); search.addEventListener('input', () => { state.agentsSearch = search.value; renderPage(panel); });
+    const createButton = document.createElement('button'); createButton.type = 'button'; createButton.className = 'btn primary'; createButton.textContent = 'New agent'; createButton.addEventListener('click', create);
+    toolbar.append(segment, search, createButton);
+    const grid = document.createElement('div'); grid.className = 'roster-grid';
+    let list = (Trio.store.get('agents.list') || state.agents || []).map(viewModel).filter(matches);
+    const query = (state.agentsSearch || '').trim().toLowerCase(); if (query) list = list.filter(vm => `${vm.name} ${vm.provider} ${vm.model}`.toLowerCase().includes(query));
+    if (!list.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.innerHTML = '<div class="e-ic">✦</div><h3>No agents match</h3><p>Try another filter or invite someone new to the workspace.</p>'; grid.append(empty); }
+    list.forEach(vm => grid.append(directoryCard(vm)));
+    panel.append(hero, toolbar, grid);
+  }
   function render(agents = Trio.store.get('agents.list')) {
     const n = host();
     let list = (agents || []).map(a => viewModel(a)).filter(matches);
@@ -203,5 +230,5 @@
       finally { pendingAgentActions.delete(key); }
     });
   }
-  Trio.agents = { init, mount, unmount, render, refresh, loadDiscovery, viewModel, actionCaps, statusIcon, action, create };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, viewModel, actionCaps, statusIcon, action, create };
 })();
