@@ -96,6 +96,17 @@ check('agent roster panel is hidden on render', () => {
   assert.ok(panel);
   assert.strictEqual(panel.hidden, true);
 });
+check('agent view model normalizes lifecycle and status', () => {
+  const vm = H.Trio.agents.viewModel({ id: 'ag_1', name: 'Test', live: true, busy: true, provider: 'claude', model: 'sonnet', filter_mode: 'about', error: 'boom' });
+  assert.strictEqual(vm.lifecycle, 'working');
+  assert.strictEqual(vm.wakePolicy, 'about');
+  assert.strictEqual(vm.needsAttention, true);
+});
+check('agent action capabilities filter by lifecycle', () => {
+  const caps = H.Trio.agents.actionCaps(H.Trio.agents.viewModel({ id: 'ag_1', live: false, state: 'stopped' }));
+  assert.ok(caps.includes('wake'));
+  assert.strictEqual(caps.includes('interrupt'), false);
+});
 check('preferences save persists the dictation switch', () => {
   H.Trio.preferences.save({ dictation: false });
   assert.strictEqual(H.Trio.preferences.read().dictation, false);

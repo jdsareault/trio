@@ -677,7 +677,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - After successful creation, offer/open the new DM without requiring a public placement.
   - Test privacy, hidden-inbox suppression, and back navigation to the originating agent view.
 
-- [~] **5.10 Add agent workflow coverage.**
+- [x] **5.10 Add agent workflow coverage.**
   - Extend deterministic tests for capability-state rendering, all lifecycle actions, placements, wake policies, provider discovery, invalid forms, spawn failure/retry, delete confirmation, and Message routing.
   - Keep `tests/test-web-agents.py`, `tests/test-web-codex-agents.py`, supervisor/runtime suites, and mixed-provider routing green.
 
