@@ -466,7 +466,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Centralize focus capture/return, Escape behavior, destructive confirmation, pending buttons, and user-facing error formatting.
   - Replace `window.alert`, `window.prompt`, ad hoc dialogs, and raw Unicode toolbar icons incrementally.
 
-- [ ] **1.10 Migrate existing features without changing behavior.**
+- [x] **1.10 Migrate existing features without changing behavior.**
   - Migrate in this order: preferences → workspace rail → conversation → composer → agents.
   - Remove direct feature-to-feature calls and private DOM queries; communicate through actions/services.
   - Delete `window.Trio.state` only after all focused and integration tests use the new interfaces.
