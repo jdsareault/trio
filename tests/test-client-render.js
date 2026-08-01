@@ -81,6 +81,26 @@ check('DM send payload includes the conversation recipients, not just a single t
   delete H.Trio.state.dmKey;
   delete H.Trio.state.dmMemberIds;
 });
+check('task filters default to open and all shows every row', () => {
+  H.Trio.state.tasks = [{ id: 1, message: 'Open task', status: 'open' }, { id: 2, message: 'Claimed task', status: 'claimed' }];
+  H.Trio.workspace.showView('tasks');
+  const panel = cx.document.getElementById('trio-tasks-view');
+  assert.strictEqual(panel.querySelectorAll('.task-row').length, 1);
+  H.Trio.state.taskFilter = 'all';
+  H.Trio.workspace.showView('tasks');
+  assert.strictEqual(panel.querySelectorAll('.task-row').length, 2);
+});
+check('agent roster panel is hidden on render', () => {
+  H.Trio.agents.render([]);
+  const panel = cx.document.getElementById('trio-agents');
+  assert.ok(panel);
+  assert.strictEqual(panel.hidden, true);
+});
+check('preferences save persists the dictation switch', () => {
+  H.Trio.preferences.save({ dictation: false });
+  assert.strictEqual(H.Trio.preferences.read().dictation, false);
+  H.Trio.preferences.save({ dictation: true });
+});
 
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);

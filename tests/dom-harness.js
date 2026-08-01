@@ -479,7 +479,7 @@ function buildSandbox() {
     console, setTimeout, clearTimeout, setInterval, clearInterval,
     URL, URLSearchParams, TextEncoder, TextDecoder, NodeFilter,
     Map, Set, WeakMap, Promise, JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean, Error,
-    EventTarget, Event,
+    EventTarget, Event, CustomEvent,
   });
   window.webkitAudioContext = window.AudioContext;
   window.__TRIO_TEST__ = {};        // truthy → nth_web.py's hook publishes helpers here
@@ -490,10 +490,12 @@ function buildSandbox() {
 // Keeping this list explicit is deliberate: a new production module must be
 // considered by the harness instead of silently escaping client coverage.
 function buildScript() {
-  const files = ['00-core.js', '10-markdown.js', '11-conversation.js', '12-composer.js'];
+  const files = ['00-core.js', '10-markdown.js', '11-conversation.js', '12-composer.js', '20-workspace.js', '30-agents.js', '40-preferences.js'];
   return [
     fs.readFileSync(ASK_JS, 'utf8'),
     ...files.map(name => fs.readFileSync(path.join(WEB_ROOT, 'js', name), 'utf8')),
+    "document.readyState = 'loading';",  // keep 90-boot from auto-running in the harness
+    fs.readFileSync(path.join(WEB_ROOT, 'js', '90-boot.js'), 'utf8'),
   ].join('\n') + `
     globalThis.__TRIO_TEST__ = {
       state: window.Trio.state,
