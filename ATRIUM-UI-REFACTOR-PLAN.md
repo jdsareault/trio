@@ -352,7 +352,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** no silent regressions or dead primary controls.  
 **Prerequisite:** none. Do this before visual expansion or architecture migration.
 
-- [ ] **0.1 Restore readable structured-answer content.**
+- [x] **0.1 Restore readable structured-answer content.**
   - Reuse or port `composeAnswer()` from `server/nth_ask_client.js` into the modular conversation/question code.
   - Change `answerPayload()` in `server/web/js/11-conversation.js` so `content` contains selected option text and custom answers; batched questions must produce one readable line per question.
   - Keep `reply_to` and structured `selection` unchanged for audit/rendering.
