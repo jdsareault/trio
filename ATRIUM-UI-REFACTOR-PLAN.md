@@ -532,7 +532,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Preserve safe Markdown and retracted audit placeholders.
   - Gate edit/delete/reply/copy actions by ownership, archived state, and conversation capability.
 
-- [ ] **3.3 Add timeline grouping and system treatments.**
+- [x] **3.3 Add timeline grouping and system treatments.**
   - Insert day separators, unread divider, and muted system lines without storing synthetic rows in message state.
   - Render mention, bang, DM, task, question, edited, and confidence treatments from the view model.
   - Add reply context that scrolls/focuses the referenced message when available.
@@ -547,7 +547,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Add image thumbnails, alt text, loading/error state, and a lightbox/open-original action.
   - Add paste and drag/drop upload with the same MIME/size validation as the picker.
 
-- [ ] **3.6 Define composer state per conversation.**
+- [~] **3.6 Define composer state per conversation.**
   - Store text draft, selected targets, reach mode, attachments, reply target, dictation state, send state, and error by conversation identity.
   - Restore drafts after route changes/reload and clear only after confirmed send.
   - Disable the composer for archived/audit/unavailable conversations with explanatory copy.

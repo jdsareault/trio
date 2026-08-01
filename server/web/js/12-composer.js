@@ -7,12 +7,21 @@
   state.pendingAttachments = Array.isArray(state.pendingAttachments) ? state.pendingAttachments : [];
   state.composerMode = state.composerMode || 'broadcast';
   state.sttMode = state.sttMode || 'local';
+  state.drafts = state.drafts || {};
   let recognition = null, recorder = null, stream = null, chunks = [];
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   function inputValue(newValue) { const el = input(); if (!el) return ''; if (newValue !== undefined) el.value = newValue; return el.value; }
 
   function targetName(id) { return state.members?.get(id)?.name || id; }
+  function conversationId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
+  function saveDraft() { const el = input(); if (!el) return; state.drafts[conversationId()] = el.value; }
+  function loadDraft() {
+    const el = input(); if (!el) return;
+    const key = conversationId();
+    el.value = state.drafts[key] || '';
+    updateSendState();
+  }
   function apiUrl(path) {
     if (typeof api.url === 'function') return api.url(path);
     const channel = state.channel || '';
@@ -82,6 +91,7 @@
     if (!body.recipients?.length && state.confirmBroadcast && !window.confirm('Send this message to the channel?')) { updateSendState(); return false; }
     try {
       const result = await api.post(apiUrl('/api/send'), body);
+      delete state.drafts[conversationId()];
       inputValue(''); state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
@@ -114,10 +124,18 @@
   }
   async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { Trio.ui.toast(error.message); } }
   const domListeners = [];
+  let unroute;
+  function setInputState(text) {
+    if (!text) return;
+    text.disabled = !!state.readOnly;
+    text.placeholder = state.readOnly ? 'This conversation is archived.' : 'Message…';
+  }
   function init() {
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
-    text.addEventListener('input', updateSendState); domListeners.push([text, 'input', updateSendState]);
+    setInputState(text);
+    const onInput = () => { updateSendState(); saveDraft(); };
+    text.addEventListener('input', onInput); domListeners.push([text, 'input', onInput]);
     const onKey = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } };
     text.addEventListener('keydown', onKey); domListeners.push([text, 'keydown', onKey]);
     const sendClick = () => send();
@@ -129,9 +147,10 @@
     if (dictateBtn) { dictateBtn.hidden = !dictation; }
     const onDictate = () => toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed'));
     if (dictation && dictateBtn) { dictateBtn.addEventListener('click', onDictate); domListeners.push([dictateBtn, 'click', onDictate]); }
-    renderTargets(); renderAttachments(); updateSendState();
+    unroute = Trio.router?.on?.(() => { loadDraft(); setInputState(text); });
+    renderTargets(); renderAttachments(); loadDraft();
   }
-  function unmount() { domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0; if (recorder && recorder.state !== 'inactive') stopDictation(); }
+  function unmount() { domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0; if (unroute) { unroute(); unroute = null; } if (recorder && recorder.state !== 'inactive') stopDictation(); }
   function mount() { init(); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
   Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload };

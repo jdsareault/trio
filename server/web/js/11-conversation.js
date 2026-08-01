@@ -36,6 +36,7 @@
       retractionReason: msg.retraction_reason || '',
       content: msg.retracted_at ? '' : (msg.content || ''),
       createdAt: msg.created_at,
+      date: date(msg.created_at),
       timestamp: time(msg.created_at),
       editedAt: msg.edited_at,
       editedTime: msg.edited_at ? time(msg.edited_at) : '',
@@ -54,6 +55,11 @@
   function time(iso) {
     if (!iso) return '';
     try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+    catch (_) { return ''; }
+  }
+  function date(iso) {
+    if (!iso) return '';
+    try { return new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); }
     catch (_) { return ''; }
   }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
@@ -224,7 +230,14 @@
     head.append(author, role, stamp);
     if (vm.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + vm.confidence; confidence.textContent = vm.confidence; head.append(confidence); }
     if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
+    if (vm.isTask) { const task = document.createElement('span'); task.className = 'task-chip'; task.textContent = 'task #' + vm.taskId; head.append(task); }
+    if (vm.isQuestion) card.classList.add('question');
     card.append(head);
+    if (vm.replyTo) {
+      const reply = document.createElement('a'); reply.className = 'reply-context'; reply.href = '#m' + vm.replyTo; reply.textContent = 'replying to #' + vm.replyTo;
+      reply.addEventListener('click', (e) => { e.preventDefault(); const target = document.querySelector(`[data-message-id="${vm.replyTo}"]`); if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); target.focus(); } });
+      card.append(reply);
+    }
     const target = renderTargets(vm); if (target) card.append(target);
     const body = document.createElement('div'); body.className = 'message-body'; paintBody(card, body, vm); card.append(body);
     if (vm.attachments.length) {
@@ -272,7 +285,10 @@
     }
     let unread = messages.findIndex(msg => Number(msg.id) > Number(state.lastSeenId));
     if (state.lastSeenId === 0) unread = -1;
+    let lastDate = '';
     messages.forEach((msg, index) => {
+      const d = date(msg.created_at);
+      if (d && d !== lastDate) { lastDate = d; const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = d; list.append(day); }
       if (index === unread) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
       const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card);
     });
