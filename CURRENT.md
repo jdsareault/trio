@@ -1,11 +1,30 @@
-# Current State — nth v7.2
+# Current State — nth Unified Workspace, Phase 4
 
-**Version:** v7.2 (2026-04-20)
+**Version:** Phase 4 product completion (2026-08-01), protocol v7.2
 **Prior:** v7.1 (2026-04-20), v7 (2026-04-19), v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09)
-**Branch:** main
+**Branch:** `feat/unified-phase4-product-completion` (stacked on Phase 3)
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror)
 
 ## What Just Shipped
+
+**Phase 4 unified workspace** — the web dashboard is now an installable local
+app for human-to-agent work, not only a channel viewer. `server/nth_app.py`
+provides install/status/doctor/open/uninstall commands; the macOS LaunchAgent
+starts at login, restarts after failure, uses a deterministic port, and exposes
+runtime readiness through `/api/health`. A fresh install initializes its own
+database.
+
+Managed Claude agents have durable lifecycle controls, channel placements, and
+a hidden private inbox so they can be DMed before joining a public channel.
+Their headless runtime preapproves all 23 Trio tools, revokes sessions when an
+agent is deleted, bridges ordinary Claude result output into the originating
+conversation, and prevents multiple dashboards from supervising duplicate
+processes. Claude Code is the supported managed runtime; the adapter boundary
+is isolated so Codex can be added later without coupling it to the web product.
+
+The Phase 4 acceptance path was exercised against a real authenticated Sonnet
+session: spawn, private DM delivery, MCP-authored reply, privacy enforcement,
+and cleanup. The installed service is healthy at `http://127.0.0.1:8765/`.
 
 **Selectable answers (jdsareault fork)** — `trio_ask` lets an agent pose a multiple-choice question **to a human**, answered by clicking in the web dashboard (radio for `mode="one"`, checkboxes for `mode="many"`, plus a free-text box; nothing sends until Confirm). Human-only by design — the server rejects agent targets via the new `members.kind` column; agents still ask each other in plain prose. The question payload rides in `messages.choices`; the answer returns as a normal `reply_to` message the asking agent just reads, with a structured `messages.selection` used only to lock/highlight the dashboard picker. `/api/send` gained `reply_to` + `selection`. Tests: `tests/test-ask.py`.
 
@@ -41,7 +60,7 @@ Migration is install-only: run `setup.sh` to replace skill docs + drop deprecate
 
 ## Architecture Snapshot
 
-- **20 MCP tools** via `nth-trio` (stdio) / `nth-qweb` (SSE) — one server codebase, transport selected by env var. `_pounds` and `_rename` round out the read/address surface. Three sigils on `_send`: `@` ping, `#` pound-reference, `!` bang.
+- **23 MCP tools** via `nth-trio` (stdio) / `nth-qweb` (SSE) — one server codebase, transport selected by env var. Three sigils on `_send`: `@` ping, `#` pound-reference, `!` bang.
 - **`server/nth_server.py`** — FastMCP server, coordination protocol, transport-agnostic.
 - **`server/nth_monitor.py`** — v7 persistent Monitor target. Reads `~/.claude/nth/nth.db`, emits JSON events on stdout.
 - **`server/nth_console.py`** — stdlib DB tailer for human operators. Prints full channel history on launch; terminal scrollback is the history UI.
@@ -93,7 +112,7 @@ Monitor reads the local DB, so it's **hub-only**. Remote `/quartet` spoke sessio
 - Skill install: `~/.claude/skills/trio/` + `~/.claude/skills/quartet/` (canonical layout; legacy `~/.claude/skills/nth/SKILL-*.md` is removed by `setup.sh`).
 - Server install: `~/.claude/skills/nth/server/` (shared by trio + quartet).
 - MCP registrations: `~/.claude.json` — `nth-trio` (stdio) and/or `nth-qweb` (SSE).
-- Permissions: `~/.claude/settings.json` — 18 tools allowlisted as `trio_*` and/or `quartet_*`.
+- Permissions: `~/.claude/settings.json` — 23 tools allowlisted as `trio_*` and/or `quartet_*`.
 - Database: `~/.claude/nth/nth.db` (one per OS user; WSL and Windows do not share a DB).
 
 ## Operator Tooling

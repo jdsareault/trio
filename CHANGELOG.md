@@ -1,5 +1,29 @@
 # nth Changelog
 
+## Phase 4 — usable unified agent workspace (2026-08-01)
+
+- Added `server/nth_app.py` for macOS install, status, diagnostics, open, and
+  uninstall; fresh databases initialize automatically and launchd uses a
+  deterministic port with retry-safe service reloads.
+- Added runtime health reporting and spawn preflight for Claude Code.
+- Every managed agent now has a hidden private inbox, so it can be DMed without
+  first joining a public channel. Inbox traffic is privacy-enforced server-side.
+- Isolated the managed runtime behind `ClaudeRuntime`, preserving a clean future
+  extension point for Codex while keeping Phase 4 focused on a complete Claude
+  experience.
+- Added cross-process hub ownership so stale/legacy dashboards cannot spawn
+  duplicate managed agents.
+- Bridged normal Claude result output back into the originating Trio
+  conversation when the model does not explicitly post through MCP, without
+  duplicating MCP-authored replies.
+- Preapproved all 23 Trio MCP tools for headless agents and added DM, structured
+  question, and pound-reference permissions to the user installer.
+- Agent deletion now revokes its MCP sessions. Copy deployments safely replace
+  development symlinks.
+- Added Phase 4 coverage for first-run initialization, app lifecycle, runtime
+  health, private inboxes, singleton ownership, output bridging, session
+  revocation, and deployment repair.
+
 ## fork — visible message numbers (jdsareault fork)
 
 Agents constantly reference messages by number (`re #766`), but the dashboard never showed those ids — you had to guess. Now each message carries its **`#N` id** in a left gutter.
