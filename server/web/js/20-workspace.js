@@ -114,15 +114,24 @@
   async function createChannel() {
     modal('Create channel', '<label>Channel code<input name="code" required pattern="[a-z0-9][a-z0-9-]*"></label><label>Topic<input name="topic"></label>', async node => { const f=new FormData(node.querySelector('form')); try { await api.post('/api/channels', {code:f.get('code'),topic:f.get('topic')}); openChannel(f.get('code')); } catch (error) { toast(error.message || 'Could not create channel'); } });
   }
+  function viewArchiveChannel(code) { loadConversation(code, 'trio#' + code, 'Archived channel — read only', true, false); }
+  function viewArchiveDm(dm) { openDm(dm, true); }
   async function showArchives() {
     try {
       const [channels, dms] = await Promise.all([api.get('/api/channels?archived=1'), api.get('/api/dms?archived=1')]);
-      const lines = [...(channels.channels || []).map(c => `<li><button data-kind="channel" data-key="${esc(c.code)}">Restore</button> ${esc(c.code)}</li>`), ...(dms.your_dms || []).map(d => `<li><button data-kind="dm" data-key="${esc(d.key)}">Restore</button> ${esc(d.name || d.key)}</li>`)].join('') || '<li>Nothing archived.</li>';
+      const lines = [...(channels.channels || []).map(c => `<li>${esc(c.code)} <button data-kind="channel" data-key="${esc(c.code)}" data-action="view">View</button> <button data-kind="channel" data-key="${esc(c.code)}" data-action="restore">Restore</button></li>`), ...(dms.your_dms || []).map(d => `<li>${esc(d.name || d.key)} <button data-kind="dm" data-key="${esc(d.key)}" data-action="view">View</button> <button data-kind="dm" data-key="${esc(d.key)}" data-action="restore">Restore</button></li>`)].join('') || '<li>Nothing archived.</li>';
       let panel = $('trio-archives'); if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-archives'; document.body.append(panel); }
       panel.innerHTML = `<form method="dialog"><button class="modal-close">×</button><h2>Archives</h2><ul>${lines}</ul></form>`;
-      panel.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => archive(b.dataset.kind, b.dataset.key, false)));
+      panel.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
+        if (b.dataset.action === 'view') b.dataset.kind === 'channel' ? viewArchiveChannel(b.dataset.key) : viewArchiveDm(dms.your_dms?.find(d => d.key === b.dataset.key) || { key: b.dataset.key, channel: state.channel });
+        else archive(b.dataset.kind, b.dataset.key, false);
+      }));
       panel.showModal();
     } catch (error) { toast(error.message || 'Could not load archives'); }
+  }
+  async function archiveCurrent() {
+    if (state.dmKey) { await archive('dm', state.dmKey, !state.readOnly); state.readOnly = !state.readOnly; }
+    else if (state.channel) { await archive('channel', state.channel, !state.readOnly); state.readOnly = !state.readOnly; }
   }
   async function refresh() {
     try {
@@ -132,5 +141,5 @@
       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     } catch (error) { console.warn('workspace refresh failed', error); }
   }
-  Trio.workspace = {init() { refresh(); setInterval(refresh, 15000); }, render: renderRail, refresh, archive, groupNavigation, attentionCount, showView, modal, toast};
+  Trio.workspace = {init() { refresh(); setInterval(refresh, 15000); }, render: renderRail, refresh, archive, archiveCurrent, groupNavigation, attentionCount, showView, modal, toast};
 })();

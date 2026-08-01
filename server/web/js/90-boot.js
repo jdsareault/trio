@@ -20,6 +20,8 @@
       const btn = document.getElementById(id);
       if (btn) { btn.disabled = true; btn.title = (id === 'search-btn' ? 'Search' : 'Conversation details') + ' — not yet implemented'; }
     });
+    const archiveBtn = document.getElementById('archive-btn');
+    archiveBtn?.addEventListener('click', () => Trio.workspace?.archiveCurrent?.());
   }
   document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', boot, {once:true}) : boot();
 })();
