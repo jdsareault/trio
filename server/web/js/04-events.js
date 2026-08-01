@@ -7,7 +7,10 @@
   let state = 'connecting';
   function setConnection(text, failed = false) {
     const el = document.getElementById('h-conn');
-    if (el) { el.textContent = `● ${text}`; el.classList.toggle('bad', failed); }
+    const cls = failed ? (text === 'offline' ? 'offline' : 'reconnect') : 'live';
+    if (el) { el.textContent = `● ${text}`; el.className = 'conn ' + cls; }
+    if (Trio.store) Trio.store.set('connection', { text, failed, state });
+    if (failed) Trio.ui?.setLive?.('Connection ' + text);
   }
   function notify(newState, detail = {}) {
     state = newState;
@@ -31,8 +34,9 @@
     } catch (error) { console.warn('invalid Trio event', error); }
   }
   function startEvents(channel = null) {
-    if (!channel) { notify('offline', { reason: 'no channel' }); return; }
+    if (!channel) { setConnection('offline', true); notify('offline', { reason: 'no channel' }); return; }
     stream?.close();
+    setConnection('connecting');
     notify('connecting');
     stream = new EventSource(Trio.api.url('/api/events'));
     stream.onopen = () => { setConnection('live'); notify('live'); };
@@ -48,8 +52,8 @@
     workspaceStream.onmessage = onMessage;
     workspaceStream.onerror = () => { notify('workspace:reconnecting'); };
   }
-  function stopWorkspaceEvents() { workspaceStream?.close(); workspaceStream = null; notify('workspace:offline'); }
-  function stopEvents() { stream?.close(); stream = null; notify('offline', { reason: 'stopped' }); }
+  function stopWorkspaceEvents() { workspaceStream?.close(); workspaceStream = null; notify('workspace:offline'); setConnection('offline', true); }
+  function stopEvents() { stream?.close(); stream = null; setConnection('offline', true); notify('offline', { reason: 'stopped' }); }
   Trio.startEvents = startEvents;
   Trio.stopEvents = stopEvents;
   Trio.startWorkspaceEvents = startWorkspaceEvents;

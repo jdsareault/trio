@@ -88,6 +88,22 @@ calling `router.navigate('dm', {key})`.
 - Browser back/forward → `popstate` handler fires, route changes, conversation
   updates without reload.
 
+## Additional context from a separate LOTC pass at `d2582d7`
+
+A later review on the same branch (`phase-7-ui-updates` at `d2582d7`) confirmed
+the same router gap with two extra observations:
+
+1. `server/web/js/90-boot.js:28-30` deep-links a DM by reading
+   `Trio.state.conversation` (set by `00-core.js:10-15`) instead of the router's
+   parsed `state.route`. This means `?dm=<key>` deep links are handled by a
+   second, shadow routing path, not `03-router.js`.
+2. `server/web/js/20-workspace.js:42-61` (`openDm()`) sets `state.dmKey`,
+   `state.dmName`, `state.dmMemberIds`, etc., directly and calls
+   `loadConversation()` but never updates the URL. A refresh of a DM view
+   returns to the active channel or Home.
+
+Both reinforce that the router exists but is not the single source of truth.
+
 ## Reviewer notes
 
 Sauron, Frodo, and Gandalf all independently flagged this. Sauron noted the

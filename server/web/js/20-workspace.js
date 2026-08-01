@@ -111,8 +111,14 @@
     const actions = document.createElement('div'); actions.className = 'rail-actions';
     actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => { const panel = document.getElementById('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); }), railItem('Preferences', '', () => Trio.preferences?.panel?.())); rail.append(actions);
   }
+  function updateTopbar(title, subtitle) {
+    const h = $('h-channel'); const m = $('h-meta');
+    if (h) h.textContent = title || 'Atrium';
+    if (m) m.textContent = subtitle || '';
+  }
   function showView(view) {
     state.view = view;
+    updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
     document.querySelectorAll('[data-trio-view]').forEach(n => n.hidden = true);
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }

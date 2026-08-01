@@ -482,32 +482,32 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Map each selector block in `02B-atrium.html:10-1121` to a supported component, a later approved feature, or dead prototype CSS.
   - Record the owner file for supported selectors and delete only after equivalent current markup has a test/snapshot.
 
-- [ ] **2.2 Consolidate design tokens.**
+- [x] **2.2 Consolidate design tokens.**
   - Move typography, spacing, radii, motion, surfaces, text, borders, shadows, status, code, focus, and accent variants into `styles/tokens.css`/`00-tokens.css`.
   - Remove duplicate `:root` and theme/accent definitions from the shell layer.
   - Verify all light/dark × eucalyptus/indigo/plum combinations and system-font fallback when Google Fonts are unavailable.
 
-- [ ] **2.3 Establish CSS ownership and layer order.**
+- [x] **2.3 Establish CSS ownership and layer order.**
   - Split reset/base, shell/layout, shared components, feature styles, utilities, and responsive overrides into readable non-minified files.
   - Define one naming convention for component state (`is-open`, `is-active`, `data-state`, etc.) and remove conflicting bridge aliases.
   - Add a bundle check that rejects duplicate token definitions and missing style files.
 
-- [ ] **2.4 Port the durable shell markup.**
+- [x] **2.4 Port the durable shell markup.**
   - Update `server/web/index.html` with explicit mount points for rail sections, primary view, topbar actions, conversation body, composer, drawers, dialogs, and toasts.
   - Port semantic landmarks and prototype SVG icons; remove placeholder letters and glyphs.
   - Keep dynamic content rendered by features rather than copying mock fixtures.
 
-- [ ] **2.5 Match navigation hierarchy and state.**
+- [~] **2.5 Match navigation hierarchy and state.**
   - Render Home, Attention, Tasks, Channels, Agent↔Agent audit, Direct messages, Agent roster, Settings, and New agent in prototype order.
   - Show active route, unread/attention badges, status markers, previews, and intentional empty sections.
   - Populate owner identity from `/api/meta`, not hard-coded prototype data.
 
-- [ ] **2.6 Match the topbar and connection treatment.**
+- [~] **2.6 Match the topbar and connection treatment.**
   - Render conversation/view title, topic/subtitle, connection pill, participant face pile, Search, Details, and overflow actions from route state.
   - Give connection and agent states text/icon cues so color is never the only signal.
   - Test long channel names, missing topics, many participants, and reconnecting/offline states.
 
-- [ ] **2.7 Implement one responsive shell model.**
+- [~] **2.7 Implement one responsive shell model.**
   - Consolidate the duplicated 880px sidebar/scrim rules.
   - Define z-index tokens for sidebar, scrim, drawer, dialog, menu, toast, and search.
   - Support keyboard and pointer closing, body scroll lock, safe-area padding, and focus return.

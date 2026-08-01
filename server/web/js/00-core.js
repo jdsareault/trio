@@ -25,8 +25,9 @@
   root.actions = root.actions || {};
   root.boot = async function boot() {
     const meta = await root.api.get('/api/meta'); root.state.meta = meta;
+    root.state.operator = meta.operator || null;
     root.state.channel = root.state.channel || meta.default_channel || meta.channel || '';
-    if (root.store) root.store.set('session.channel', root.state.channel);
+    if (root.store) { root.store.set('session.operator', root.state.operator); root.store.set('session.channel', root.state.channel); }
     if (!root.state.channel && meta.multi) {
       const channels = await root.api.get('/api/channels', false);
       if (channels.channels?.[0]?.code) {
