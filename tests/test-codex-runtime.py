@@ -94,6 +94,15 @@ try:
     check("final agent messages bridge into the source channel",
           len(replies) == 2 and "hello" in replies[0] and "second" in replies[1])
 
+    image_path = str(tmp / "screenshot.png")
+    check("attachment message starts a Codex turn",
+          manager.feed("ag1", "alpha", "inspect this", attachments=[image_path]))
+    inputs = manager._client.request("fake/last-input").get("input", [])
+    check("local chat attachments become native Codex image inputs",
+          any(i.get("type") == "localImage" and i.get("path") == image_path
+              for i in inputs))
+    manager._client.request("fake/complete")
+
     check("compact maps to the native thread operation", manager.compact("ag1"))
     check("hibernate unloads but retains the thread", manager.hibernate("ag1")
           and not manager.is_running("ag1"))

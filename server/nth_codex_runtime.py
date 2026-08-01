@@ -515,8 +515,9 @@ class CodexRuntimeManager:
             self._set_state(agent_id, "idle", runtime_ref=thread_id)
             return CodexAgentHandle(self, agent_id, thread_id)
 
-    def feed(self, agent_id: str, channel: str, text: str) -> bool:
-        context = self._message_context(agent_id, channel, text)
+    def feed(self, agent_id: str, channel: str, text: str,
+             attachments: Optional[List[str]] = None) -> bool:
+        context = self._message_context(agent_id, channel, text, attachments or [])
         with self._agent_lock(agent_id):
             if not self.is_running(agent_id):
                 if self.wake(agent_id) is None:
@@ -527,7 +528,8 @@ class CodexRuntimeManager:
                     return True
             return self._start_turn(agent_id, context)
 
-    def _message_context(self, agent_id: str, channel: str, text: str) -> Dict[str, Any]:
+    def _message_context(self, agent_id: str, channel: str, text: str,
+                         attachments: List[str]) -> Dict[str, Any]:
         baseline = 0
         try:
             db = self._db()
@@ -539,7 +541,7 @@ class CodexRuntimeManager:
         except sqlite3.Error:
             pass
         return {"agent_id": agent_id, "channel": channel, "text": text,
-                "baseline": baseline}
+                "attachments": list(attachments), "baseline": baseline}
 
     def _start_turn(self, agent_id: str, context: Dict[str, Any]) -> bool:
         # A queued message may wait behind an earlier turn. Establish duplicate-
@@ -562,7 +564,10 @@ class CodexRuntimeManager:
             return False
         params: Dict[str, Any] = {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": f"[#{context['channel']}] {context['text']}"}],
+            "input": ([{"type": "text", "text":
+                       f"[#{context['channel']}] {context['text']}"}] +
+                      [{"type": "localImage", "path": path}
+                       for path in context.get("attachments", [])]),
         }
         if row is not None and row["effort"]:
             params["effort"] = row["effort"]

@@ -645,12 +645,15 @@ class AgentSupervisor:
             self._set_state(agent_id, ST_RUNNING)
         return ok
 
-    def feed(self, agent_id: str, channel: str, text: str) -> bool:
+    def feed(self, agent_id: str, channel: str, text: str,
+             attachments: Optional[List[str]] = None) -> bool:
         """Route an inbound channel message into the agent, channel-tagged
         (hybrid context). The agent replies to a specific channel via its
         injected Trio MCP. Returns False if the agent isn't live (the hub is
         responsible for waking a sleeping agent first — see design doc)."""
         with self._plock(agent_id):
+            if attachments:
+                text += "\n\nAttached local files:\n" + "\n".join(attachments)
             with self._lock:
                 proc = self._procs.get(agent_id)
             if not proc:

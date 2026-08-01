@@ -14,6 +14,7 @@ next_thread = 1
 hold_turns = "--hold" in sys.argv
 held = []
 last_approval = ""
+last_input = []
 
 
 TOOL_NAMES = (
@@ -87,7 +88,8 @@ for raw in sys.stdin:
         turn_id = "turn_" + str(request_id)
         threads.setdefault(tid, {})["active"] = turn_id
         text = ""
-        for item in params.get("input") or []:
+        last_input = params.get("input") or []
+        for item in last_input:
             if item.get("type") == "text":
                 text += item.get("text") or ""
         send({"id": request_id, "result": {"turn": {
@@ -111,6 +113,8 @@ for raw in sys.stdin:
         send({"id": request_id, "result": {"approvalId": 5000}})
     elif method == "fake/approval-result":
         send({"id": request_id, "result": {"decision": last_approval}})
+    elif method == "fake/last-input":
+        send({"id": request_id, "result": {"input": last_input}})
     elif method == "fake/crash":
         raise SystemExit(7)
     elif method == "turn/interrupt":

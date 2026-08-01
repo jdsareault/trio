@@ -2056,12 +2056,20 @@ class AgentRouter(threading.Thread):
                     continue  # never feed an agent its own message
                 # Hand off to the worker (wake if needed, then feed) — the row is
                 # queued, not dropped, so a wake failure doesn't silently lose it.
-                self._q.put((aid, m["channel"], f'{m["member_name"]}: {m["content"]}'))
+                attachments = []
+                try:
+                    attachments = [r[0] for r in db.execute(
+                        "SELECT path FROM attachments WHERE message_id=? ORDER BY id",
+                        (m["id"],)).fetchall() if r[0]]
+                except sqlite3.OperationalError:
+                    pass
+                self._q.put((aid, m["channel"],
+                             f'{m["member_name"]}: {m["content"]}', attachments))
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                aid, chan, text = self._q.get(timeout=0.5)
+                aid, chan, text, attachments = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
@@ -2081,7 +2089,7 @@ class AgentRouter(threading.Thread):
                 if chan == AGENT_INBOX_CHANNEL:
                     text = ("Private inbox message. Reply privately in "
                             f"#{AGENT_INBOX_CHANNEL} using trio_dm. " + text)
-                self.sup.feed(aid, chan, text)
+                self.sup.feed(aid, chan, text, attachments=attachments)
             except Exception:
                 pass
 
