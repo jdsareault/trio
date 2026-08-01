@@ -18,7 +18,7 @@
 
 .conversation-shell.workspace-page{grid-template-rows:auto minmax(0,1fr)}
 .conversation-shell.workspace-page .messages,.conversation-shell.workspace-page .composer-shell,.conversation-shell.workspace-page .private-banner,.conversation-shell.workspace-page .jump-latest{display:none}
-.workspace-view{position:static;inset:auto;grid-column:1;grid-row:2;min-height:0;overflow:auto;background:var(--bg);padding:28px 34px 60px;z-index:auto}
+.workspace-view{position:static;inset:auto;grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto;margin:0;border:0;border-radius:0;background:var(--bg);padding:28px 34px 60px;box-shadow:none;z-index:auto}
 .workspace-view>*{max-width:1040px;margin-left:auto;margin-right:auto}
 .workspace-view h2{font-family:var(--font-display);font-size:30px;letter-spacing:-.02em}
 .workspace-view .view-hero{margin-bottom:20px}
