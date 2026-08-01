@@ -2126,7 +2126,8 @@ class AgentRouter(threading.Thread):
                     pass
                 try:
                     self._q.put_nowait((aid, m["channel"],
-                                        f'{m["member_name"]}: {m["content"]}', attachments))
+                                        f'{m["member_name"]}: {m["content"]}', attachments,
+                                        m["id"], m["member_id"]))
                 except queue.Full:
                     sys.stderr.write(
                         f"[nth_web] AgentRouter queue full — dropping message for agent {aid}\n")
@@ -2134,7 +2135,8 @@ class AgentRouter(threading.Thread):
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                aid, chan, text, attachments = self._q.get(timeout=0.5)
+                aid, chan, text, attachments, source_message_id, source_sender = \
+                    self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
@@ -2154,7 +2156,9 @@ class AgentRouter(threading.Thread):
                 if chan == AGENT_INBOX_CHANNEL:
                     text = ("Private inbox message. Reply privately in "
                             f"#{AGENT_INBOX_CHANNEL} using trio_dm. " + text)
-                self.sup.feed(aid, chan, text, attachments=attachments)
+                self.sup.feed(aid, chan, text, attachments=attachments,
+                             source_message_id=source_message_id,
+                             source_sender=source_sender)
             except Exception as e:
                 sys.stderr.write(f"[nth_web] AgentRouter worker failed for agent {aid}: {e}\n")
 

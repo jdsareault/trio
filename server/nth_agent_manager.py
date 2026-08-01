@@ -93,13 +93,16 @@ class UnifiedAgentSupervisor:
         return manager.wake(agent_id, **kwargs) if manager else None
 
     def feed(self, agent_id: str, channel: str, text: str,
-             attachments: Optional[List[str]] = None) -> bool:
+             attachments: Optional[List[str]] = None,
+             source_message_id: int = 0, source_sender: str = "") -> bool:
         manager = self.manager_for(agent_id)
         if manager is self.codex:
             return self.codex.feed(
-                agent_id, channel, text, attachments=attachments or [])
+                agent_id, channel, text, attachments=attachments or [],
+                source_message_id=source_message_id, source_sender=source_sender)
         return bool(manager and manager.feed(
-            agent_id, channel, text, attachments=attachments or []))
+            agent_id, channel, text, attachments=attachments or [],
+            source_message_id=source_message_id, source_sender=source_sender))
 
     def hibernate(self, agent_id: str) -> bool:
         manager = self.manager_for(agent_id)

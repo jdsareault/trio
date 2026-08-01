@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from nth_constants import AGENT_INBOX_CHANNEL, parse_recipients
+from nth_constants import AGENT_INBOX_CHANNEL
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
@@ -438,15 +438,14 @@ class AgentSupervisor:
                 return
             recipients: List[str] = []
             if channel == AGENT_INBOX_CHANNEL:
-                recent = db.execute(
-                    "SELECT member_id, recipients FROM messages WHERE channel=? "
-                    "AND member_id != ? ORDER BY id DESC LIMIT 100",
-                    (channel, agent_id)).fetchall()
-                for prior in recent:
-                    if agent_id in parse_recipients(prior["recipients"]):
-                        recipients = [prior["member_id"]]
-                        break
-                if not recipients:
+                # Use the specific message THIS turn was fed to answer — never
+                # infer the recipient by scanning current inbox history, which
+                # can pick up a different, later sender's DM (see bug link
+                # above).
+                source_sender = context.get("source_sender")
+                if source_sender:
+                    recipients = [source_sender]
+                else:
                     recipients = [r["id"] for r in db.execute(
                         "SELECT id FROM members WHERE channel=? AND kind='human' "
                         "AND active=1 ORDER BY joined_at", (channel,)).fetchall()]
@@ -648,11 +647,18 @@ class AgentSupervisor:
         return ok
 
     def feed(self, agent_id: str, channel: str, text: str,
-             attachments: Optional[List[str]] = None) -> bool:
+             attachments: Optional[List[str]] = None,
+             source_message_id: int = 0, source_sender: str = "") -> bool:
         """Route an inbound channel message into the agent, channel-tagged
         (hybrid context). The agent replies to a specific channel via its
         injected Trio MCP. Returns False if the agent isn't live (the hub is
-        responsible for waking a sleeping agent first — see design doc)."""
+        responsible for waking a sleeping agent first — see design doc).
+
+        source_message_id/source_sender identify the specific inbound message
+        this turn is answering, so a plain (non-Trio-tool) result can be
+        bridged to the correct private recipient even if a second inbox
+        message from someone else arrives before this turn's result — see
+        bugs/2026-08-01-private-fallback-reply-wrong-recipient.md."""
         with self._plock(agent_id):
             if attachments:
                 text += "\n\nAttached local files:\n" + "\n".join(attachments)
@@ -670,7 +676,9 @@ class AgentSupervisor:
                     db.close()
             except sqlite3.Error:
                 pass
-            context = {"channel": channel, "baseline": baseline}
+            context = {"channel": channel, "baseline": baseline,
+                      "source_message_id": source_message_id,
+                      "source_sender": source_sender}
             with self._lock:
                 self._pending.setdefault(agent_id, collections.deque()).append(context)
             ok = proc.send_user(f"[#{channel}] {text}")

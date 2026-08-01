@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from nth_constants import AGENT_INBOX_CHANNEL, parse_recipients
+from nth_constants import AGENT_INBOX_CHANNEL
 
 
 STDERR_TAIL_LINES = 200
@@ -527,8 +527,10 @@ class CodexRuntimeManager:
             return CodexAgentHandle(self, agent_id, thread_id)
 
     def feed(self, agent_id: str, channel: str, text: str,
-             attachments: Optional[List[str]] = None) -> bool:
-        context = self._message_context(agent_id, channel, text, attachments or [])
+             attachments: Optional[List[str]] = None,
+             source_message_id: int = 0, source_sender: str = "") -> bool:
+        context = self._message_context(agent_id, channel, text, attachments or [],
+                                        source_message_id, source_sender)
         with self._agent_lock(agent_id):
             if not self.is_running(agent_id):
                 if self.wake(agent_id) is None:
@@ -540,7 +542,8 @@ class CodexRuntimeManager:
             return self._start_turn(agent_id, context)
 
     def _message_context(self, agent_id: str, channel: str, text: str,
-                         attachments: List[str]) -> Dict[str, Any]:
+                         attachments: List[str], source_message_id: int = 0,
+                         source_sender: str = "") -> Dict[str, Any]:
         baseline = 0
         try:
             db = self._db()
@@ -552,7 +555,8 @@ class CodexRuntimeManager:
         except sqlite3.Error:
             pass
         return {"agent_id": agent_id, "channel": channel, "text": text,
-                "attachments": list(attachments), "baseline": baseline}
+                "attachments": list(attachments), "baseline": baseline,
+                "source_message_id": source_message_id, "source_sender": source_sender}
 
     def _start_turn(self, agent_id: str, context: Dict[str, Any]) -> bool:
         # A queued message may wait behind an earlier turn. Establish duplicate-
@@ -945,14 +949,13 @@ class CodexRuntimeManager:
                 return
             recipients: List[str] = []
             if context["channel"] == AGENT_INBOX_CHANNEL:
-                recent = db.execute(
-                    "SELECT member_id, recipients FROM messages WHERE channel=? "
-                    "AND member_id != ? ORDER BY id DESC LIMIT 100",
-                    (context["channel"], agent_id)).fetchall()
-                for prior in recent:
-                    if agent_id in parse_recipients(prior["recipients"]):
-                        recipients = [prior["member_id"]]
-                        break
+                # Use the specific message THIS turn was fed to answer — never
+                # infer the recipient by scanning current inbox history, which
+                # can pick up a different, later sender's DM (see
+                # bugs/2026-08-01-private-fallback-reply-wrong-recipient.md).
+                source_sender = context.get("source_sender")
+                if source_sender:
+                    recipients = [source_sender]
                 if not recipients:
                     recipients = [r["id"] for r in db.execute(
                         "SELECT id FROM members WHERE channel=? AND kind='human' "
