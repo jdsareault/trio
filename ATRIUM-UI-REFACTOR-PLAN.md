@@ -478,7 +478,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** create a stable visual base before styling every feature independently.  
 **Prerequisite:** Phase 1 router, feature mount points, shared UI primitives, and route state are stable.
 
-- [ ] **2.1 Inventory prototype styles against shipped markup.**
+- [x] **2.1 Inventory prototype styles against shipped markup.**
   - Map each selector block in `02B-atrium.html:10-1121` to a supported component, a later approved feature, or dead prototype CSS.
   - Record the owner file for supported selectors and delete only after equivalent current markup has a test/snapshot.
 
