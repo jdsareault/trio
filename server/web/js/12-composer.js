@@ -87,7 +87,7 @@
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
     } catch (error) {
-      window.alert('Message not sent: ' + error.message); return false;
+      Trio.ui.toast('Message not sent: ' + error.message); return false;
     } finally { updateSendState(); }
   }
   function stopTracks() { stream?.getTracks?.().forEach(track => track.stop()); stream = null; }
@@ -109,21 +109,21 @@
     stream = await navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
     recorder = new MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } catch (error) { if (window.SpeechRecognition || window.webkitSpeechRecognition) { window.alert((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => window.alert(fallback.message)); } else window.alert(error.message || 'Transcription failed'); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
+    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } catch (error) { if (window.SpeechRecognition || window.webkitSpeechRecognition) { Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => Trio.ui.toast(fallback.message)); } else Trio.ui.toast(error.message || 'Transcription failed'); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
     recorder.start(); document.body.classList.add('dictating');
   }
-  async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { window.alert(error.message); } }
+  async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { Trio.ui.toast(error.message); } }
   function init() {
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
     text.addEventListener('input', updateSendState);
     text.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } });
     sendButton?.addEventListener('click', send);
-    attach?.addEventListener('click', () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => window.alert(error.message)); picker.click(); });
+    attach?.addEventListener('click', () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => Trio.ui.toast(error.message)); picker.click(); });
     const dictation = Trio.preferences?.read?.().dictation !== false;
     const dictateBtn = byId('dictate-btn');
     if (dictateBtn) { dictateBtn.hidden = !dictation; }
-    if (dictation && dictateBtn) { dictateBtn.addEventListener('click', () => toggleDictation().catch(error => window.alert(error?.message || 'Dictation failed'))); }
+    if (dictation && dictateBtn) { dictateBtn.addEventListener('click', () => toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed'))); }
     renderTargets(); renderAttachments(); updateSendState();
   }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });

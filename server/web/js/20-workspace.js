@@ -79,23 +79,13 @@
       return api.get('/api/dms?archived=1&with=' + encodeURIComponent(key));
     }).then(data => {
       if (data) { const dm = (data.your_dms || []).find(d => d.key === key); if (dm) openDm(dm, true); }
-    }).catch(error => toast(error.message || 'Could not load DM'));
+    }).catch(error => Trio.ui.toast(error.message || 'Could not load DM'));
   }
-  function toast(message) {
-    let host = $('trio-toasts');
-    if (!host) { host = document.createElement('div'); host.id = 'trio-toasts'; host.className = 'toast-wrap'; document.body.append(host); }
-    const node = document.createElement('div'); node.className = 'toast'; node.textContent = message; host.append(node);
-    setTimeout(() => node.remove(), 3500);
-  }
-  function modal(title, body, submit) {
-    let node = $('trio-control-modal');
-    if (!node) { node = document.createElement('dialog'); node.id = 'trio-control-modal'; document.body.append(node); }
-    node.innerHTML = `<form method="dialog" class="control-modal"><button class="modal-close" value="cancel">×</button><h2>${esc(title)}</h2>${body}<footer><button value="cancel">Cancel</button><button value="default" class="primary">Save</button></footer></form>`;
-    node.addEventListener('close', () => { if (node.returnValue === 'default') submit?.(node); }, {once:true}); node.showModal();
-  }
+  const toast = m => Trio.ui.toast(m);
+  const modal = (t, b, s) => Trio.ui.modal(t, b, s);
   async function archive(kind, key, archived) {
-    try { await api.post('/api/archives', {kind, key, archived}); await refresh(); toast(archived ? 'Archived' : 'Restored'); }
-    catch (error) { toast(error.message || 'Could not update archive'); }
+    try { await api.post('/api/archives', {kind, key, archived}); await refresh(); Trio.ui.toast(archived ? 'Archived' : 'Restored'); }
+    catch (error) { Trio.ui.toast(error.message || 'Could not update archive'); }
   }
   async function resolveApproval(id, decision) {
     if (!id) return;
@@ -106,7 +96,7 @@
       if (a) { a.status = 'resolved'; a.resolved_decision = decision; }
       showView('attention');
       Trio.workspace?.refresh?.();
-    } catch (error) { toast(error.message || 'Could not resolve approval'); }
+    } catch (error) { Trio.ui.toast(error.message || 'Could not resolve approval'); }
   }
   function railItem(label, subtitle, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'rail-item';
