@@ -1682,6 +1682,20 @@ def public_agent_channels(conn: sqlite3.Connection, agent_id: str) -> List[str]:
         "ORDER BY channel", (agent_id, AGENT_INBOX_CHANNEL)).fetchall()]
 
 
+def dm_thread_key(message, operator_id: str) -> Tuple[str, List[str]]:
+    """Return the unified-inbox key and peer ids for one operator DM row."""
+    recipients = parse_recipients(message["recipients"])
+    participants = set(recipients)
+    participants.add(message["member_id"])
+    if operator_id not in participants:
+        return "", []
+    others = sorted(participants - {operator_id})
+    if not others:
+        return "", []
+    key = others[0] if len(others) == 1 else "group:" + ",".join(others)
+    return key, others
+
+
 def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
     """Create the private DM transport and place every managed agent in it.
 
@@ -1818,6 +1832,21 @@ def ensure_agents_schema(conn) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_channel ON agent_channels (channel)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_member ON agent_channels (member_id)")
+
+
+def ensure_archive_schema(conn) -> None:
+    """Add reversible channel and per-operator DM archive metadata."""
+    for column in ("archived_at", "archived_by"):
+        try:
+            conn.execute(f"ALTER TABLE channels ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dm_archives (
+            owner_id TEXT NOT NULL, thread_key TEXT NOT NULL,
+            archived_through_id INTEGER NOT NULL, archived_at TEXT NOT NULL,
+            PRIMARY KEY (owner_id, thread_key))
+    """)
 
 
 def initialize_database(db_path: Path) -> bool:
@@ -2339,7 +2368,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "server_host": socket.gethostname(),
             }, set_cookie_token=token if is_new else None)
         elif path == "/api/channels":
-            self._handle_channels()
+            self._handle_channels(parsed)
         elif path == "/api/dms":
             self._handle_dms(parsed)
         elif path == "/api/agents":
@@ -2383,6 +2412,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/channels":
             self._handle_channel_create()
+        elif parsed.path == "/api/archives":
+            self._handle_archive_update()
         elif parsed.path == "/api/agents":
             self._handle_agent_create()
         elif (parsed.path.startswith("/api/agents/")
@@ -3034,7 +3065,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "query": q, "count": len(results), "results": results})
 
-    def _handle_channels(self) -> None:
+    def _handle_channels(self, parsed) -> None:
         """Read-only channel list for the sidebar: every channel in the DB with
         active-member count, last-activity timestamp, and a short preview of the
         most recent message. Powers the unified multi-channel client. Mirrors
@@ -3048,18 +3079,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if not is_all_seeing(ident.member_id):
             self._error(403, "operator only")
             return
+        archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
-                "SELECT c.code, c.status, c.pinned_message_id, "
+                "SELECT c.code, c.status, c.pinned_message_id, c.archived_at, "
                 "  (SELECT COUNT(*) FROM members m "
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
                 "     WHERE msg.channel = c.code) AS last_at "
                 "FROM channels c WHERE c.code != ? "
+                + ("AND c.archived_at IS NOT NULL " if archived
+                   else "AND c.archived_at IS NULL ") +
                 "ORDER BY last_at DESC",
                 (AGENT_INBOX_CHANNEL,)).fetchall()
             channels = []
@@ -3082,6 +3116,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "members": r["members"],
                     "last_at": last_at,
                     "preview": preview,
+                    "archived_at": r["archived_at"],
                 })
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
@@ -3092,7 +3127,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
-        self._json({"ok": True, "count": len(channels), "channels": channels})
+        self._json({"ok": True, "archived": archived,
+                    "count": len(channels), "channels": channels})
 
     def _handle_channel_create(self) -> None:
         """Create a channel from the operator console.
@@ -3162,6 +3198,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         operator_id = ident.member_id
         qs = parse_qs(parsed.query)
         with_id = (qs.get("with", [""])[0] or "").strip()
+        archived = (qs.get("archived", ["0"])[0] == "1")
         db = sqlite3.connect(str(self.db_path), timeout=5)
         db.row_factory = sqlite3.Row
         try:
@@ -3177,23 +3214,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "SELECT id, MAX(name) AS name FROM members GROUP BY id").fetchall():
                 names.setdefault(r["id"], r["name"] or r["id"])
             names[operator_id] = ident.display_name
+            archive_rows = db.execute(
+                "SELECT thread_key, archived_through_id, archived_at "
+                "FROM dm_archives WHERE owner_id=?", (operator_id,)).fetchall()
+            archive_map = {r["thread_key"]: r for r in archive_rows}
 
             yours: Dict[str, Dict[str, Any]] = {}
             agent_threads: Dict[str, Dict[str, Any]] = {}
-            merged = []
             for r in rows:
                 recips = parse_recipients(r["recipients"])
                 participants = set(recips)
                 participants.add(r["member_id"])
-                if with_id and operator_id in participants and with_id in participants:
-                    evt = _message_event(db, r)
-                    evt["channel"] = r["channel"]
-                    merged.append(evt)
                 if operator_id in participants:
-                    others = sorted(participants - {operator_id})
-                    if not others:
+                    key, others = dm_thread_key(r, operator_id)
+                    if not key:
                         continue
-                    key = others[0] if len(others) == 1 else "group:" + ",".join(others)
                     if key not in yours:
                         yours[key] = {
                             "key": key, "member_ids": others,
@@ -3214,6 +3249,37 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
                         }
 
+            for key, thread in yours.items():
+                marker = archive_map.get(key)
+                thread["archived"] = bool(
+                    marker and thread["last_id"] <= marker["archived_through_id"])
+                thread["archived_at"] = marker["archived_at"] if thread["archived"] else None
+
+            yours = {key: thread for key, thread in yours.items()
+                     if bool(thread["archived"]) == archived}
+
+            merged = []
+            if with_id:
+                requested_key = with_id
+                marker = archive_map.get(requested_key)
+                # Locate the thread's real latest id rather than using the
+                # global message watermark; group and cross-channel DMs share
+                # storage.
+                latest = 0
+                for r in rows:
+                    key, _others = dm_thread_key(r, operator_id)
+                    if key == requested_key:
+                        latest = max(latest, r["id"])
+                thread_is_archived = bool(
+                    marker and latest and latest <= marker["archived_through_id"])
+                if thread_is_archived == archived:
+                    for r in reversed(rows):
+                        key, _others = dm_thread_key(r, operator_id)
+                        if key == requested_key:
+                            evt = _message_event(db, r)
+                            evt["channel"] = r["channel"]
+                            merged.append(evt)
+
             targets = []
             agent_rows = db.execute(
                 "SELECT id, name, state, model FROM agents ORDER BY name COLLATE NOCASE"
@@ -3229,15 +3295,101 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         finally:
             db.close()
-        merged.reverse()
         self._json({
             "ok": True,
+            "archived": archived,
             "your_dms": list(yours.values()),
             "agent_dms": list(agent_threads.values()),
             "targets": targets,
             "with": with_id,
             "messages": merged,
         })
+
+    def _handle_archive_update(self) -> None:
+        """Archive or restore one channel or operator DM thread.
+
+        Channel archives are navigational metadata: they preserve the channel,
+        membership, messages, and runtime state. DM archives use a message-id
+        watermark so a newly received message automatically returns the thread
+        to the active inbox without deleting the archive record first.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        kind = str(body.get("kind") or "").strip().lower()
+        key = str(body.get("key") or "").strip()
+        archived = body.get("archived")
+        if kind not in ("channel", "dm"):
+            self._error(400, "kind must be channel or dm")
+            return
+        if not key or len(key) > 512:
+            self._error(400, "archive key is required")
+            return
+        if not isinstance(archived, bool):
+            self._error(400, "archived must be true or false")
+            return
+        if kind == "channel" and key == AGENT_INBOX_CHANNEL:
+            self._error(400, "the internal agent inbox cannot be archived")
+            return
+
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            now = now_iso()
+            if kind == "channel":
+                exists = db.execute(
+                    "SELECT 1 FROM channels WHERE code=?", (key,)).fetchone()
+                if exists is None:
+                    self._error(404, "channel not found")
+                    return
+                if archived:
+                    db.execute(
+                        "UPDATE channels SET archived_at=?, archived_by=?, "
+                        "updated_at=? WHERE code=?",
+                        (now, ident.member_id, now, key))
+                else:
+                    db.execute(
+                        "UPDATE channels SET archived_at=NULL, archived_by=NULL, "
+                        "updated_at=? WHERE code=?", (now, key))
+            else:
+                latest_id = 0
+                rows = db.execute(
+                    "SELECT id, member_id, recipients FROM messages "
+                    "WHERE recipients IS NOT NULL AND recipients NOT IN ('', '[]') "
+                    "ORDER BY id DESC"
+                ).fetchall()
+                for row in rows:
+                    thread_key, _others = dm_thread_key(row, ident.member_id)
+                    if thread_key == key:
+                        latest_id = row["id"]
+                        break
+                if not latest_id:
+                    self._error(404, "DM thread not found")
+                    return
+                if archived:
+                    db.execute(
+                        "INSERT INTO dm_archives "
+                        "(owner_id, thread_key, archived_through_id, archived_at) "
+                        "VALUES (?, ?, ?, ?) ON CONFLICT(owner_id, thread_key) "
+                        "DO UPDATE SET archived_through_id=excluded.archived_through_id, "
+                        "archived_at=excluded.archived_at",
+                        (ident.member_id, key, latest_id, now))
+                else:
+                    db.execute(
+                        "DELETE FROM dm_archives WHERE owner_id=? AND thread_key=?",
+                        (ident.member_id, key))
+            db.commit()
+        except sqlite3.Error as exc:
+            self._error(500, f"db error: {exc}")
+            return
+        finally:
+            db.close()
+        self._json({"ok": True, "kind": kind, "key": key,
+                    "archived": archived})
 
     # ── agent control plane (operator-only) ──
     def _require_operator(self):
@@ -11034,6 +11186,7 @@ def main() -> int:
     try:
         ensure_ask_columns(_mig)
         ensure_agents_schema(_mig)
+        ensure_archive_schema(_mig)
         ensure_agent_inboxes(_mig)
         _mig.commit()
     except sqlite3.Error as e:

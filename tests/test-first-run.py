@@ -38,6 +38,11 @@ try:
               <= tables)
         check("managed-agent tables exist",
               {"agents", "agent_channels", "agent_runtime_history"} <= tables)
+        check("archive metadata table exists", "dm_archives" in tables)
+        channel_cols = {r[1] for r in db.execute(
+            "PRAGMA table_info(channels)").fetchall()}
+        check("channel archive columns exist",
+              {"archived_at", "archived_by"} <= channel_cols)
         cols = {r[1] for r in db.execute("PRAGMA table_info(messages)").fetchall()}
         check("current DM and interaction columns exist",
               {"recipients", "reply_to", "choices", "selection", "confidence"}

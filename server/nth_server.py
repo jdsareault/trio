@@ -285,6 +285,8 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     # Migration: add pinned_message_id column (v2 feature)
     for col, table, defn in [
         ("pinned_message_id", "channels", "INTEGER"),
+        ("archived_at", "channels", "TEXT"),
+        ("archived_by", "channels", "TEXT"),
         ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
         # v7.1: #pound references — "talked about" without pinging. Separate
         # from mentions so the monitor can choose to notify on @ only while
@@ -351,6 +353,15 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
         except sqlite3.OperationalError:
             pass  # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dm_archives (
+            owner_id            TEXT NOT NULL,
+            thread_key          TEXT NOT NULL,
+            archived_through_id INTEGER NOT NULL,
+            archived_at         TEXT NOT NULL,
+            PRIMARY KEY (owner_id, thread_key)
+        )
+    """)
     # v6: sessions table. Per-session watermark + capability role so
     # sub-agents spawned with a read_only token cannot forge posts under
     # the parent's member_id. member_id stays the public identity;
