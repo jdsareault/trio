@@ -29,6 +29,12 @@
     const node = document.createElement('div'); node.className = 'toast'; node.textContent = message; host.append(node);
     setTimeout(() => node.remove(), 3500);
   }
+  function modal(title, body, submit) {
+    let node = $('trio-control-modal');
+    if (!node) { node = document.createElement('dialog'); node.id = 'trio-control-modal'; document.body.append(node); }
+    node.innerHTML = `<form method="dialog" class="control-modal"><button class="modal-close" value="cancel">×</button><h2>${esc(title)}</h2>${body}<footer><button value="cancel">Cancel</button><button value="default" class="primary">Save</button></footer></form>`;
+    node.addEventListener('close', () => { if (node.returnValue === 'default') submit?.(node); }, {once:true}); node.showModal();
+  }
   async function archive(kind, key, archived) {
     try { await api.post('/api/archives', {kind, key, archived}); await refresh(); toast(archived ? 'Archived' : 'Restored'); }
     catch (error) { toast(error.message || 'Could not update archive'); }
@@ -65,9 +71,7 @@
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
   }
   async function createChannel() {
-    const code = prompt('Channel code (lowercase letters, digits, hyphens):'); if (!code) return;
-    const topic = prompt('Topic (optional):') || '';
-    try { await api.post('/api/channels', {code, topic}); openChannel(code); } catch (error) { toast(error.message || 'Could not create channel'); }
+    modal('Create channel', '<label>Channel code<input name="code" required pattern="[a-z0-9][a-z0-9-]*"></label><label>Topic<input name="topic"></label>', async node => { const f=new FormData(node.querySelector('form')); try { await api.post('/api/channels', {code:f.get('code'),topic:f.get('topic')}); openChannel(f.get('code')); } catch (error) { toast(error.message || 'Could not create channel'); } });
   }
   async function showArchives() {
     try {
@@ -86,5 +90,5 @@
       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     } catch (error) { console.warn('workspace refresh failed', error); }
   }
-  Trio.workspace = {init() { refresh(); setInterval(refresh, 15000); }, render: renderRail, refresh, archive, groupNavigation, attentionCount, showView};
+  Trio.workspace = {init() { refresh(); setInterval(refresh, 15000); }, render: renderRail, refresh, archive, groupNavigation, attentionCount, showView, modal, toast};
 })();
