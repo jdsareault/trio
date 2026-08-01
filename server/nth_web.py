@@ -3422,11 +3422,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
             ok = True
         elif action == "delete":
             sup.stop(agent_id)
-            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
-                db.execute("DELETE FROM agent_channels WHERE agent_id = ?", (agent_id,))
-                db.execute("UPDATE members SET active = 0 WHERE id = ?", (agent_id,))
-                db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+                with db:
+                    db.execute("DELETE FROM agent_channels WHERE agent_id = ?", (agent_id,))
+                    db.execute("UPDATE members SET active = 0 WHERE id = ?", (agent_id,))
+                    db.execute(
+                        "UPDATE sessions SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL",
+                        (now_iso(), agent_id))
+                    db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
             finally:
                 db.close()
             ok = True

@@ -121,13 +121,20 @@ try:
           and not web.get_supervisor().is_running(aid))
 
     # ── delete ──
+    db = sqlite3.connect(str(srv.DB_PATH))
+    db.execute("INSERT INTO sessions (session_token,member_id,channel,role,fingerprint,connected_at,last_seen) "
+               "VALUES ('delete-token',?,'chan-x','primary','delete-test',?,?)",
+               (aid, srv.now_iso(), srv.now_iso()))
+    db.commit(); db.close()
     st, _ = http(port, f"/api/agents/{aid}/delete", "POST")
     check("delete: 200 + agents row gone", st == 200 and row(aid) is None)
     db = sqlite3.connect(str(srv.DB_PATH))
     left = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=?", (aid,)).fetchone()[0]
     active = db.execute("SELECT active FROM members WHERE id=?", (aid,)).fetchone()
+    revoked = db.execute("SELECT revoked_at FROM sessions WHERE session_token='delete-token'").fetchone()
     db.close()
     check("delete: placements removed, member deactivated", left == 0 and active and active[0] == 0)
+    check("delete: outstanding MCP sessions revoked", revoked and bool(revoked[0]))
 
     # ── thinking-level (effort) ──
     st, d = http(port, "/api/agents", "POST",
