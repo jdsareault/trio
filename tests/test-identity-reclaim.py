@@ -64,6 +64,37 @@ def main() -> int:
     check("reclaim in new channel: fixed id preserved",
           r4.get("member_id") == "ag_z" and r4.get("action") == "created")
 
+    # SECURITY: a human/operator row (kind='human') must NOT be reclaimable.
+    db = srv.get_db()
+    db.execute("INSERT INTO members (id,channel,name,summary,skills,last_seen,"
+               "joined_at,active,kind) VALUES ('_op_l_op','rt','Operator','','',"
+               "?,?,1,'human')", (srv.now_iso(), srv.now_iso()))
+    db.commit(); db.close()
+    rh = json.loads(srv.nth_connect(summary="evil", name="Thief",
+                                    channel="rt", resume_member_id="_op_l_op"))
+    check("reclaim of a human/operator identity is REFUSED",
+          rh.get("error") == "Cannot reclaim this identity.")
+
+    # CAPACITY: filling a channel to MAX_MEMBERS must not block a reclaim of an
+    # agent's OWN already-counted row.
+    cap = "capfull"
+    srv.nth_connect(summary="s", name="H", channel=cap)
+    db = srv.get_db()
+    db.execute("INSERT INTO members (id,channel,name,summary,skills,last_seen,"
+               "joined_at,active,kind) VALUES ('ag_cap',?,'CapBot','','',?,?,1,'agent')",
+               (cap, srv.now_iso(), srv.now_iso()))
+    # pad up to MAX_MEMBERS distinct members (including host + ag_cap).
+    have = db.execute("SELECT COUNT(*) FROM members WHERE channel=?", (cap,)).fetchone()[0]
+    for i in range(srv.MAX_MEMBERS - have):
+        db.execute("INSERT INTO members (id,channel,name,summary,skills,last_seen,"
+                   "joined_at,active,kind) VALUES (?,?,?,'','',?,?,1,'agent')",
+                   (f"pad{i}", cap, f"Pad{i}", srv.now_iso(), srv.now_iso()))
+    db.commit(); db.close()
+    rc = json.loads(srv.nth_connect(summary="a", name="CapBot",
+                                    channel=cap, resume_member_id="ag_cap"))
+    check("reclaim of own row succeeds even when channel is full",
+          rc.get("action") == "reclaimed")
+
     print(f"\n{'OK' if failures == 0 else 'FAILED'} — {failures} failure(s)")
     return 1 if failures else 0
 

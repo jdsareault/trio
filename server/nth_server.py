@@ -832,20 +832,36 @@ def nth_connect(
             # slots before the capacity check below).
             _prune_name_ghosts(db, channel, name, now)
 
-            # Check member count (all members who ever joined)
-            count = db.execute(
-                "SELECT COUNT(*) FROM members WHERE channel = ?",
-                (channel,),
-            ).fetchone()[0]
-            if count >= MAX_MEMBERS:
-                return json.dumps({"error": f"Channel is full ({MAX_MEMBERS} members)."})
+            # Reclaim auth: a reclaim may only re-attach to an AGENT row. A
+            # human/operator row (kind='human') is NOT reclaimable — otherwise
+            # any MCP tool-caller could read the operator's member_id off the
+            # public roster and impersonate them (mint a valid session token,
+            # read their DMs). Detected here, before the capacity gate.
+            if reclaiming:
+                existing_row = db.execute(
+                    "SELECT kind FROM members WHERE id = ? AND channel = ?",
+                    (member_id, channel)).fetchone()
+                reclaimed_existing = existing_row is not None
+                if reclaimed_existing and (
+                        (existing_row["kind"] if "kind" in existing_row.keys()
+                         else "agent") or "agent") != "agent":
+                    return json.dumps({"error": "Cannot reclaim this identity."})
+
+            # Check member count (all members who ever joined). Skip for a
+            # reclaim of an already-counted own row — otherwise a placed agent
+            # can't reconnect into a channel that filled up (its own row is in
+            # the count).
+            if not (reclaiming and reclaimed_existing):
+                count = db.execute(
+                    "SELECT COUNT(*) FROM members WHERE channel = ?",
+                    (channel,),
+                ).fetchone()[0]
+                if count >= MAX_MEMBERS:
+                    return json.dumps({"error": f"Channel is full ({MAX_MEMBERS} members)."})
 
             if reclaiming:
                 # Re-attach to the pre-created row (or create it with the fixed
                 # id if absent); never re-mint the id.
-                reclaimed_existing = db.execute(
-                    "SELECT 1 FROM members WHERE id = ? AND channel = ?",
-                    (member_id, channel)).fetchone() is not None
                 db.execute(
                     "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
