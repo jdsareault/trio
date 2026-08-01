@@ -64,9 +64,11 @@ To watch DB activity in a second terminal:
 
 ### 2c. Agents panel (operator only)
 Open the **agents** pill in the header.
-- [ ] **Spawn form:** pick a model (defaults to last-selected), optional
-      name/prompt, comma-separated channel codes (prefilled with the current
-      channel). Click **Spawn agent**.
+- [ ] **Spawn form:** pick a model (defaults to last-selected), an **Effort**
+      level (thinking/reasoning: default|low|medium|high|xhigh|max — persisted
+      per your last choice), optional name/prompt, comma-separated channel codes
+      (prefilled with the current channel). Click **Spawn agent**. Effort is a
+      per-agent knob (passed as `--effort`); wake preserves it.
 - [ ] A real agent (Sonnet) should, within ~1–2 min: appear **live** in the
       roster, **connect** to its channel(s), and **post a hello** message.
       Watch the channel (or `nth_console.py`) for its post.
