@@ -159,6 +159,10 @@ copy_release_file "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constan
 copy_release_file "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
 copy_release_file "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
 copy_release_file "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
+# Phase 7 browser sources are composed by nth_web.py at import time, so copy
+# them as a tree alongside the server module for a portable no-build install.
+mkdir -p "$SERVER_DIR/web"
+cp -R "$SCRIPT_DIR/server/web/." "$SERVER_DIR/web/"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \

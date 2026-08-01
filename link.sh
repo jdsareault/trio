@@ -30,6 +30,12 @@ for f in "$REPO_DIR"/server/*.py "$REPO_DIR"/server/*.js; do
   [ -e "$f" ] || continue
   link "$f" "$SERVER_DIR/$(basename "$f")"
 done
+# nth_web.py reads this tree at import time; link it as one unit so a dev
+# install sees modular CSS and JS changes without a copy-deploy cycle.
+if [ -e "$SERVER_DIR/web" ] && [ ! -L "$SERVER_DIR/web" ]; then
+  rm -rf "$SERVER_DIR/web"
+fi
+link "$REPO_DIR/server/web" "$SERVER_DIR/web"
 
 echo "Linking /trio skill docs -> $TRIO_SKILL_DIR"
 link "$REPO_DIR/SKILL-trio.md"     "$TRIO_SKILL_DIR/SKILL.md"
