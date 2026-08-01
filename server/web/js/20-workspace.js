@@ -129,28 +129,53 @@
     } catch (error) { Trio.ui.toast(error.message || 'Could not resolve approval'); }
     finally { pendingDecisions.delete(id + ':' + decision); }
   }
-  function railItem(label, subtitle, onClick, badge = '', active = false) {
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'rail-item';
-    button.classList.toggle('active', active);
-    button.innerHTML = `<span class="rail-copy"><strong>${esc(label)}</strong>${subtitle ? `<small>${esc(subtitle)}</small>` : ''}</span>${badge ? `<b class="rail-badge">${esc(badge)}</b>` : ''}`;
+  function navIcon(name) {
+    const icons = {
+      home: '<path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9"/>',
+      attention: '<path d="M4 13h4l2 3h4l2-3h4"/><path d="M5 13 7 5h10l2 8v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1Z"/>',
+      tasks: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="m4 6 1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>',
+      plus: '<path d="M12 5v14M5 12h14"/>',
+      roster: '<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M16 6a3 3 0 0 1 0 6M21 20a5 5 0 0 0-4-4.9"/>',
+      settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H1a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 2.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1A1.6 1.6 0 0 0 17 2.6a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H23a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/>'
+    };
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
+  }
+  function initials(label) { return String(label || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase(); }
+  function avatar(label, tone = 'eucalyptus', status = '') { return `<span class="av av-40 tone-${tone} ${status ? 'st-' + status : ''}">${esc(initials(label))}${status ? '<span class="st-ring"></span>' : ''}</span>`; }
+  function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
+  function navItem(label, icon, onClick, badge = '', active = false) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
+    button.innerHTML = `<span class="nav-hash">${icon === 'hash' ? '#' : navIcon(icon)}</span><span class="nav-label">${esc(label)}</span>${badge ? `<span class="nav-meta"><span class="badge">${esc(badge)}</span></span>` : ''}`;
     button.addEventListener('click', onClick); return button;
   }
-  function section(title, items) {
-    const wrap = document.createElement('section'); wrap.className = 'rail-section';
-    wrap.innerHTML = `<h2>${esc(title)}</h2>`; items.forEach(item => wrap.append(item)); return wrap;
+  function section(title, items, add) {
+    const wrap = document.createElement('section'); wrap.className = 'nav-section';
+    const head = document.createElement('div'); head.className = 'nav-head'; head.innerHTML = `<h3>${esc(title)}</h3>`;
+    if (add) { const button = document.createElement('button'); button.type = 'button'; button.className = 'add-btn'; button.setAttribute('aria-label', 'Create channel'); button.title = 'Create channel'; button.innerHTML = navIcon('plus'); button.addEventListener('click', createChannel); head.append(button); }
+    wrap.append(head); items.forEach(item => wrap.append(item)); return wrap;
+  }
+  function dmItem(dm, audit = false) {
+    const label = dm.name || dm.key || 'Conversation';
+    const people = label.split(/\s*[↔·,]\s*/).filter(Boolean);
+    const visual = audit && people.length > 1 ? `<span class="dm-pair">${avatar(people[0], avatarTone(people[0]))}${avatar(people[1], avatarTone(people[1]))}</span>` : avatar(people[0] || label, avatarTone(label), dm.unread ? 'online' : 'idle');
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'dm-item'; button.classList.toggle('active', state.view === 'conversation' && state.dmKey === dm.key);
+    button.innerHTML = `${visual}<span class="dm-copy"><span class="dm-name">${esc(label)}</span></span>${dm.unread ? '<span class="unread-dot" aria-label="Unread"></span>' : ''}`;
+    button.addEventListener('click', () => openDm(dm, audit)); return button;
   }
   function renderRail() {
     const rail = $('workspace-rail'); if (!rail) return;
     const nav = groupNavigation(state.channels || [], state.dms || {});
     rail.textContent = '';
-    const controls = document.createElement('div'); controls.className = 'rail-views';
-    [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, view]) =>
-      controls.append(railItem(label, '', () => showView(view), view === 'attention' ? String(selectors.attention() || '') : '', state.view === view)));
-    rail.append(controls, section('Channels', nav.active.map(c => railItem(c.code, c.topic || c.status, () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code))));
-    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d), d.unread ? String(d.unread) : '', state.view === 'conversation' && state.dmKey === d.key))));
-    if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent', () => openDm(d, true), '', state.view === 'conversation' && state.dmKey === d.key))));
-    const actions = document.createElement('div'); actions.className = 'rail-actions';
-    actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => showView('roster')), railItem('Preferences', '', () => showView('prefs'))); rail.append(actions);
+    const controls = document.createElement('section'); controls.className = 'nav-section nav-views';
+    [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, icon]) => { const view = icon; controls.append(navItem(label, icon, () => showView(view), view === 'attention' ? String(selectors.attention() || '') : '', state.view === view)); });
+    rail.append(controls, section('Channels', nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code)), true));
+    if (nav.agentAudit.length) rail.append(section('Agent ↔ Agent · audit', nav.agentAudit.map(d => dmItem(d, true))));
+    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => dmItem(d))));
+    const actions = section('Workspace', [navItem('Agent roster', 'roster', () => showView('roster')), navItem('Settings & diagnostics', 'settings', () => showView('prefs'))]);
+    const newAgent = navItem('New agent', 'plus', () => Trio.agents?.create?.()); newAgent.classList.add('new-agent'); actions.append(newAgent); rail.append(actions);
+    const operator = state.operator || state.meta?.operator || {}; const opName = operator.name || 'Workspace'; const opAvatar = $('operator-avatar'); const opLabel = $('operator-name'); const opRole = $('operator-role');
+    if (opAvatar) { opAvatar.textContent = initials(opName); opAvatar.className = 'operator-avatar tone-' + avatarTone(opName); }
+    if (opLabel) opLabel.textContent = opName; if (opRole) opRole.textContent = operator.name ? 'Workspace owner' : 'Live agent coordination';
   }
   function updateTopbar(title, subtitle) {
     const h = $('h-channel'); const m = $('h-meta');
