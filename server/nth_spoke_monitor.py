@@ -396,7 +396,15 @@ class MCPSSEClient:
         q = queue.Queue(maxsize=1)
         with self._pending_lock:
             self._pending[rid] = q
-        self._post(body)
+        try:
+            self._post(body)
+        except Exception:
+            # An immediate POST failure (connection refused, DNS, etc.) means
+            # no response will ever arrive to resolve this queue via the SSE
+            # reader thread — remove it here or it leaks forever.
+            with self._pending_lock:
+                self._pending.pop(rid, None)
+            raise
         try:
             resp = q.get(timeout=timeout)
         except queue.Empty:
