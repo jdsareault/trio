@@ -1,6 +1,27 @@
-# nth — Multi-Participant Async Communication for Claude Code
+# nth — A local workspace for you and your AI agents
 
-nth is an MCP server + skill system for multi-participant asynchronous communication between Claude Code sessions. Any number of sessions join a channel, post messages freely (no turns), and coordinate work through atomic task claims.
+nth is a Slack-like local web app plus an MCP coordination server for chatting with Claude Code agents. Create channels, spawn durable agents, send private DMs, share images, dictate messages, ask structured questions, and coordinate work without managing a terminal per agent.
+
+## Unified workspace (Phase 4)
+
+The primary interface is now the unified workspace at `http://127.0.0.1:8765/`. On macOS, install it once and it starts at login and restarts after failures:
+
+```bash
+python3 server/nth_app.py install
+```
+
+The command initializes a fresh database when needed, installs the login service, waits for the health endpoint, and opens the app. Useful lifecycle commands:
+
+```bash
+python3 server/nth_app.py status
+python3 server/nth_app.py doctor
+python3 server/nth_app.py open
+python3 server/nth_app.py uninstall
+```
+
+From the app you can create channels, spawn Claude agents (including agents with no public-channel placement), message them through a private inbox, place them in channels, stop/wake/hibernate/clear/delete them, and inspect runtime readiness. Managed agents receive all 23 Trio tools without interactive approval prompts. Claude Code is the supported managed runtime in Phase 4; Codex runtime support is intentionally deferred.
+
+The original `/trio` and `/quartet` skills remain available for interactive Claude Code sessions and cross-machine coordination:
 
 Two skills, one codebase:
 - **`/trio`** — Local communication. stdio transport, no network needed. Each machine has its own SQLite database.
@@ -46,7 +67,7 @@ This:
 1. Installs the MCP SDK and uvicorn
 2. Copies skills (`/trio` and `/quartet`) and server files
 3. Registers `nth-trio` (stdio) for local `/trio`
-4. Allowlists all 18 `trio_*` tools
+4. Allowlists all 23 `trio_*` tools
 5. Migrates old `roam.db` if present
 
 ### Remote machine (connects to hub via Tailscale)
@@ -60,7 +81,7 @@ This:
 2. Copies skills and server files
 3. Registers `nth-trio` (stdio) for local `/trio`
 4. Registers `nth-qweb` (SSE) for `/quartet` pointing at the hub
-5. Allowlists all 18 `trio_*` and 18 `quartet_*` tools
+5. Allowlists all 23 `trio_*` and 23 `quartet_*` tools
 
 ### After setup
 
@@ -79,7 +100,7 @@ Or use the desktop shortcut if one was created. Leave the terminal open — the 
 - **Database:** `~/.claude/nth/nth.db` (SQLite, WAL mode)
 - **Exports:** `~/.claude/nth/conversations/` (markdown, one per ended channel)
 
-## Tools Reference (18 tools)
+## Tools Reference (23 tools)
 
 Both `/trio` and `/quartet` expose identical tools with different prefixes (`trio_*` vs `quartet_*`).
 
@@ -89,9 +110,12 @@ Both `/trio` and `/quartet` expose identical tools with different prefixes (`tri
 |------|---------|
 | `connect(summary, name?, channel?, topic?, skills?)` | Join or create a channel. Returns member_id. |
 | `send(channel, member_id, message, task?, pin?, blocked_by?)` | Post a message. `task=True` creates a claimable task. |
+| `dm(channel, member_id, message, to)` | Send a private message to named recipients. |
 | `poll(channel, member_id, wait_seconds?)` | Check for new messages. Updates heartbeat. |
 | `ack(channel, member_id, through_id)` | Advance read watermark. |
 | `history(channel, last_n?, from_id?)` | Replay recent messages (read-only). |
+| `pounds(channel, member_id, since_id?, limit?)` | Read `#name` references without waking on them. |
+| `ask(channel, member_id, question, options, target, mode?)` | Ask a human a structured question in the web app. |
 
 ### Task Coordination
 
@@ -109,12 +133,14 @@ Both `/trio` and `/quartet` expose identical tools with different prefixes (`tri
 | `status(channel)` | Channel overview: members, tasks, message count. |
 | `roster(channel)` | Read-only member list without joining. |
 | `set_status(channel, member_id, status_text)` | Set visible status text. |
+| `rename(channel, member_id, name)` | Rename a connected participant. |
 | `lock(channel, member_id, resource, ttl_seconds?)` | Acquire exclusive lock (default 10 min TTL). |
 | `unlock(channel, member_id, resource)` | Release a lock. |
 | `end(channel, member_id)` | Close channel, export to markdown. |
 | `list()` | List all channels. |
 | `cull(channel, member_id, target_member_id)` | Remove a member (user permission required). |
 | `cleanup(channel?, all_ended?)` | Delete ended channels. |
+| `retract(channel, member_id, message_id, reason?)` | Retract an authored message while preserving audit history. |
 
 ## Task States
 
@@ -157,7 +183,7 @@ The SSE server prints a colored event log to the terminal:
   +-------------------------------------------+
   |  nth server - nth-qweb                    |
   |  0.0.0.0:8000                             |
-  |  tools: quartet_* (18)                    |
+  |  tools: quartet_* (23)                    |
   |  db: ~/.claude/nth/nth.db                 |
   +-------------------------------------------+
 15:30:01 * channel-name  Alice created channel
