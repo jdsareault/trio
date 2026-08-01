@@ -36,6 +36,13 @@ check("served bundle: placeholders all substituted", "/*__" not in served)
 check("served bundle: persistent workspace rail present", 'id="workspace-rail"' in served)
 check("served bundle: channel creation form present", 'id="rail-channel-form"' in served)
 check("served bundle: unified rail loaders present", "loadWorkspaceRail" in served and "loadUnifiedDms" in served)
+check("served bundle: dual-provider agent picker present",
+      'id="agent-provider"' in served and '<option value="codex">Codex</option>' in served)
+check("served bundle: Codex project and permissions controls present",
+      'id="agent-cwd"' in served and 'id="agent-permission"' in served)
+check("served bundle: managed wake-policy control present", 'id="agent-wake"' in served)
+check("served bundle: model controls use provider discovery",
+      "/api/agent-models?provider=" in served)
 
 # The raw source keeps the block (with both sentinel markers) so the DOM
 # harness, which reads this file directly, still sees the hook.

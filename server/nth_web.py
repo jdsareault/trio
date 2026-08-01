@@ -4459,6 +4459,8 @@ INDEX_HTML = r"""<!doctype html>
   #agent-new select, #agent-new input, #agent-new textarea {
     background: var(--bg2); color: var(--fg); border: 1px solid var(--border);
     border-radius: 3px; padding: 4px 6px; font-family: inherit; font-size: 12px; }
+  #agent-new .agent-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  #agent-new [hidden] { display: none; }
   #agent-new button { background: var(--accent, #3b82f6); color: #fff; border: 0;
     border-radius: 3px; padding: 5px 8px; cursor: pointer; font-size: 12px; }
   #agent-create-msg { font-size: 11px; color: var(--muted, #999); }
@@ -5497,13 +5499,14 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div id="agents-panel" hidden>
     <div class="dm-head"><h3>Agents</h3></div>
-    <div id="agent-health">Checking Claude Code…</div>
+    <div id="agent-health">Checking agent runtimes…</div>
     <div id="agent-new">
+      <select id="agent-provider" title="agent runtime provider">
+        <option value="claude">Claude Code</option>
+        <option value="codex">Codex</option>
+      </select>
       <select id="agent-model" title="model">
-        <option value="opus">Opus</option>
-        <option value="sonnet">Sonnet</option>
-        <option value="haiku">Haiku</option>
-        <option value="fable">Fable</option>
+        <option value="">Loading models…</option>
       </select>
       <select id="agent-effort" title="thinking / reasoning effort">
         <option value="">Effort: default</option>
@@ -5513,6 +5516,19 @@ INDEX_HTML = r"""<!doctype html>
         <option value="xhigh">Effort: xhigh</option>
         <option value="max">Effort: max</option>
       </select>
+      <input id="agent-cwd" type="text" placeholder="Codex project directory" spellcheck="false" hidden>
+      <div class="agent-field-row">
+        <select id="agent-permission" title="permission profile">
+          <option value="balanced">Permissions: balanced</option>
+          <option value="observe">Permissions: observe</option>
+          <option value="autonomous">Permissions: autonomous</option>
+        </select>
+        <select id="agent-wake" title="messages that wake this agent">
+          <option value="at">Wake: @mentions + !bangs</option>
+          <option value="about">Wake: @, #refs + !bangs</option>
+          <option value="all">Wake: all messages</option>
+        </select>
+      </div>
       <input id="agent-name" type="text" placeholder="name (optional)" spellcheck="false">
       <input id="agent-channels" type="text" placeholder="channels (comma-separated codes)" spellcheck="false">
       <textarea id="agent-prompt" placeholder="prompt (optional)" rows="2"></textarea>
@@ -9426,13 +9442,19 @@ INDEX_HTML = r"""<!doctype html>
   const agentsPanel = document.getElementById('agents-panel');
   const agentsListEl = document.getElementById('agents-list');
   const agentHealthEl = document.getElementById('agent-health');
+  const agentProviderSel = document.getElementById('agent-provider');
   const agentModelSel = document.getElementById('agent-model');
   const agentEffortSel = document.getElementById('agent-effort');
+  const agentCwdInp = document.getElementById('agent-cwd');
+  const agentPermissionSel = document.getElementById('agent-permission');
+  const agentWakeSel = document.getElementById('agent-wake');
   const agentNameInp = document.getElementById('agent-name');
   const agentChansInp = document.getElementById('agent-channels');
   const agentPromptInp = document.getElementById('agent-prompt');
   const agentCreateBtn = document.getElementById('agent-create-btn');
   const agentCreateMsg = document.getElementById('agent-create-msg');
+  let agentRuntimeHealth = {};
+  let agentModelCatalog = [];
 
   function toggleAgentsPanel(force) {
     if (!agentsPanel) return;
@@ -9440,13 +9462,15 @@ INDEX_HTML = r"""<!doctype html>
     if (show) {
       if (typeof toggleSettings === 'function') toggleSettings(false);
       toggleDmPanel(false);
-      try { const m = localStorage.getItem('trio.agent.model');
-            if (m && agentModelSel) agentModelSel.value = m;
+      try { const p = localStorage.getItem('trio.agent.provider');
+            if (p && agentProviderSel) agentProviderSel.value = p;
             const ef = localStorage.getItem('trio.agent.effort');
-            if (ef !== null && agentEffortSel) agentEffortSel.value = ef; } catch (e) {}
+            if (ef !== null && agentEffortSel) agentEffortSel.value = ef;
+            const cwd = localStorage.getItem('trio.agent.cwd');
+            if (cwd && agentCwdInp) agentCwdInp.value = cwd; } catch (e) {}
       if (agentChansInp && !agentChansInp.value) agentChansInp.value = state.channel || '';
       agentsPanel.removeAttribute('hidden'); btnAgents.classList.add('on');
-      loadAgentHealth(); loadAgents();
+      updateAgentProviderFields(); loadAgentHealth(); loadAgentModels(); loadAgents();
     } else { agentsPanel.setAttribute('hidden', ''); btnAgents.classList.remove('on'); }
   }
   async function loadAgents() {
@@ -9462,25 +9486,72 @@ INDEX_HTML = r"""<!doctype html>
   async function loadAgentHealth() {
     if (!agentHealthEl) return;
     agentHealthEl.className = '';
-    agentHealthEl.textContent = 'Checking Claude Code…';
+    agentHealthEl.textContent = 'Checking agent runtimes…';
     try {
       const r = await fetch('/api/health');
       const j = await r.json();
-      const rt = j.runtime || {};
-      if (rt.ready) {
-        agentHealthEl.className = 'ready';
-        agentHealthEl.textContent = '✓ Claude Code ready' +
-          (rt.version ? ' · ' + rt.version : '');
-        if (agentCreateBtn) agentCreateBtn.disabled = false;
-      } else {
-        agentHealthEl.className = 'attention';
-        agentHealthEl.textContent = '⚠ ' + (rt.detail || 'Claude Code needs attention');
-        if (agentCreateBtn) agentCreateBtn.disabled = true;
-      }
+      agentRuntimeHealth = j.runtimes || {claude: j.runtime || {}};
+      renderAgentHealth();
     } catch (_) {
       agentHealthEl.className = 'attention';
-      agentHealthEl.textContent = '⚠ Could not check Claude Code';
+      agentHealthEl.textContent = '⚠ Could not check agent runtimes';
     }
+  }
+  function renderAgentHealth() {
+    if (!agentHealthEl) return;
+    const provider = agentProviderSel ? agentProviderSel.value : 'claude';
+    const rt = agentRuntimeHealth[provider] || {};
+    const label = provider === 'codex' ? 'Codex' : 'Claude Code';
+    agentHealthEl.className = rt.ready ? 'ready' : 'attention';
+    agentHealthEl.textContent = (rt.ready ? '✓ ' : '⚠ ') + label + ' · ' +
+      (rt.ready ? ('ready' + (rt.version ? ' · ' + rt.version : ''))
+                : (rt.detail || 'needs attention'));
+    if (agentCreateBtn) agentCreateBtn.disabled = !rt.ready;
+  }
+  function updateAgentProviderFields() {
+    const provider = agentProviderSel ? agentProviderSel.value : 'claude';
+    if (agentCwdInp) agentCwdInp.hidden = provider !== 'codex';
+    if (agentPermissionSel) agentPermissionSel.disabled = provider !== 'codex';
+    renderAgentHealth();
+  }
+  async function loadAgentModels() {
+    if (!agentModelSel) return;
+    const provider = agentProviderSel ? agentProviderSel.value : 'claude';
+    agentModelSel.innerHTML = '<option value="">Loading models…</option>';
+    try {
+      const r = await fetch('/api/agent-models?provider=' + encodeURIComponent(provider));
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'model discovery failed');
+      agentModelCatalog = j.models || [];
+      agentModelSel.innerHTML = '';
+      for (const model of agentModelCatalog) {
+        const option = document.createElement('option');
+        option.value = model.id; option.textContent = model.name || model.id;
+        if (model.default) option.selected = true;
+        agentModelSel.appendChild(option);
+      }
+      try {
+        const saved = localStorage.getItem('trio.agent.model.' + provider);
+        if (saved && agentModelCatalog.some(m => m.id === saved)) agentModelSel.value = saved;
+      } catch (_) {}
+      updateAgentEfforts();
+    } catch (e) {
+      agentModelCatalog = [];
+      agentModelSel.innerHTML = '<option value="">Models unavailable</option>';
+      if (agentCreateMsg) agentCreateMsg.textContent = e.message || 'model discovery failed';
+    }
+  }
+  function updateAgentEfforts() {
+    if (!agentEffortSel) return;
+    const previous = agentEffortSel.value;
+    const model = agentModelCatalog.find(m => m.id === agentModelSel.value) || {};
+    const efforts = model.efforts || ['low', 'medium', 'high', 'xhigh', 'max'];
+    agentEffortSel.innerHTML = '<option value="">Effort: default</option>';
+    for (const effort of efforts) {
+      const option = document.createElement('option'); option.value = effort;
+      option.textContent = 'Effort: ' + effort; agentEffortSel.appendChild(option);
+    }
+    if (efforts.includes(previous)) agentEffortSel.value = previous;
   }
   function renderAgents(agents) {
     agentsListEl.innerHTML = '';
@@ -9490,8 +9561,10 @@ INDEX_HTML = r"""<!doctype html>
       row.className = 'agent-row' + (a.abandoned ? ' abandoned' : '');
       const nm = document.createElement('span'); nm.className = 'a-name'; nm.textContent = a.name;
       const stt = document.createElement('span'); stt.className = 'a-state';
-      stt.textContent = (a.live ? 'live' : a.state) + (a.model ? ' · ' + a.model : '')
-        + (a.effort ? ' · ' + a.effort : '');
+      stt.textContent = (a.live ? (a.busy ? 'working' : 'live') : a.state)
+        + ' · ' + (a.provider || 'claude') + (a.model ? ' · ' + a.model : '')
+        + (a.effort ? ' · ' + a.effort : '')
+        + (a.queued ? ' · ' + a.queued + ' queued' : '');
       const sp = document.createElement('span'); sp.className = 'a-spacer';
       row.appendChild(nm); row.appendChild(stt); row.appendChild(sp);
       if (a.dm_ready || (a.channels && a.channels.length)) {
@@ -9501,7 +9574,8 @@ INDEX_HTML = r"""<!doctype html>
         row.appendChild(msg);
       }
       for (const act of (a.live
-        ? ['hibernate', 'stop', 'compact', 'clear', 'delete']
+        ? (a.busy ? ['interrupt', 'hibernate', 'stop', 'compact', 'clear', 'delete']
+                  : ['hibernate', 'stop', 'compact', 'clear', 'delete'])
         : ['wake', 'clear', 'delete'])) {
         const b = document.createElement('button');
         b.textContent = act; b.onclick = () => agentAction(a.id, act);
@@ -9515,7 +9589,12 @@ INDEX_HTML = r"""<!doctype html>
       }
       const add = document.createElement('button'); add.className = 'a-channel'; add.textContent = '+ channel';
       add.onclick = () => { const c = prompt('Channel code to add:'); if (c) agentPlacement(a.id, c.trim(), true); };
-      chans.appendChild(add); row.appendChild(chans);
+      chans.appendChild(add);
+      const wake = document.createElement('button'); wake.className = 'a-channel';
+      wake.textContent = 'wake: ' + (a.wake_mode || 'at');
+      wake.title = 'Cycle wake policy: at → about → all';
+      wake.onclick = () => agentWakeMode(a.id, a.wake_mode || 'at');
+      chans.appendChild(wake); row.appendChild(chans);
       agentsListEl.appendChild(row);
     }
   }
@@ -9536,14 +9615,32 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) {}
     loadAgents(); loadWorkspaceRail();
   }
+  async function agentWakeMode(id, current) {
+    const modes = ['at', 'about', 'all'];
+    const mode = modes[(modes.indexOf(current) + 1) % modes.length];
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(id) + '/wake-mode', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({mode}) });
+      if (!r.ok) { const d = await r.json(); alert(d.error || ('Error ' + r.status)); }
+    } catch (_) {}
+    loadAgents();
+  }
   async function createAgent() {
     if (!agentModelSel) return;
     const model = agentModelSel.value;
+    const provider = agentProviderSel ? agentProviderSel.value : 'claude';
     const effort = agentEffortSel ? agentEffortSel.value : '';
-    try { localStorage.setItem('trio.agent.model', model);
-          localStorage.setItem('trio.agent.effort', effort); } catch (e) {}
+    const cwd = agentCwdInp ? agentCwdInp.value.trim() : '';
+    const permission_profile = agentPermissionSel ? agentPermissionSel.value : 'balanced';
+    const wake_mode = agentWakeSel ? agentWakeSel.value : 'at';
+    try { localStorage.setItem('trio.agent.provider', provider);
+          localStorage.setItem('trio.agent.model.' + provider, model);
+          localStorage.setItem('trio.agent.effort', effort);
+          if (cwd) localStorage.setItem('trio.agent.cwd', cwd); } catch (e) {}
     const channels = (agentChansInp.value || '').split(',').map(s => s.trim()).filter(Boolean);
-    const body = { model, effort, name: (agentNameInp.value || '').trim(),
+    const body = { provider, model, effort, cwd, permission_profile, wake_mode,
+                   name: (agentNameInp.value || '').trim(),
                    prompt: (agentPromptInp.value || '').trim(), channels };
     if (agentCreateMsg) agentCreateMsg.textContent = 'spawning…';
     try {
@@ -9562,6 +9659,10 @@ INDEX_HTML = r"""<!doctype html>
   }
   if (btnAgents) btnAgents.addEventListener('click', (e) => { e.stopPropagation(); toggleAgentsPanel(); });
   if (agentCreateBtn) agentCreateBtn.addEventListener('click', (e) => { e.stopPropagation(); createAgent(); });
+  if (agentProviderSel) agentProviderSel.addEventListener('change', () => {
+    updateAgentProviderFields(); loadAgentModels();
+  });
+  if (agentModelSel) agentModelSel.addEventListener('change', updateAgentEfforts);
 
   if (btnDm) {
     btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
