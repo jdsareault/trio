@@ -2,7 +2,7 @@
 
 nth is a Slack-like local web app plus an MCP coordination server for chatting with Claude Code and Codex agents. Create channels, spawn durable agents, send private DMs, share images, dictate messages, ask structured questions, and coordinate work without managing a terminal per agent.
 
-## Unified workspace (Phase 5)
+## Unified workspace (Phase 6)
 
 The primary interface is now the unified workspace at `http://127.0.0.1:8765/`. On macOS, install it once and it starts at login and restarts after failures:
 
@@ -30,6 +30,14 @@ Managed delivery is event-driven and token-efficient. One plain-Python router wa
 - `all` — every new message in a placed channel
 
 There is no model timer or token-consuming poll turn. Hibernated agents resume on matching events; deliberately stopped agents stay stopped.
+
+Channels and direct messages can be archived without deleting their history.
+Archived conversations disappear from the everyday workspace rail and DM inbox;
+open the compact **Archives** browser from the bottom of the desktop rail or
+from **Settings** on smaller screens to view or restore them. Archived history
+is read-only in the web app until restored. DM archives are personal to the
+operator and use a message watermark, so a newly received DM automatically
+resurfaces in the active inbox rather than becoming a hidden unread.
 
 Claude Code must be installed and signed in to spawn Claude agents. Codex must be installed and authenticated (`codex login status`) to spawn Codex agents. Trio starts one managed `codex app-server` process over stdio and injects its required `nth-trio` MCP configuration automatically—no manual global MCP registration is required for managed Codex agents.
 
@@ -69,6 +77,7 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 - **Managed dual-provider agents** — Durable Claude processes and persistent Codex App Server threads
 - **Token-free wake routing** — Per-agent `at`, `about`, or `all` policies with immediate DM/mention/bang delivery
 - **Codex operations** — Dynamic models/effort, project cwd, permission profiles, approval inbox, activity timeline, FIFO turns, crash recovery, and image input
+- **Reversible conversation archives** — Hide channels and personal DM threads from daily navigation, browse them separately, restore them, and automatically resurface DMs on new activity
 
 ## Installation
 

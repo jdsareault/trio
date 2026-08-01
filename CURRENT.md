@@ -1,11 +1,26 @@
-# Current State — nth Unified Workspace, Phase 4
+# Current State — nth Unified Workspace, Phase 6
 
-**Version:** Phase 4 product completion (2026-08-01), protocol v7.2
+**Version:** Phase 6 conversation archives (2026-08-01), protocol v7.2
 **Prior:** v7.1 (2026-04-20), v7 (2026-04-19), v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09)
-**Branch:** `feat/unified-phase4-product-completion` (stacked on Phase 3)
+**Branch:** `feat/unified-phase6-archives` (stacked on Phase 5)
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror)
 
 ## What Just Shipped
+
+**Phase 6 reversible archives** — Channels and operator DM threads can be
+archived without deleting messages, membership, or runtime state. Active
+workspace APIs omit archived conversations by default; a compact Archives
+browser, available from the desktop rail and mobile Settings, exposes separate
+archived lists with View and Restore actions. Archived history is read-only in
+the web client until restored. DM archive state is per operator and records a
+message-id watermark, so any newer DM automatically returns the thread to the
+active inbox. Channel archive state is organizational and intentionally remains
+separate from channel ending, agent clearing, and permanent deletion.
+
+**Phase 5 managed Claude and Codex workspace** — The unified app can spawn and
+manage either provider, route wake events without model polling, preserve
+durable provider context, expose Codex approvals/activity outside chat, and
+deliver channel messages and private DMs across mixed-provider rooms.
 
 **Phase 4 unified workspace** — the web dashboard is now an installable local
 app for human-to-agent work, not only a channel viewer. `server/nth_app.py`
