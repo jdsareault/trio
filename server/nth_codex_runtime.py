@@ -979,10 +979,31 @@ class CodexRuntimeManager:
             return []
         with self._lock:
             dead = list(self._loaded)
+            interrupted = []
+            for agent_id, turn_id in list(self._active.items()):
+                context = self._turn_context.pop(turn_id, None)
+                if context is not None:
+                    interrupted.append((agent_id, context))
             self._loaded.clear()
-        for agent_id in dead:
-            self._set_state(agent_id, "errored")
-        return dead
+            self._active.clear()
+            self._starting.clear()
+        if not dead:
+            return []
+        try:
+            self.ensure_started()
+            for agent_id in dead:
+                if self.wake(agent_id) is None:
+                    raise CodexProtocolError(f"could not resume {agent_id}")
+            with self._lock:
+                for agent_id, context in interrupted:
+                    self._queued.setdefault(
+                        agent_id, collections.deque()).appendleft(context)
+                    self._actions.put(("drain", agent_id))
+            return []
+        except Exception:
+            for agent_id in dead:
+                self._set_state(agent_id, "errored")
+            return dead
 
     def shutdown(self, preserve_sessions: bool = False) -> None:
         with self._lock:

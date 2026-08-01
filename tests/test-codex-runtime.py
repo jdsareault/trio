@@ -10,7 +10,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "server"))
 
-from nth_codex_runtime import CodexRuntimeManager
+from nth_codex_runtime import CodexProtocolError, CodexRuntimeManager
 from nth_constants import AGENT_INBOX_CHANNEL
 
 failures = 0
@@ -106,6 +106,14 @@ try:
     woke = manager.wake("ag1")
     check("wake resumes the same Codex thread",
           woke is not None and woke.thread_id == handle.thread_id and woke.alive())
+    try:
+        manager._client.request("fake/crash")
+    except CodexProtocolError:
+        pass
+    check("shared App Server crash is detected", not manager._client.alive())
+    check("reconcile restarts App Server and resumes durable threads",
+          manager.reconcile() == [] and manager.is_running("ag1")
+          and manager._threads.get("ag1") == handle.thread_id)
     fresh = manager.clear("ag1", system_prompt="fresh")
     check("clear archives old context and starts a fresh thread",
           fresh is not None and fresh.thread_id != handle.thread_id)

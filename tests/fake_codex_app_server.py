@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tiny deterministic Codex App Server used by Phase 5 tests."""
 import json
+import os
 import sys
 
 
@@ -70,7 +71,7 @@ for raw in sys.stdin:
                 for name in TOOL_NAMES},
             "authStatus": "unsupported"}], "nextCursor": None}})
     elif method == "thread/start":
-        tid = f"thr_fake_{next_thread}"
+        tid = f"thr_fake_{os.getpid()}_{next_thread}"
         next_thread += 1
         threads[tid] = {"active": None}
         send({"id": request_id, "result": {"thread": {
@@ -110,6 +111,8 @@ for raw in sys.stdin:
         send({"id": request_id, "result": {"approvalId": 5000}})
     elif method == "fake/approval-result":
         send({"id": request_id, "result": {"decision": last_approval}})
+    elif method == "fake/crash":
+        raise SystemExit(7)
     elif method == "turn/interrupt":
         send({"id": request_id, "result": {}})
     elif method in ("thread/unsubscribe", "thread/archive", "thread/delete",

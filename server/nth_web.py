@@ -1950,6 +1950,10 @@ class AgentIdleReaper(threading.Thread):
 
     def run(self) -> None:
         while not self._stop.wait(self.interval):
+            try:
+                self.sup.reconcile()
+            except Exception:
+                pass
             if self.idle_seconds <= 0:
                 continue
             try:
