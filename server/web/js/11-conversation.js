@@ -10,6 +10,7 @@
   state.members = state.members instanceof Map ? state.members : new Map();
   state.messageDomById = state.messageDomById instanceof Map ? state.messageDomById : new Map();
   state.answers = state.answers instanceof Map ? state.answers : new Map();
+  state.scrollPositions = state.scrollPositions || {};
   state.lastSeenId = state.lastSeenId || 0;
   state.jumpUnread = state.jumpUnread || 0;
 
@@ -63,6 +64,8 @@
     catch (_) { return ''; }
   }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
+  function convId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
+  function markRead() { const list = ordered(); const last = list[list.length - 1]; if (last && Number(last.id) > Number(state.lastSeenId)) state.lastSeenId = last.id; }
 
   function decorateSigils(root, vm) {
     const ids = new Set([...(vm.mentions || []), ...(vm.refs || []), ...(vm.bangs || [])]);
@@ -219,6 +222,12 @@
     body.textContent = content;
   }
 
+  function showLightbox(url, alt) {
+    let dialog = document.getElementById('trio-lightbox');
+    if (!dialog) { dialog = document.createElement('dialog'); dialog.id = 'trio-lightbox'; dialog.className = 'lightbox'; document.body.append(dialog); }
+    dialog.innerHTML = `<form method="dialog"><button class="modal-close" aria-label="Close">×</button><img src="${M.escapeHtml(url)}" alt="${M.escapeHtml(alt || '')}" loading="lazy"></form>`;
+    dialog.showModal();
+  }
   function cardFor(msg) {
     const vm = viewModel(msg);
     const card = document.createElement('article'); card.className = 'message' + (vm.isOwn ? ' own' : '') + (vm.isPrivate ? ' private' : '');
@@ -245,7 +254,12 @@
       vm.attachments.forEach(attachment => {
         if (!attachment || !attachment.id) return;
         const link = document.createElement('a'); link.href = apiUrl('/api/attachment/' + attachment.id); link.target = '_blank'; link.rel = 'noopener'; link.className = 'message-attachment';
-        if (/^image\//.test(attachment.mime || '')) { const image = document.createElement('img'); image.src = link.href; image.alt = attachment.filename || 'Attached image'; image.loading = 'lazy'; link.append(image); }
+        if (/^image\//.test(attachment.mime || '')) {
+          const image = document.createElement('img'); image.src = link.href; image.alt = attachment.filename || 'Attached image'; image.loading = 'lazy';
+          image.addEventListener('click', (e) => { e.preventDefault(); showLightbox(link.href, image.alt); });
+          image.addEventListener('error', () => { image.classList.add('error'); });
+          link.append(image);
+        }
         else link.textContent = attachment.filename || ('Attachment #' + attachment.id);
         attachments.append(link);
       });
@@ -292,7 +306,9 @@
       if (index === unread) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
       const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card);
     });
-    if (stick) list.scrollTop = list.scrollHeight;
+    const saved = state.scrollPositions[convId()];
+    if (stick) { list.scrollTop = list.scrollHeight; markRead(); }
+    else if (saved != null) { list.scrollTop = saved; }
   }
 
   function upsert(msg) {
@@ -313,7 +329,7 @@
       const card = cardFor(state.messages.get(msg.id));
       if (list) { list.append(card); state.messageDomById.set(msg.id, card); }
       else { render(); }
-      if (wasNear && list) list.scrollTop = list.scrollHeight;
+      if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
       pruneMessages();
       return;
     }
@@ -347,8 +363,8 @@
     render();
     const list = dom(); const jump = document.getElementById('jump-latest');
     if (list && jump) {
-      const onScroll = () => jump.classList.toggle('hidden', nearBottom(list));
-      const onClick = () => { list.scrollTop = list.scrollHeight; };
+      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; if (nearBottom(list)) markRead(); };
+      const onClick = () => { list.scrollTop = list.scrollHeight; markRead(); };
       list.addEventListener('scroll', onScroll); listeners.listScroll = [list, onScroll];
       jump.addEventListener('click', onClick); listeners.jumpClick = [jump, onClick];
     }

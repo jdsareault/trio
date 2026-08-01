@@ -537,12 +537,12 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Render mention, bang, DM, task, question, edited, and confidence treatments from the view model.
   - Add reply context that scrolls/focuses the referenced message when available.
 
-- [ ] **3.4 Implement deterministic scroll/read behavior.**
+- [x] **3.4 Implement deterministic scroll/read behavior.**
   - Track near-bottom state, preserve an anchor when older/current messages rerender, and show Jump to latest only when needed.
   - Advance the read watermark only when the view is active and messages are actually visible.
   - Preserve independent scroll positions for every channel, DM, and audit route.
 
-- [ ] **3.5 Implement file and attachment interactions.**
+- [~] **3.5 Implement file and attachment interactions.**
   - Render local file paths as explicit safe actions rather than arbitrary HTML links.
   - Add image thumbnails, alt text, loading/error state, and a lightbox/open-original action.
   - Add paste and drag/drop upload with the same MIME/size validation as the picker.
