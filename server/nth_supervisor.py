@@ -271,7 +271,6 @@ class AgentProc:
                 sid = evt.get("session_id") or evt.get("sessionId") or ""
                 if sid:
                     self.session_id = sid
-                    self._session_evt.set()
                     # Persist immediately — do NOT rely on the spawn() return
                     # path, which loses a late-arriving id if wait_session timed
                     # out (Sauron: else --resume is skipped and memory is lost).
@@ -280,6 +279,9 @@ class AgentProc:
                             self.on_session(self.agent_id, sid)
                         except Exception:
                             pass
+                    # A waiter may treat initialization as fully durable. Release
+                    # it only after the persistence callback has completed.
+                    self._session_evt.set()
             if self.on_event is not None:
                 try:
                     self.on_event(self.agent_id, evt)
