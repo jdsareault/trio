@@ -420,19 +420,19 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Record the choice, browser support, cache behavior, test-loading strategy, and single-channel compatibility implications in this document.
   - Update `server/nth_web.py` composition tests before moving feature code.
 
-- [ ] **1.2 Introduce a single API service.**
+- [x] **1.2 Introduce a single API service.**
   - Extract URL scoping, JSON parsing, normalized errors, timeouts, and `AbortSignal` support from `server/web/js/00-core.js`.
   - Define methods for workspace, channel history, DM history, send/upload, agents, approvals, tasks, archives, search, and health.
   - Prevent duplicate `channel` query parameters and distinguish channel-scoped from workspace-scoped endpoints.
   - Add contract tests for non-JSON errors, aborted requests, unauthorized responses, and malformed payloads.
 
-- [ ] **1.3 Define the store schema and actions.**
+- [x] **1.3 Define the store schema and actions.**
   - Create the `route`, `session`, `workspace`, `conversation`, `composer`, `agents`, `tasks`, `attention`, and `preferences` slices described above.
   - Define initialization and reset behavior for every field; eliminate the array-to-Map conversion of `state.messages`.
   - Expose `getState`, action methods, and slice subscriptions; do not expose unrestricted mutation.
   - Add tests for route resets, DM/channel separation, immutable updates, and subscriber cleanup.
 
-- [ ] **1.4 Build the first-class router.**
+- [x] **1.4 Build the first-class router.**
   - Support Home, Attention, Tasks, Agents, Preferences, `channel:<code>`, `dm:<key>`, and `audit:<key>` routes.
   - Use `history.pushState`/`replaceState` and handle `popstate`; retain compatibility redirects from `?channel=` and the temporary `?dm=` contract.
   - Preserve per-conversation draft and scroll state while changing routes.
