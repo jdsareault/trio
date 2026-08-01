@@ -51,7 +51,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB_PY = path.resolve(__dirname, '..', 'server', 'nth_web.py');
+const WEB_ROOT = path.resolve(__dirname, '..', 'server', 'web');
 const ASK_JS = path.resolve(__dirname, '..', 'server', 'nth_ask_client.js');
 
 // ── Fake DOM ──────────────────────────────────────────────────────────────
@@ -479,48 +479,37 @@ function buildSandbox() {
     console, setTimeout, clearTimeout, setInterval, clearInterval,
     URL, URLSearchParams, TextEncoder, TextDecoder, NodeFilter,
     Map, Set, WeakMap, Promise, JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean, Error,
+    EventTarget, Event,
   });
   window.webkitAudioContext = window.AudioContext;
   window.__TRIO_TEST__ = {};        // truthy → nth_web.py's hook publishes helpers here
   return window;
 }
 
-// Extract the embedded client <script> and inject the pure ask helpers, the
-// same substitution nth_web.py performs at serve time.
+// Load the ordered source modules that production composes into INDEX_HTML.
+// Keeping this list explicit is deliberate: a new production module must be
+// considered by the harness instead of silently escaping client coverage.
 function buildScript() {
-  const py = fs.readFileSync(WEB_PY, 'utf8');
-  // The client bundle is exactly ONE inline <script> block. If a second one is
-  // ever added, fail loudly rather than silently testing only the first — a
-  // green suite that exercises nothing is the worst outcome for a harness.
-  const opens = (py.match(/<script(\s[^>]*)?>/g) || []);
-  if (opens.length !== 1) {
-    throw new Error(`expected exactly 1 <script> block in nth_web.py, found ${opens.length}; ` +
-      `the harness only loads the first — update dom-harness.js to handle the new block`);
-  }
-  const start = py.indexOf('<script>');
-  const end = py.indexOf('</script>', start);
-  if (start < 0 || end < 0) throw new Error('could not locate <script> block in nth_web.py');
-  let js = py.slice(start + '<script>'.length, end);
-  const askHelpers = fs.readFileSync(ASK_JS, 'utf8');
-  // Same placeholder substitutions nth_web.py performs at serve time. Global
-  // (regex) replace matches Python's str.replace-all semantics, so a placeholder
-  // that ever appears twice stays in sync with production. The animal lists
-  // only feed the guest-avatar picker; empty arrays parse fine and don't affect
-  // any code path under test.
-  js = js
-    .replace(/\/\*__ANIMAL_EMOJIS__\*\//g, '[]')
-    .replace(/\/\*__ANIMAL_NAMES__\*\//g, '[]')
-    .replace(/\/\*__ASK_HELPERS__\*\//g, () => askHelpers);
-  // Any leftover /*__FOO__*/ placeholder means nth_web.py grew a new injection
-  // point the harness doesn't know about. Left unsubstituted it would either be
-  // a parse error (statement position) or silently wrong — either way, surface
-  // it loudly here so the gap is a teachable error, not a green lie.
-  const leftover = js.match(/\/\*__[A-Z_]+__\*\//);
-  if (leftover) {
-    throw new Error(`unsubstituted placeholder ${leftover[0]} in the client script — ` +
-      `add its substitution to dom-harness.js buildScript()`);
-  }
-  return js;
+  const files = ['00-core.js', '10-markdown.js', '11-conversation.js', '12-composer.js'];
+  return files.map(name => fs.readFileSync(path.join(WEB_ROOT, 'js', name), 'utf8')).join('\n') + `
+    globalThis.__TRIO_TEST__ = {
+      state: window.Trio.state,
+      renderMarkdown: window.Trio.markdown.renderMarkdown,
+      escapeHtml: window.Trio.markdown.escapeHtml,
+      isSystemContent: window.Trio.markdown.isSystemContent,
+      humanizeIdSigils: window.Trio.markdown.humanizeIdSigils,
+      paintBody: window.Trio.conversation.paintBody,
+      apiUrl: path => { const ch = window.Trio.state.channel || ''; return ch ? path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(ch) : path; },
+      rememberColors: () => {},
+      applyTargetBars: () => {},
+      targetableMembers: members => (members || []).filter(m => !m.is_operator),
+      soleAgentId: members => { const ids = (members || []).filter(m => !m.is_operator).map(m => m.id); return ids.length === 1 ? ids[0] : null; },
+      directAt: (text, m) => { const n = m && m.name; return n && !(new RegExp('(^|\\\\s)@' + n.replace(/[-/\\\\^\\x24*+?.()|[\\]{}]/g, '\\\\$&') + '(?=\\\\s|$)', 'i')).test(text) ? '@' + n + ' ' + text : text; },
+      upsert: window.Trio.conversation.upsert,
+      render: window.Trio.conversation.render,
+      Trio: window.Trio,
+    };
+  `;
 }
 
 function load() {
@@ -529,7 +518,7 @@ function load() {
   const script = buildScript();
   let bootError = null;
   try {
-    vm.runInContext(script, context, { filename: 'nth_web.client.js', timeout: 5000 });
+    vm.runInContext(script, context, { filename: 'trio-web-modules.js', timeout: 5000 });
   } catch (e) {
     // boot() may throw against the minimal DOM — the __TRIO_TEST__ hook is set
     // BEFORE boot() runs, so the helpers are already published regardless.

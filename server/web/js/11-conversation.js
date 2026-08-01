@@ -43,7 +43,8 @@
         changed = true;
         frag.append(document.createTextNode(text.slice(cursor, match.index)));
         const span = document.createElement('span');
-        span.className = 'sigil sigil-' + ({'@':'mention','#':'ref','!':'bang'}[match[1]]);
+        const kind = ({'@':'mention','#':'ref','!':'bang'}[match[1]]);
+        span.className = 'sigil sigil-' + kind + ' inline-' + kind;
         span.dataset.memberId = lookup;
         span.textContent = match[1] + nameFor(lookup, match[2]);
         frag.append(span);
