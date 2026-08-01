@@ -11,17 +11,20 @@
 </head>
 <body>
   <div class="app" id="app">
+    <div class="scrim-nav" id="scrim-nav" hidden></div>
     <aside class="sidebar" aria-label="Workspace navigation">
-      <header class="brand"><div class="brand-mark">T</div><div><div class="brand-name">Atrium</div><div class="brand-sub">chat with your agents</div></div></header>
+      <header class="brand"><div class="brand-mark" aria-hidden="true">T</div><div><div class="brand-name">Atrium</div><div class="brand-sub">your agent workspace</div></div></header>
       <nav class="nav-scroll" id="workspace-rail" aria-label="Channels"></nav>
+      <footer class="side-foot"><div class="who"><div class="n">Workspace</div><div class="s">Live agent coordination</div></div><button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle theme">◐</button></footer>
     </aside>
     <main class="conversation-shell">
-      <header class="conversation-header"><button class="icon-btn nav-toggle" id="nav-toggle" aria-label="Open navigation">☰</button><div><h1 id="h-channel">Atrium</h1><p id="h-meta">Connecting…</p></div><div id="h-conn" aria-live="polite">● connecting</div></header>
-      <section class="messages" id="messages" aria-live="polite" aria-label="Messages"></section>
-      <section class="composer-shell"><div id="target-bar"></div><div id="attachment-strip"></div><textarea id="input" placeholder="Message your agents" rows="1"></textarea><div class="composer-actions"><button id="attach-btn" class="icon-btn" aria-label="Attach file">+</button><button id="send" class="send-btn">Send</button></div></section>
+      <header class="conversation-header topbar"><button class="icon-btn nav-toggle hamb" id="nav-toggle" aria-label="Open navigation">☰</button><div class="tt"><h1 id="h-channel">Atrium</h1><p class="topic" id="h-meta">Connecting…</p></div><div class="topbar-actions"><span class="conn" id="h-conn" aria-live="polite">● connecting</span><button class="icon-btn" id="search-btn" type="button" aria-label="Search messages">⌕</button><button class="icon-btn" id="details-btn" type="button" aria-label="Conversation details">ⓘ</button></div></header>
+      <div class="private-banner hidden" id="private-banner"><span>Private conversation</span></div>
+      <section class="messages msgs" id="messages" tabindex="0" aria-live="polite" aria-label="Messages"></section>
+      <button class="jump-latest hidden" id="jump-latest" type="button">Jump to latest</button>
+      <section class="composer-shell composer-wrap"><div class="composer-inner"><div id="target-bar" class="target-row"></div><div id="attachment-strip"></div><textarea id="input" placeholder="Message the room…" rows="1" aria-label="Message"></textarea><div class="composer-actions comp-bar"><button id="attach-btn" class="icon-btn comp-tool" type="button" aria-label="Attach image">⌇</button><button id="dictate-btn" class="icon-btn comp-tool" type="button" aria-label="Dictate">◉</button><span class="comp-spacer"></span><button id="send" class="send-btn" type="button">Send</button></div></div></section>
     </main>
   </div>
-  <div class="scrim-nav" id="scrim-nav" hidden></div>
   <!--__TRIO_SCRIPTS__-->
 </body>
 </html>
