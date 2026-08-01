@@ -4561,7 +4561,7 @@ def _strip_test_hook(html: str) -> str:
 WEB_SOURCE_DIR = Path(__file__).resolve().with_name("web")
 WEB_CSS_FILES = (
     "css/00-tokens.css", "css/10-shell.css", "css/20-conversation.css",
-    "css/30-workspace.css", "css/40-responsive.css",
+    "css/30-workspace.css",
 )
 WEB_JS_FILES = (
     "js/01-store.js", "js/02-api.js", "js/05-loader.js", "js/04-events.js",
