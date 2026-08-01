@@ -28,12 +28,11 @@
         const payload = JSON.parse(event.data);
         if (payload.type === 'roster' && Array.isArray(payload.members)) root.state.members = new Map(payload.members.map(member => [member.id, member]));
         root.events.dispatchEvent(new CustomEvent(payload.type || 'message', {detail: payload}));
-        root.events.dispatchEvent(new CustomEvent(`sse:${payload.type || 'message'}`, {detail: payload}));
-        root.events.dispatchEvent(new CustomEvent('sse', {detail: payload}));
       } catch (error) { console.warn('invalid Trio event', error); }
     };
     stream.onerror = () => setConnection('reconnecting…', true);
   }
+  root.startEvents = startEvents;
   root.boot = async function boot() {
     const meta = await root.api.get('/api/meta'); root.state.meta = meta;
     root.state.channel = root.state.channel || meta.default_channel || meta.channel || '';

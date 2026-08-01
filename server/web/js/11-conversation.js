@@ -88,11 +88,19 @@
     return answers;
   }
   function answerPayload(msg, questions) {
-    const answers = answerState(msg, questions).map(answer => ({
+    const raw = answerState(msg, questions);
+    const answers = raw.map(answer => ({
       picked: [...answer.picked], custom: answer.custom.trim() ? [answer.custom.trim()] : [],
     }));
     if (answers.some(answer => !answer.picked.length && !answer.custom.length)) throw new Error('Answer every question before sending');
-    return { content: 'Answered question #' + msg.id, reply_to: msg.id, selection: { answers } };
+    const multi = questions.length > 1;
+    let content = '';
+    if (typeof composeAnswer === 'function') {
+      content = composeAnswer(questions, answers, multi);
+    } else {
+      content = multi ? ('Answered ' + questions.length + ' questions') : 'Answered question #' + msg.id;
+    }
+    return { content, reply_to: msg.id, selection: { answers } };
   }
   async function submitAnswer(msg, questions, button) {
     try {
@@ -224,6 +232,14 @@
 
   function upsert(msg) {
     if (!msg || msg.id == null) return;
+    if (state.dmKey) {
+      const op = state.operator?.id;
+      const recips = new Set([...(msg.recipients || []), msg.member_id].filter(Boolean));
+      if (!op || !recips.has(op)) return;
+      const others = [...recips].filter(id => id !== op);
+      const expected = state.dmMemberIds || [];
+      if (others.length !== expected.length || others.some(id => !expected.includes(id))) return;
+    }
     const wasNear = nearBottom(dom()); const previous = state.messages.get(msg.id) || {};
     state.messages.set(msg.id, Object.assign({}, previous, msg));
     const existing = state.messageDomById.get(msg.id);

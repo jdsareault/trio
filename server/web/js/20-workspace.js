@@ -23,6 +23,28 @@
     if (extra) query.set(extra, '1');
     location.assign('/?' + query);
   }
+  function loadConversation(channel, title, subtitle, readOnly = false, isDm = false) {
+    state.readOnly = !!readOnly;
+    state.dmKey = isDm ? (state.dmKey || '') : '';
+    state.channel = channel;
+    document.getElementById('h-channel').textContent = title;
+    document.getElementById('h-meta').textContent = subtitle;
+    const banner = document.getElementById('private-banner');
+    if (banner) { banner.classList.toggle('hidden', !isDm); banner.textContent = isDm ? (readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
+    state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
+    Trio.conversation?.render?.();
+    Trio.startEvents?.();
+  }
+  function openDm(dm, readOnly = false) {
+    state.dmMemberIds = (dm.member_ids || []).slice();
+    state.dmTargetId = state.dmMemberIds[0] || '';
+    state.dmName = dm.name || dm.key;
+    state.dmKey = dm.key;
+    loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, readOnly ? 'Archived private conversation' : 'Private conversation', readOnly, true);
+    api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly ? '&archived=1' : '')).then(data => {
+      if (data && Array.isArray(data.messages)) { data.messages.forEach(Trio.conversation.upsert); }
+    }).catch(error => toast(error.message || 'Could not load DM'));
+  }
   function toast(message) {
     let host = $('trio-toasts');
     if (!host) { host = document.createElement('div'); host.id = 'trio-toasts'; host.className = 'toast-wrap'; document.body.append(host); }
@@ -56,8 +78,8 @@
     [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, view]) =>
       controls.append(railItem(label, '', () => showView(view), view === 'attention' && attentionCount() ? attentionCount() : '')));
     rail.append(controls, section('Channels', nav.active.map(c => railItem(c.code, c.topic || c.status, () => openChannel(c.code), c.unread || ''))));
-    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openChannel(d.channel || state.channel)))));
-    if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent'))));
+    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d)))));
+    if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent', () => openDm(d, true)))));
     const actions = document.createElement('div'); actions.className = 'rail-actions';
     actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => { const panel = document.getElementById('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); }), railItem('Preferences', '', () => Trio.preferences?.panel?.())); rail.append(actions);
   }

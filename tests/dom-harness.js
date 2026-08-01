@@ -491,7 +491,10 @@ function buildSandbox() {
 // considered by the harness instead of silently escaping client coverage.
 function buildScript() {
   const files = ['00-core.js', '10-markdown.js', '11-conversation.js', '12-composer.js'];
-  return files.map(name => fs.readFileSync(path.join(WEB_ROOT, 'js', name), 'utf8')).join('\n') + `
+  return [
+    fs.readFileSync(ASK_JS, 'utf8'),
+    ...files.map(name => fs.readFileSync(path.join(WEB_ROOT, 'js', name), 'utf8')),
+  ].join('\n') + `
     globalThis.__TRIO_TEST__ = {
       state: window.Trio.state,
       renderMarkdown: window.Trio.markdown.renderMarkdown,

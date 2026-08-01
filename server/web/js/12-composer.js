@@ -35,14 +35,15 @@
     const names = [...state.selectedTargets].map(id => '@' + targetName(id));
     return (names.length ? names.join(' ') + ' ' : '') + text;
   }
-  function validate() { return !!renderedContent() || state.pendingAttachments.length > 0; }
+  function validate() { if (state.readOnly) return false; return !!renderedContent() || state.pendingAttachments.length > 0; }
   function buildSendPayload() {
     const body = {
       content: renderedContent(),
       mentions: [...state.selectedTargets],
       attachment_ids: state.pendingAttachments.map(a => a.id).filter(id => Number.isInteger(id) && id > 0),
     };
-    if (state.dmTargetId) body.recipients = [state.dmTargetId];
+    if (state.dmKey && state.dmMemberIds?.length) body.recipients = state.dmMemberIds.slice();
+    else if (state.dmTargetId) body.recipients = [state.dmTargetId];
     if (state.composerReply?.id) {
       body.reply_to = state.composerReply.id;
       if (state.composerReply.selection) body.selection = state.composerReply.selection;
@@ -54,7 +55,7 @@
   async function upload(file) {
     if (!file) return;
     if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type || '')) throw new Error('Choose a PNG, JPEG, GIF, or WebP image');
-    if (file.size > 20 * 1024 * 1024) throw new Error('Image must be 20 MB or smaller');
+    if (file.size > 10 * 1024 * 1024) throw new Error('Image must be 10 MB or smaller');
     const response = await fetch(apiUrl('/api/upload'), {
       method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
     });
@@ -118,6 +119,7 @@
     text.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } });
     sendButton?.addEventListener('click', send);
     attach?.addEventListener('click', () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => window.alert(error.message)); picker.click(); });
+    byId('dictate-btn')?.addEventListener('click', () => toggleDictation().catch(error => window.alert(error?.message || 'Dictation failed')));
     renderTargets(); renderAttachments(); updateSendState();
   }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
