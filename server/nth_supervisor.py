@@ -115,6 +115,28 @@ def build_spawn_argv(
     return argv
 
 
+def build_mcp_config(nth_server_path: str, python_cmd: str = "") -> str:
+    """Inline JSON for `claude --mcp-config` that gives a spawned agent the Trio
+    MCP tools (stdio), pointed at this repo's nth_server.py. Returned as a
+    compact JSON string (claude accepts inline config or a file path).
+
+    NOTE: enabling this makes the agent call trio_connect itself, which mints a
+    NEW member_id — the identity-reclaim path (agents connect AS their agent_id)
+    must land alongside wiring this in, or it reproduces bug B1 (duplicate
+    member on connect). See proposals/unified-interface.md § Agent identity.
+    """
+    py = python_cmd or sys.executable
+    return json.dumps({
+        "mcpServers": {
+            "nth-trio": {
+                "type": "stdio",
+                "command": py,
+                "args": [nth_server_path],
+            }
+        }
+    }, separators=(",", ":"))
+
+
 class AgentProc:
     """A live agent OS process + its reader threads. One thread parses the
     stream-json stdout (capturing session_id from the init event, forwarding

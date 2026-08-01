@@ -58,6 +58,26 @@ def main() -> int:
             echoes.append(evt["message"]["content"])
             got_echo.set()
 
+    # ── pure builders ──
+    argv = sup.build_spawn_argv(model="sonnet", system_prompt="hi",
+                                mcp_config="{}", resume_session_id="sX")
+    check("build_spawn_argv: headless stream-json flags",
+          "-p" in argv and "--input-format" in argv and "stream-json" in argv)
+    check("build_spawn_argv: non-blocking permission mode",
+          "--permission-mode" in argv and "acceptEdits" in argv)
+    check("build_spawn_argv: AskUserQuestion disallowed",
+          "--disallowedTools" in argv and "AskUserQuestion" in argv)
+    check("build_spawn_argv: model + resume + mcp + prompt passed",
+          argv[argv.index("--model") + 1] == "sonnet"
+          and argv[argv.index("--resume") + 1] == "sX"
+          and "--mcp-config" in argv and "--append-system-prompt" in argv)
+    import json as _json
+    cfg = _json.loads(sup.build_mcp_config("/x/nth_server.py", python_cmd="py3"))
+    check("build_mcp_config: registers nth-trio stdio server pointed at nth_server",
+          cfg["mcpServers"]["nth-trio"]["command"] == "py3"
+          and cfg["mcpServers"]["nth-trio"]["args"] == ["/x/nth_server.py"]
+          and cfg["mcpServers"]["nth-trio"]["type"] == "stdio")
+
     s = sup.AgentSupervisor(db_path=db_path, on_event=on_event)
 
     # ── spawn ──

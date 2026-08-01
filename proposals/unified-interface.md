@@ -346,6 +346,41 @@ free (durable identity + hub-owned teardown).
   (launchd/login item) and survives logout is an OS-integration detail to
   settle for v1.
 
+## 10. Agent identity & routing (decided during hub-wiring)
+
+The control-plane + UI are built (create/spawn/list/stop/wake/delete +
+`agents`/`agent_channels` rows, member_id = agent_id). The remaining functional
+core is **making a spawned agent actually round-trip through Trio** — inbound
+messages reaching it, its replies reaching channels. Two coupled decisions,
+resolved here so the wiring slice is unambiguous:
+
+**Identity — reclaim, not re-mint.** A spawned agent needs a Trio session to
+post, which today means `trio_connect` — but that mints a *new* `member_id`,
+duplicating the row the hub pre-created (bug **B1**). Decision: add an optional
+`resume_member_id` (+ its `session_token`) to `nth_connect` (the reclaim path
+proposed in FUTURE_IMPROVEMENTS B1). On spawn the hub:
+1. inserts the `members` row (`id = agent_id`) and mints a session token for it;
+2. passes `agent_id` + token to the process (env `TRIO_MEMBER_ID` /
+   `TRIO_SESSION_TOKEN` + preamble), with the injected Trio MCP
+   (`build_mcp_config`, already built);
+3. the agent calls `trio_connect(resume_member_id=agent_id, session_token=…)`,
+   which **re-attaches** to that row instead of minting a new one.
+This closes B1 by construction and keeps `agent_channels.member_id = agent_id`
+valid. `--mcp-config` is only wired *with* this — enabling it before would
+reproduce the duplicate (guarded with a note in `build_mcp_config`).
+
+**Routing — hub feeds inbound, agent posts outbound (hybrid context).** The hub
+watches each agent's channels; a directed message (`@agent` / DM / bang) is fed
+to the agent's stdin `[#channel]`-tagged via `supervisor.feed()`, waking a
+hibernated agent first. The agent replies via its MCP `trio_send(channel=…)`
+under its reclaimed identity. The agent does **not** run its own monitor — the
+hub is its single merged event source across all its channels. Ambient
+non-directed chatter does not wake it (reuses the sigil filter), bounding cost.
+
+This is the next implementation slice; it also unlocks the first **real-spawn
+smoke** (one billed `claude -p` joining a throwaway channel end-to-end) and a
+LOTC pass before Phase 2 is called done.
+
 ---
 
 **Navigation:** builds on `nth_web.py`, `nth_server.py`; supersedes the
