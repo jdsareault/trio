@@ -154,7 +154,13 @@
     try {
       const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
       const [channels, dms, meta, tasks, approvals] = await Promise.all([api.get('/api/channels'), api.get('/api/dms'), api.get('/api/meta' + query), api.get('/api/tasks' + query).catch(() => ({tasks:[]})), api.get('/api/approvals').catch(() => ({approvals:[]}))]);
-      state.channels = channels.channels || []; state.dms = dms; state.meta = {...state.meta, ...meta}; state.tasks=tasks.tasks||[]; state.approvals=approvals.approvals||[]; renderRail();
+      state.channels = channels.channels || []; state.dms = dms; state.meta = {...state.meta, ...meta}; state.tasks=tasks.tasks||[]; state.approvals=approvals.approvals||[];
+      Trio.store.set('workspace.channels', state.channels);
+      Trio.store.set('workspace.dms', state.dms);
+      Trio.store.set('workspace.meta', state.meta);
+      Trio.store.set('workspace.tasks', state.tasks);
+      Trio.store.set('workspace.approvals', state.approvals);
+      renderRail();
       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     } catch (error) { console.warn('workspace refresh failed', error); }
   }
