@@ -19,9 +19,9 @@
       (meta.tasks || []).filter(t => t.status === 'open' || t.status === 'blocked').length;
   }
   function openChannel(code, extra = '') {
-    const query = new URLSearchParams({channel: code});
-    if (extra) query.set(extra, '1');
-    location.assign('/?' + query);
+    const readOnly = extra === 'archived';
+    if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
+    loadConversation(code, 'trio#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
   }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false) {
     state.view = 'conversation';
@@ -46,6 +46,7 @@
     state.dmKey = dm.key;
     state.dmThread = dm;
     loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, readOnly ? 'Archived private conversation' : 'Private conversation', readOnly, true);
+    if (Trio.router?.navigate) Trio.router.navigate('dm', { key: dm.key, archived: readOnly });
     Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
     const loader = Trio.loader?.load ? Trio.loader : { load: (name, fn) => { const c = { abort() {} }; return fn(c); } };
