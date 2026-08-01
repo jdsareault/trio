@@ -702,7 +702,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Implement archive/restore, end/leave where approved, and destructive confirmations.
   - Support responsive full-width drawer behavior, focus return, Escape, and route changes.
 
-- [ ] **6.4 Complete archive navigation.**
+- [x] **6.4 Complete archive navigation.**
   - Separate archived channels and DMs, with search/filter if lists are nontrivial.
   - Deep-link View into read-only history and preserve archive context on Back.
   - Restore in place, update rail/archive counts immediately, and redirect an open restored conversation to its active route.

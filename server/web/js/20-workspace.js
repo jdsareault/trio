@@ -253,16 +253,33 @@
   }
   function viewArchiveChannel(code) { loadConversation(code, 'trio#' + code, 'Archived channel — read only', true, false); }
   function viewArchiveDm(dm) { openDm(dm, true); }
+  function buildArchiveList(container, items, kind) {
+    container.replaceChildren();
+    if (!items.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Nothing archived.'; container.append(p); return; }
+    const q = (state.archiveSearch || '').toLowerCase();
+    const filtered = q ? items.filter(x => (x.code || x.name || x.key || '').toLowerCase().includes(q)) : items;
+    if (!filtered.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No matches.'; container.append(p); return; }
+    for (const x of filtered) {
+      const key = x.code || x.key; const label = x.code || x.name || x.key;
+      const li = document.createElement('li'); li.className = 'archive-row';
+      li.innerHTML = `<span class="archive-label">${esc(label)}</span><span class="archive-actions"><button data-kind="${esc(kind)}" data-action="view" data-key="${esc(key)}">View</button><button data-kind="${esc(kind)}" data-action="restore" data-key="${esc(key)}">Restore</button></span>`;
+      li.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+        if (b.dataset.action === 'view') b.dataset.kind === 'channel' ? viewArchiveChannel(b.dataset.key) : viewArchiveDm(x);
+        else archive(b.dataset.kind, b.dataset.key, false);
+      }));
+      container.append(li);
+    }
+  }
   async function showArchives() {
     try {
       const [channels, dms] = await Promise.all([api.get('/api/channels?archived=1'), api.get('/api/dms?archived=1')]);
-      const lines = [...(channels.channels || []).map(c => `<li>${esc(c.code)} <button data-kind="channel" data-key="${esc(c.code)}" data-action="view">View</button> <button data-kind="channel" data-key="${esc(c.code)}" data-action="restore">Restore</button></li>`), ...(dms.your_dms || []).map(d => `<li>${esc(d.name || d.key)} <button data-kind="dm" data-key="${esc(d.key)}" data-action="view">View</button> <button data-kind="dm" data-key="${esc(d.key)}" data-action="restore">Restore</button></li>`)].join('') || '<li>Nothing archived.</li>';
-      let panel = $('trio-archives'); if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-archives'; document.body.append(panel); }
-      panel.innerHTML = `<form method="dialog"><button class="modal-close">×</button><h2>Archives</h2><ul>${lines}</ul></form>`;
-      panel.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
-        if (b.dataset.action === 'view') b.dataset.kind === 'channel' ? viewArchiveChannel(b.dataset.key) : viewArchiveDm(dms.your_dms?.find(d => d.key === b.dataset.key) || { key: b.dataset.key, channel: state.channel });
-        else archive(b.dataset.kind, b.dataset.key, false);
-      }));
+      const archivedChannels = channels.channels || []; const archivedDms = dms.your_dms || [];
+      let panel = $('trio-archives'); if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-archives'; panel.className = 'archive-modal'; document.body.append(panel); }
+      panel.innerHTML = '<form method="dialog"><button class="modal-close" value="cancel">×</button><h2>Archives</h2><input class="archive-search" placeholder="Filter archived…" aria-label="Filter archived"><section><h3>Channels</h3><ul class="archive-channel-list"></ul></section><section><h3>Direct messages</h3><ul class="archive-dm-list"></ul></section></form>';
+      const cList = panel.querySelector('.archive-channel-list'); const dList = panel.querySelector('.archive-dm-list');
+      buildArchiveList(cList, archivedChannels, 'channel'); buildArchiveList(dList, archivedDms, 'dm');
+      const input = panel.querySelector('.archive-search');
+      input.addEventListener('input', () => { state.archiveSearch = input.value; buildArchiveList(cList, archivedChannels, 'channel'); buildArchiveList(dList, archivedDms, 'dm'); });
       panel.showModal();
     } catch (error) { toast(error.message || 'Could not load archives'); }
   }
