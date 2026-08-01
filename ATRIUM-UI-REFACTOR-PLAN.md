@@ -633,16 +633,16 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** expose the mature backend without provider-specific clutter.  
 **Prerequisite:** Phase 1 feature/store/dialog foundations and Phase 2/4 status/card components.
 
-- [ ] **5.1 Define a provider-neutral agent view model.**
+- [x] **5.1 Define a provider-neutral agent view model.**
   - Normalize durable identity, provider, model, effort, lifecycle state, busy/queue state, last activity, status text, placements, wake policy, cwd, permission profile, context/session data, and error.
   - Define labels/icons and valid action capabilities for spawning, working, active, idle, sleeping, stopped, blocked, errored, stale, and external agents.
 
-- [ ] **5.2 Build the agent directory.**
+- [x] **5.2 Build the agent directory.**
   - Replace the fixed boot-time drawer with the prototype roster view.
   - Add All/Active/Working/Resting/Needs attention filters, count, search, responsive cards, empty state, and keyboard card activation.
   - Show status, provider/model, current work, last active, placements, and queued/unread indicators without exposing raw runtime noise.
 
-- [ ] **5.3 Build the agent detail drawer.**
+- [x] **5.3 Build the agent detail drawer.**
   - Show identity/bio, runtime configuration, listening mode, placements, current state/error, context/session information, and DM entry.
   - Deep-link selected agent state so refresh/back closes or restores the drawer predictably.
   - Load expensive activity only when its section opens.
