@@ -106,6 +106,23 @@
     return bar;
   }
 
+  function apiUrl(path) {
+    if (typeof Trio.api.url === 'function') return Trio.api.url(path);
+    return state.channel ? path + '?channel=' + encodeURIComponent(state.channel) : path;
+  }
+  async function retract(msg) {
+    const reason = window.prompt('Reason for deleting this message (optional):', '') || '';
+    const response = await fetch(apiUrl('/api/delete'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, reason }) });
+    if (!response.ok) throw new Error('delete failed (' + response.status + ')');
+  }
+  async function edit(msg, body) {
+    const content = window.prompt('Edit message', msg.content || '');
+    if (content == null || content === msg.content) return;
+    const response = await fetch(apiUrl('/api/edit'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, content }) });
+    if (!response.ok) throw new Error('edit failed (' + response.status + ')');
+    body.textContent = content;
+  }
+
   function cardFor(msg) {
     const card = document.createElement('article'); card.className = 'message' + (isOwn(msg) ? ' own' : '') + (msg.is_dm ? ' private' : '');
     card.dataset.messageId = msg.id;
@@ -119,6 +136,14 @@
     const target = renderTargets(msg); if (target) card.append(target);
     const body = document.createElement('div'); body.className = 'message-body'; paintBody(card, body, msg); card.append(body);
     const ask = askCard(msg); if (ask) card.append(ask);
+    if (isOwn(msg) && !msg.retracted_at) {
+      const controls = document.createElement('div'); controls.className = 'message-controls';
+      for (const [label, fn] of [['edit', () => edit(msg, body)], ['delete', () => retract(msg)]]) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+        button.addEventListener('click', () => fn().catch(error => window.alert(error.message))); controls.append(button);
+      }
+      card.append(controls);
+    }
     return card;
   }
 
