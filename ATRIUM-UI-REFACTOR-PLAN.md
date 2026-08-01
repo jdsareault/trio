@@ -523,11 +523,11 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** make the daily chat path polished and trustworthy.  
 **Prerequisite:** Phase 2 shell/component tokens and Phase 1 conversation routing/state.
 
-- [ ] **3.1 Define a message view model.**
+- [x] **3.1 Define a message view model.**
   - Normalize author identity, ownership, timestamps, recipients, sigils, reply target, attachments, choices/selection, confidence, edited/retracted state, and system/task type before rendering.
   - Keep raw server payloads out of DOM builders and test every message type independently.
 
-- [ ] **3.2 Port the prototype message row.**
+- [~] **3.2 Port the prototype message row.**
   - Add avatar/status, author/role metadata, timestamp, message number (when enabled), bubble shape, own/private styling, and keyboard-reachable actions.
   - Preserve safe Markdown and retracted audit placeholders.
   - Gate edit/delete/reply/copy actions by ownership, archived state, and conversation capability.

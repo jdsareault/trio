@@ -18,6 +18,39 @@
   function operator() { return state.operator || state.meta?.operator || {}; }
   function isOwn(msg) { return msg.member_id === operator().id; }
   function isPrivate(msg) { return !!msg.is_dm || Array.isArray(msg.recipients) && msg.recipients.length > 0; }
+  function viewModel(msg) {
+    const op = operator().id;
+    const memberObj = member(msg.member_id);
+    return {
+      id: msg.id,
+      member_id: msg.member_id,
+      author: nameFor(msg.member_id, msg.member_name),
+      role: memberObj.kind || 'agent',
+      isOwn: msg.member_id === op,
+      isPrivate: isPrivate(msg),
+      isSystem: M.isSystemContent(msg.content || ''),
+      isTask: !!msg.task_id,
+      isQuestion: !!msg.choices,
+      isEdited: !!msg.edited_at,
+      isRetracted: !!msg.retracted_at,
+      retractionReason: msg.retraction_reason || '',
+      content: msg.retracted_at ? '' : (msg.content || ''),
+      createdAt: msg.created_at,
+      timestamp: time(msg.created_at),
+      editedAt: msg.edited_at,
+      editedTime: msg.edited_at ? time(msg.edited_at) : '',
+      confidence: msg.confidence,
+      recipients: msg.recipients || [],
+      mentions: msg.mentions || [],
+      refs: msg.refs || [],
+      bangs: msg.bangs || [],
+      attachments: msg.attachments || [],
+      choices: msg.choices,
+      selection: msg.selection,
+      replyTo: msg.reply_to,
+      taskId: msg.task_id,
+    };
+  }
   function time(iso) {
     if (!iso) return '';
     try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
@@ -25,8 +58,8 @@
   }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
 
-  function decorateSigils(root, msg) {
-    const ids = new Set([...(msg.mentions || []), ...(msg.refs || []), ...(msg.bangs || [])]);
+  function decorateSigils(root, vm) {
+    const ids = new Set([...(vm.mentions || []), ...(vm.refs || []), ...(vm.bangs || [])]);
     if (!ids.size || !root) return;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
@@ -56,26 +89,27 @@
     }
   }
 
-  function paintBody(card, body, msg) {
-    card.classList.toggle('retracted', !!msg.retracted_at);
+  function paintBody(card, body, msgOrVm) {
+    const vm = (msgOrVm && typeof msgOrVm.isRetracted === 'boolean') ? msgOrVm : viewModel(msgOrVm);
+    card.classList.toggle('retracted', vm.isRetracted);
     body.replaceChildren();
-    if (msg.retracted_at) {
+    if (vm.isRetracted) {
       body.className = 'message-body plain';
-      body.textContent = '[deleted' + (msg.retraction_reason ? ' — ' + msg.retraction_reason : '') + ']';
+      body.textContent = '[deleted' + (vm.retractionReason ? ' — ' + vm.retractionReason : '') + ']';
       return;
     }
-    if (M.isSystemContent(msg.content || '')) {
+    if (vm.isSystem) {
       body.className = 'message-body plain system';
-      body.textContent = M.humanizeIdSigils(msg.content || '');
+      body.textContent = M.humanizeIdSigils(vm.content);
     } else {
       body.className = 'message-body';
-      body.innerHTML = M.renderMarkdown(msg.content || '');
-      decorateSigils(body, msg);
+      body.innerHTML = M.renderMarkdown(vm.content);
+      decorateSigils(body, vm);
     }
-    if (msg.edited_at) {
+    if (vm.isEdited) {
       const edited = document.createElement('span');
       edited.className = 'edited-mark'; edited.textContent = ' (edited)';
-      edited.title = 'edited ' + time(msg.edited_at); body.append(edited);
+      edited.title = 'edited ' + vm.editedTime; body.append(edited);
     }
   }
 
@@ -180,21 +214,22 @@
   }
 
   function cardFor(msg) {
-    const privateMessage = isPrivate(msg);
-    const card = document.createElement('article'); card.className = 'message' + (isOwn(msg) ? ' own' : '') + (privateMessage ? ' private' : '');
-    card.dataset.messageId = msg.id;
+    const vm = viewModel(msg);
+    const card = document.createElement('article'); card.className = 'message' + (vm.isOwn ? ' own' : '') + (vm.isPrivate ? ' private' : '');
+    card.dataset.messageId = vm.id;
     const head = document.createElement('header'); head.className = 'message-head';
-    const author = document.createElement('strong'); author.textContent = nameFor(msg.member_id, msg.member_name);
-    const stamp = document.createElement('time'); stamp.textContent = time(msg.created_at);
-    head.append(author, stamp);
-    if (msg.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + msg.confidence; confidence.textContent = msg.confidence; head.append(confidence); }
-    if (privateMessage) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
+    const author = document.createElement('strong'); author.textContent = vm.author;
+    const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
+    const stamp = document.createElement('time'); stamp.textContent = '#' + vm.id + ' · ' + vm.timestamp;
+    head.append(author, role, stamp);
+    if (vm.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + vm.confidence; confidence.textContent = vm.confidence; head.append(confidence); }
+    if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
     card.append(head);
-    const target = renderTargets(msg); if (target) card.append(target);
-    const body = document.createElement('div'); body.className = 'message-body'; paintBody(card, body, msg); card.append(body);
-    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+    const target = renderTargets(vm); if (target) card.append(target);
+    const body = document.createElement('div'); body.className = 'message-body'; paintBody(card, body, vm); card.append(body);
+    if (vm.attachments.length) {
       const attachments = document.createElement('div'); attachments.className = 'message-attachments';
-      msg.attachments.forEach(attachment => {
+      vm.attachments.forEach(attachment => {
         if (!attachment || !attachment.id) return;
         const link = document.createElement('a'); link.href = apiUrl('/api/attachment/' + attachment.id); link.target = '_blank'; link.rel = 'noopener'; link.className = 'message-attachment';
         if (/^image\//.test(attachment.mime || '')) { const image = document.createElement('img'); image.src = link.href; image.alt = attachment.filename || 'Attached image'; image.loading = 'lazy'; link.append(image); }
@@ -311,5 +346,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, answerPayload, isPrivate };
+  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, viewModel, answerPayload, isPrivate };
 })();

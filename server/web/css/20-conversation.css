@@ -7,6 +7,9 @@
 .message-head { display:flex; align-items:center; gap:8px; margin-bottom:5px; font-size:12px; color:var(--ink-3); }
 .message.own .message-head { color:color-mix(in srgb,var(--bubble-me-ink,#fff) 80%,transparent); }
 .message-head strong { color:inherit; font-size:13px; }
+.message-role { border-radius:99px; padding:1px 7px; font-size:10px; font-weight:700; text-transform:uppercase; background:var(--bg-sink); color:var(--ink-3); }
+.message.own .message-role { background:color-mix(in srgb,var(--bubble-me-ink,#fff) 20%,transparent); color:var(--bubble-me-ink,#fff); }
+.role-human { background:var(--accent-tint); color:var(--accent-strong); }
 .message-head time { margin-left:auto; white-space:nowrap; }
 .message-body { overflow-wrap:anywhere; line-height:1.55; }
 .message-body p:first-child { margin-top:0; }.message-body p:last-child { margin-bottom:0; }
