@@ -87,12 +87,16 @@ def build_spawn_argv(
     resume_session_id: str = "",
     permission_mode: str = "acceptEdits",
     disallowed_tools: str = "AskUserQuestion",
+    effort: str = "",
 ) -> List[str]:
     """Assemble the headless `claude -p` command for one agent.
 
     Streaming JSON both ways keeps the session conversational across turns and
     lets us capture the session_id (for --resume) from the init event. We drive
     the JSON stream, NOT a pseudo-terminal — no TTY scraping.
+
+    `effort` is the reasoning/thinking level (low|medium|high|xhigh|max); more
+    effort = more planning before acting, which helps weaker models drive tools.
     """
     argv = list(agent_binary())
     argv += [
@@ -102,6 +106,8 @@ def build_spawn_argv(
         "--verbose",
         "--permission-mode", permission_mode,
     ]
+    if effort:
+        argv += ["--effort", effort]
     if disallowed_tools:
         argv += ["--disallowedTools", disallowed_tools]
     if model:
@@ -335,7 +341,7 @@ class AgentSupervisor:
 
     # ── lifecycle ──
     def spawn(self, agent_id: str, *, model: str = "", system_prompt: str = "",
-              mcp_config: str = "", resume_session_id: str = "",
+              mcp_config: str = "", resume_session_id: str = "", effort: str = "",
               session_timeout: float = 10.0) -> AgentProc:
         """Launch (or resume) an agent process and sync its DB row. Serialized
         per-agent. Blocks briefly to capture the session_id from the init
@@ -348,7 +354,7 @@ class AgentSupervisor:
                     return existing
             argv = build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
-                resume_session_id=resume_session_id)
+                resume_session_id=resume_session_id, effort=effort)
             proc = AgentProc(agent_id, argv, on_event=self.on_event,
                              on_session=self._persist_session)
             self._set_state(agent_id, ST_SPAWNING)
@@ -386,7 +392,7 @@ class AgentSupervisor:
         db = self._db()
         try:
             row = db.execute(
-                "SELECT session_id, model, base_prompt FROM agents WHERE id = ?",
+                "SELECT session_id, model, base_prompt, effort FROM agents WHERE id = ?",
                 (agent_id,)).fetchone()
         finally:
             db.close()
@@ -397,6 +403,8 @@ class AgentSupervisor:
             model=spawn_kw.get("model", row["model"] or ""),
             system_prompt=spawn_kw.get("system_prompt", row["base_prompt"] or ""),
             mcp_config=spawn_kw.get("mcp_config", ""),
+            effort=spawn_kw.get("effort",
+                                row["effort"] if "effort" in row.keys() else ""),
             resume_session_id=row["session_id"] or "")
 
     def stop(self, agent_id: str) -> bool:

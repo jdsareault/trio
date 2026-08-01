@@ -458,10 +458,16 @@ def get_db() -> sqlite3.Connection:
             session_id     TEXT,
             pid            INTEGER,
             owner          TEXT,
+            effort         TEXT NOT NULL DEFAULT '',
             created_at     TEXT NOT NULL,
             last_active_at TEXT
         )
     """)
+    # Additive migration for agents tables created before the effort column.
+    try:
+        conn.execute("ALTER TABLE agents ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # already present
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_channels (
             agent_id    TEXT NOT NULL,

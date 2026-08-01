@@ -123,6 +123,20 @@ try:
     db.close()
     check("delete: placements removed, member deactivated", left == 0 and active and active[0] == 0)
 
+    # ── thinking-level (effort) ──
+    st, d = http(port, "/api/agents", "POST",
+                 {"model": "haiku", "channels": ["chan-x"], "effort": "high"})
+    eid = d.get("agent", {}).get("id")
+    er = row(eid)
+    check("create with effort=high: stored on row", er and er["effort"] == "high")
+    proc = web.get_supervisor()._procs.get(eid)
+    check("effort passed to the spawned argv (--effort high)",
+          proc and "--effort" in proc.argv and proc.argv[proc.argv.index("--effort") + 1] == "high")
+    http(port, f"/api/agents/{eid}/delete", "POST")
+    st, _ = http(port, "/api/agents", "POST",
+                 {"model": "haiku", "channels": ["chan-x"], "effort": "bogus"})
+    check("create with invalid effort -> 400", st == 400)
+
     # ── input validation: channels must be a list (Uruk-Hai) ──
     st, _ = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": "chan-x"})
     check("create with channels as a STRING -> 400 (not a crash)", st == 400)

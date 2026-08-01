@@ -1695,8 +1695,13 @@ def ensure_agents_schema(conn) -> None:
             id TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
             base_prompt TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'stopped',
             managed INTEGER NOT NULL DEFAULT 1, session_id TEXT, pid INTEGER,
-            owner TEXT, created_at TEXT NOT NULL, last_active_at TEXT)
+            owner TEXT, effort TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, last_active_at TEXT)
     """)
+    try:
+        conn.execute("ALTER TABLE agents ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_channels (
             agent_id TEXT NOT NULL, channel TEXT NOT NULL, member_id TEXT NOT NULL,
@@ -2812,7 +2817,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
                 "SELECT id, name, model, state, managed, session_id, pid, "
-                "created_at, last_active_at FROM agents ORDER BY created_at"
+                "effort, created_at, last_active_at FROM agents ORDER BY created_at"
             ).fetchall()
             agents = []
             for r in rows:
@@ -2822,6 +2827,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 agents.append({
                     "id": r["id"], "name": r["name"], "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
+                    "effort": (r["effort"] if "effort" in r.keys() else "") or "",
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,
                     "abandoned": len(chans) == 0,
@@ -2851,6 +2857,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         model = (body.get("model") or "").strip()
         prompt = (body.get("prompt") or "").strip()
         desired = (body.get("name") or "").strip()
+        effort = (body.get("effort") or "").strip().lower()
+        if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
+            self._error(400, "effort must be one of low|medium|high|xhigh|max")
+            return
         raw_channels = body.get("channels") or []
         if not isinstance(raw_channels, list):
             self._error(400, "channels must be a list of channel codes")
@@ -2873,8 +2883,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             with db:
                 db.execute(
                     "INSERT INTO agents (id, name, model, base_prompt, state, "
-                    "managed, created_at) VALUES (?,?,?,?,?,1,?)",
-                    (agent_id, name, model, prompt, nsup.ST_SPAWNING, now))
+                    "managed, effort, created_at) VALUES (?,?,?,?,?,1,?,?)",
+                    (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort, now))
                 for c in channels:
                     db.execute(
                         "INSERT OR IGNORE INTO members (id, channel, name, summary, "
@@ -2899,7 +2909,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
         try:
             proc = get_supervisor().spawn(agent_id, model=model,
-                                          system_prompt=preamble, mcp_config=mcp_config)
+                                          system_prompt=preamble, mcp_config=mcp_config,
+                                          effort=effort)
         except Exception as e:
             # Spawn threw — don't leave the row stuck at 'spawning'.
             try:
@@ -4759,6 +4770,14 @@ INDEX_HTML = r"""<!doctype html>
         <option value="sonnet">Sonnet</option>
         <option value="haiku">Haiku</option>
         <option value="fable">Fable</option>
+      </select>
+      <select id="agent-effort" title="thinking / reasoning effort">
+        <option value="">Effort: default</option>
+        <option value="low">Effort: low</option>
+        <option value="medium">Effort: medium</option>
+        <option value="high">Effort: high</option>
+        <option value="xhigh">Effort: xhigh</option>
+        <option value="max">Effort: max</option>
       </select>
       <input id="agent-name" type="text" placeholder="name (optional)" spellcheck="false">
       <input id="agent-channels" type="text" placeholder="channels (comma-separated codes)" spellcheck="false">
@@ -8502,6 +8521,7 @@ INDEX_HTML = r"""<!doctype html>
   const agentsPanel = document.getElementById('agents-panel');
   const agentsListEl = document.getElementById('agents-list');
   const agentModelSel = document.getElementById('agent-model');
+  const agentEffortSel = document.getElementById('agent-effort');
   const agentNameInp = document.getElementById('agent-name');
   const agentChansInp = document.getElementById('agent-channels');
   const agentPromptInp = document.getElementById('agent-prompt');
@@ -8515,7 +8535,9 @@ INDEX_HTML = r"""<!doctype html>
       if (typeof toggleSettings === 'function') toggleSettings(false);
       toggleDmPanel(false);
       try { const m = localStorage.getItem('trio.agent.model');
-            if (m && agentModelSel) agentModelSel.value = m; } catch (e) {}
+            if (m && agentModelSel) agentModelSel.value = m;
+            const ef = localStorage.getItem('trio.agent.effort');
+            if (ef !== null && agentEffortSel) agentEffortSel.value = ef; } catch (e) {}
       if (agentChansInp && !agentChansInp.value) agentChansInp.value = state.channel || '';
       agentsPanel.removeAttribute('hidden'); btnAgents.classList.add('on');
       loadAgents();
@@ -8539,7 +8561,8 @@ INDEX_HTML = r"""<!doctype html>
       row.className = 'agent-row' + (a.abandoned ? ' abandoned' : '');
       const nm = document.createElement('span'); nm.className = 'a-name'; nm.textContent = a.name;
       const stt = document.createElement('span'); stt.className = 'a-state';
-      stt.textContent = (a.live ? 'live' : a.state) + (a.model ? ' · ' + a.model : '');
+      stt.textContent = (a.live ? 'live' : a.state) + (a.model ? ' · ' + a.model : '')
+        + (a.effort ? ' · ' + a.effort : '');
       const sp = document.createElement('span'); sp.className = 'a-spacer';
       const ch = document.createElement('span'); ch.className = 'a-state';
       ch.textContent = (a.channels || []).map(c => '#' + c).join(' ');
@@ -8561,9 +8584,11 @@ INDEX_HTML = r"""<!doctype html>
   async function createAgent() {
     if (!agentModelSel) return;
     const model = agentModelSel.value;
-    try { localStorage.setItem('trio.agent.model', model); } catch (e) {}
+    const effort = agentEffortSel ? agentEffortSel.value : '';
+    try { localStorage.setItem('trio.agent.model', model);
+          localStorage.setItem('trio.agent.effort', effort); } catch (e) {}
     const channels = (agentChansInp.value || '').split(',').map(s => s.trim()).filter(Boolean);
-    const body = { model, name: (agentNameInp.value || '').trim(),
+    const body = { model, effort, name: (agentNameInp.value || '').trim(),
                    prompt: (agentPromptInp.value || '').trim(), channels };
     if (agentCreateMsg) agentCreateMsg.textContent = 'spawning…';
     try {

@@ -34,7 +34,7 @@ CREATE TABLE agents (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
   base_prompt TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'stopped',
   managed INTEGER NOT NULL DEFAULT 1, session_id TEXT, pid INTEGER, owner TEXT,
-  created_at TEXT NOT NULL, last_active_at TEXT);
+  effort TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_active_at TEXT);
 """
 
 
