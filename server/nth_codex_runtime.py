@@ -575,6 +575,20 @@ class CodexRuntimeManager:
         self._set_state(agent_id, "running")
         return True
 
+    def interrupt(self, agent_id: str) -> bool:
+        with self._lock:
+            thread_id = self._threads.get(agent_id)
+            turn_id = self._active.get(agent_id)
+        if not thread_id or not turn_id or not self._client.alive():
+            return False
+        self._client.request("turn/interrupt", {
+            "threadId": thread_id, "turnId": turn_id})
+        with self._lock:
+            self._active.pop(agent_id, None)
+            self._starting.pop(agent_id, None)
+        self._set_state(agent_id, "idle")
+        return True
+
     def hibernate(self, agent_id: str) -> bool:
         return self._unload(agent_id, "sleeping")
 
@@ -687,6 +701,10 @@ class CodexRuntimeManager:
     def queued_count(self, agent_id: str) -> int:
         with self._lock:
             return len(self._queued.get(agent_id, ()))
+
+    def is_busy(self, agent_id: str) -> bool:
+        with self._lock:
+            return agent_id in self._active or agent_id in self._starting
 
     def _on_notification(self, message: Dict[str, Any]) -> None:
         method = message.get("method") or ""

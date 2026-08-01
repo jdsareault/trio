@@ -81,9 +81,11 @@ try:
           manager.feed("ag1", "alpha", "second") and manager.queued_count("ag1") == 1)
     manager._client.request("fake/complete")
     deadline = time.time() + 2
-    while manager.queued_count("ag1") and time.time() < deadline:
+    while (manager.queued_count("ag1") or not manager.is_busy("ag1")) \
+            and time.time() < deadline:
         time.sleep(0.02)
-    check("turn completion drains the next queued message", manager.queued_count("ag1") == 0)
+    check("turn completion drains the next queued message",
+          manager.queued_count("ag1") == 0 and manager.is_busy("ag1"))
     manager._client.request("fake/complete")
     time.sleep(0.1)
     with sqlite3.connect(str(db_path)) as check_db:

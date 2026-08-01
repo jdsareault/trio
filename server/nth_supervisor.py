@@ -473,9 +473,16 @@ class AgentSupervisor:
             return
         db = self._db()
         try:
-            db.execute(
-                "UPDATE agents SET session_id = ?, last_active_at = ? WHERE id = ?",
-                (session_id, now_iso(), agent_id))
+            columns = {r[1] for r in db.execute("PRAGMA table_info(agents)")}
+            if "runtime_ref" in columns:
+                db.execute(
+                    "UPDATE agents SET session_id = ?, runtime_ref = ?, "
+                    "last_active_at = ? WHERE id = ?",
+                    (session_id, session_id, now_iso(), agent_id))
+            else:
+                db.execute(
+                    "UPDATE agents SET session_id = ?, last_active_at = ? WHERE id = ?",
+                    (session_id, now_iso(), agent_id))
             db.commit()
         finally:
             db.close()
@@ -486,6 +493,7 @@ class AgentSupervisor:
         """Update an agent's row. Returns rows affected (0 = unknown agent)."""
         db = self._db()
         try:
+            columns = {r[1] for r in db.execute("PRAGMA table_info(agents)")}
             sets = ["state = ?", "last_active_at = ?"]
             vals: List[Any] = [state, now_iso()]
             if clear_pid:
@@ -496,8 +504,13 @@ class AgentSupervisor:
             if session_id:
                 sets.append("session_id = ?")
                 vals.append(session_id)
+                if "runtime_ref" in columns:
+                    sets.append("runtime_ref = ?")
+                    vals.append(session_id)
             elif clear_session:
                 sets.append("session_id = NULL")
+                if "runtime_ref" in columns:
+                    sets.append("runtime_ref = NULL")
             vals.append(agent_id)
             cur = db.execute(
                 f"UPDATE agents SET {', '.join(sets)} WHERE id = ?", vals)
