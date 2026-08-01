@@ -59,7 +59,7 @@
     if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openChannel(d.channel || state.channel)))));
     if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent'))));
     const actions = document.createElement('div'); actions.className = 'rail-actions';
-    actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives)); rail.append(actions);
+    actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => { const panel = document.getElementById('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); }), railItem('Preferences', '', () => Trio.preferences?.panel?.())); rail.append(actions);
   }
   function showView(view) {
     document.querySelectorAll('[data-trio-view]').forEach(n => n.hidden = true);
