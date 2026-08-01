@@ -370,34 +370,34 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Clear old channel messages before the DM response renders; show loading, empty, unauthorized/not-found, and retry states.
   - Ensure audit DMs never enable the composer.
 
-- [ ] **0.4 Keep the temporary DM view fresh.**
+- [x] **0.4 Keep the temporary DM view fresh.**
   - Until Phase 1 adds a workspace/DM event contract, refresh the active DM thread on a bounded interval and immediately after a successful send.
   - Deduplicate by message ID and suspend refresh while the document is hidden.
   - Mark this polling path with a removal condition tied to task **1.7**; do not let it become the permanent architecture.
 
-- [ ] **0.5 Restore DM send privacy.**
+- [x] **0.5 Restore DM send privacy.**
   - Build recipients from the active DM conversation, not selected `@` chips or the latest backing channel.
   - Verify text and image sends remain private, reply sends inherit the same participants, and the private banner remains visible before and after send.
   - Add a DOM/API test that fails if a DM send omits `recipients`.
 
-- [ ] **0.6 Fix boot-time and control wiring regressions.**
+- [x] **0.6 Fix boot-time and control wiring regressions.**
   - Create `#trio-agents` hidden and open it only from Agent roster/New agent actions.
   - Bind `#dictate-btn` to `toggleDictation()` and keep its pressed/recording/disabled state synchronized.
   - Bind `#jump-latest` to scroll and add a message-list scroll listener that shows/hides it.
   - Hide or visibly disable Search and Details until their Phase 6 implementations land; no enabled control may be inert.
 
-- [ ] **0.7 Wire current workspace actions.**
+- [x] **0.7 Wire current workspace actions.**
   - Add Allow/Decline handlers for `POST /api/approvals/<id>/resolve`, including pending, success, and retry states.
   - Make Open/Claimed/All task filters change the rendered list and selected tab; do not imply task mutation yet.
   - Add click handlers for agent-audit rows and active rail styling for the current route/view.
 
-- [ ] **0.8 Restore the Phase 6 archive contract.**
+- [x] **0.8 Restore the Phase 6 archive contract.**
   - Add View and Restore actions for archived channels and DMs.
   - View archived history through a read-only conversation route with a visible archived banner and disabled composer.
   - Add Archive/Restore to the active conversation action surface.
   - Keep the internal agent inbox unavailable and preserve automatic DM resurfacing on newer activity.
 
-- [ ] **0.9 Reconcile client settings and limits with reality.**
+- [x] **0.9 Reconcile client settings and limits with reality.**
   - Change the client upload cap to the server's 10 MB limit and show the limit before upload.
   - Persist the footer theme toggle through `Trio.preferences.save()`.
   - Remove, disable with explanatory copy, or implement compact, message-number, notification, chime, and dictation preferences; no checkbox may be a no-op.
