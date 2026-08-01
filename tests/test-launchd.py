@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure launchd configuration checks (does not call launchctl)."""
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 SERVER = Path(__file__).resolve().parent.parent / "server"
@@ -25,6 +26,21 @@ checks = {
 }
 for label, ok in checks.items():
     print(("PASS" if ok else "FAIL") + ": " + label)
+
+calls = []
+original_launchctl = launchd.launchctl
+try:
+    def fake_launchctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=5 if len(calls) == 1 else 0,
+                               stdout="", stderr="transient")
+    launchd.launchctl = fake_launchctl
+    retry = launchd.bootstrap("gui/501", Path("/tmp/test.plist"), attempts=2, delay=0)
+    retry_ok = retry.returncode == 0 and len(calls) == 2
+finally:
+    launchd.launchctl = original_launchctl
+print(("PASS" if retry_ok else "FAIL") + ": retries transient bootstrap failures")
+checks["retries transient bootstrap failures"] = retry_ok
 print()
 failed = sum(not ok for ok in checks.values())
 print(f"{'FAILED' if failed else 'OK'} — {failed} failure(s)")

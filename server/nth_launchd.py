@@ -15,6 +15,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 LABEL = "com.nth.trio-hub"
@@ -57,6 +58,20 @@ def build_plist(*, python: str, web_script: str, db_path: str, port: int = 8765,
 def launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["launchctl", *args], check=check, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def bootstrap(domain: str, plist_path: Path, attempts: int = 8,
+              delay: float = 0.25) -> subprocess.CompletedProcess:
+    """Load a LaunchAgent, tolerating launchd's brief post-bootout race."""
+    result = None
+    for attempt in range(max(1, attempts)):
+        result = launchctl("bootstrap", domain, str(plist_path), check=False)
+        if result.returncode == 0:
+            return result
+        if attempt + 1 < attempts:
+            time.sleep(delay)
+    assert result is not None
+    return result
 
 
 def main(argv=None) -> int:
@@ -108,7 +123,7 @@ def main(argv=None) -> int:
     logs.mkdir(parents=True, exist_ok=True)
     plist_path.write_bytes(payload)
     launchctl("bootout", service, check=False)
-    result = launchctl("bootstrap", domain, str(plist_path), check=False)
+    result = bootstrap(domain, plist_path)
     if result.returncode:
         sys.stderr.write(result.stderr or "launchctl bootstrap failed\n")
         return result.returncode
