@@ -688,16 +688,16 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** finish secondary workflows and remove placeholders.  
 **Prerequisite:** primary routing, conversation, workspace, and agent flows are complete.
 
-- [ ] **6.1 Implement global search.**
+- [x] **6.1 Implement global search.**
   - Open from the header and `Cmd/Ctrl+K`; debounce/cancel requests to `/api/search`.
   - Render query highlighting, channel/DM context, author/time, loading/empty/error states, and keyboard selection.
   - Route a result to its conversation and target message, loading history around it if it is outside the current window.
 
-- [ ] **6.2 Define conversation-details data.**
+- [x] **6.2 Define conversation-details data.**
   - Add or compose a stable contract for objective/topic, status/archive state, members, task summary, message/activity stats, and allowed management actions.
   - Avoid one request per member/task and preserve operator/guest authorization boundaries.
 
-- [ ] **6.3 Build the Details drawer and overflow menu.**
+- [x] **6.3 Build the Details drawer and overflow menu.**
   - Render members/status, objective, task summary, activity stats, notification state, and management actions.
   - Implement archive/restore, end/leave where approved, and destructive confirmations.
   - Support responsive full-width drawer behavior, focus return, Escape, and route changes.

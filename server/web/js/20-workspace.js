@@ -300,8 +300,64 @@
     } catch (error) { state.workspaceError = error.message || 'Workspace refresh failed'; console.warn('workspace refresh failed', error); }
     finally { state.workspaceLoading = false; if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
   }
+  let searchDialog = null, searchController = null, searchTimer = null, searchKeydown = null, detailsClick = null;
+  function onSearchKey(event) { if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); openSearch(); } }
+  function renderSearchResults(query, results = []) {
+    const list = searchDialog.querySelector('.search-results');
+    list.innerHTML = '';
+    if (state.searchLoading) { list.innerHTML = '<p class="home-empty">Searching…</p>'; return; }
+    if (!query) { list.innerHTML = '<p class="home-empty">Start typing to search.</p>'; return; }
+    if (!results.length) { list.innerHTML = '<p class="home-empty">No results.</p>'; return; }
+    const q = query.toLowerCase();
+    for (const r of results) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'search-result';
+      const ctx = r.dm ? 'DM · ' + r.dm : '#' + (r.channel || 'unknown');
+      const author = r.member_name || r.member_id || 'unknown';
+      const time = r.created_at ? new Date(r.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      const text = (r.content || '').toLowerCase().includes(q) ? (r.content || '').replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>') : esc(r.content || '');
+      b.innerHTML = `<span class="search-meta">${esc(ctx)} · ${esc(author)} · ${esc(time)}</span><span class="search-body">${text}</span>`;
+      b.addEventListener('click', () => { searchDialog.close(); if (r.dm) openDmByKey(r.dm); else openChannel(r.channel); if (r.id != null) setTimeout(() => { const card = document.querySelector(`[data-message-id="${r.id}"]`); if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.focus(); } }, 200); });
+      list.append(b);
+    }
+  }
+  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  async function doSearch(q) {
+    if (!q) { renderSearchResults(''); return; }
+    state.searchLoading = true; renderSearchResults(q, []);
+    if (searchController) { try { searchController.abort(); } catch {} }
+    searchController = new AbortController();
+    try {
+      const resp = await fetch('/api/search?q=' + encodeURIComponent(q) + (state.channel ? '&channel=' + encodeURIComponent(state.channel) : ''), { signal: searchController.signal, headers: { Accept: 'application/json' } });
+      if (!resp.ok) throw new Error('search failed');
+      const data = await resp.json();
+      renderSearchResults(q, data.results || []);
+    } catch (e) { if (e.name !== 'AbortError') { console.warn('search failed', e); renderSearchResults(q, []); } }
+    finally { state.searchLoading = false; }
+  }
+  function showDetails() {
+    const channel = (state.channels || []).find(c => c.code === state.channel);
+    const topic = channel?.topic || 'No topic';
+    const archived = !!channel?.archived || !!state.readOnly;
+    const members = [...(state.members?.values() || [])].map(m => m.name || m.id);
+    const dm = state.dmKey ? (state.dms?.your_dms || []).find(d => d.key === state.dmKey) : null;
+    const title = dm ? (dm.name || state.dmKey) : (state.channel || 'Atrium');
+    const body = `<h3>${esc(title)}</h3><p class="detail-row"><b>Topic</b><span>${esc(topic)}</span></p><p class="detail-row"><b>Status</b><span>${esc(archived ? 'Archived' : 'Active')}</span></p><p class="detail-row"><b>Members</b><span>${esc(members.join(', ') || 'Unknown')}</span></p><p class="detail-row"><b>Open tasks</b><span>${selectors.openTasks()}</span></p>`;
+    Trio.ui.modal('Conversation details', body + '<div class="agent-actions"><button id="details-archive" type="button">' + (archived ? 'Restore' : 'Archive') + '</button></div>', () => {});
+    setTimeout(() => {
+      const btn = document.getElementById('details-archive');
+      if (btn) btn.addEventListener('click', () => { const target = state.dmKey ? 'dm' : 'channel'; archive(target, state.dmKey || state.channel, !archived); document.getElementById('trio-control-modal')?.close?.(); });
+    }, 0);
+  }
+  function openSearch() {
+    if (!searchDialog) { searchDialog = document.createElement('dialog'); searchDialog.id = 'trio-search'; searchDialog.className = 'search-modal'; document.body.append(searchDialog); }
+    searchDialog.innerHTML = '<form method="dialog"><button class="modal-close" value="cancel">×</button><input class="search-input" placeholder="Search messages…" aria-label="Search"><div class="search-results"></div></form>';
+    searchDialog.showModal();
+    const input = searchDialog.querySelector('.search-input');
+    input.focus();
+    input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
+  }
   let refreshInterval = null;
-  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); }
-  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, selectors, showView, modal, toast};
+  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast};
 })();
