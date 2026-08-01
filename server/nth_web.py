@@ -10566,6 +10566,9 @@ def main() -> int:
                          "Only safe if your Tailscale ACL / host firewall gates the port.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help=f"Port to bind (default {DEFAULT_PORT}).")
+    ap.add_argument("--strict-port", action="store_true",
+                    help="Fail if --port is occupied instead of scanning upward. "
+                         "Used by the background app service for a stable URL.")
     ap.add_argument("--db", default=str(DB_PATH),
                     help=f"Path to nth.db (default {DB_PATH}).")
     ap.add_argument("--agent-idle-minutes", type=float,
@@ -10632,7 +10635,7 @@ def main() -> int:
     requested_port = args.port
     port = requested_port
     server = None
-    for _ in range(50):
+    for _ in range(1 if args.strict_port else 50):
         try:
             server = QuietThreadingHTTPServer((host, port), NthWebHandler)
             break

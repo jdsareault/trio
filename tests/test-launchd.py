@@ -16,6 +16,7 @@ checks = {
     "restarts after failure": p["KeepAlive"] == {"SuccessfulExit": False},
     "runs unified nth_web (no channel arg)": p["ProgramArguments"][:2] == ["/usr/bin/python3", "/repo/server/nth_web.py"],
     "passes db + port": "--db" in p["ProgramArguments"] and "9000" in p["ProgramArguments"],
+    "pins a strict service port": "--strict-port" in p["ProgramArguments"],
     "passes idle timeout": p["ProgramArguments"][-2:] == ["--agent-idle-minutes", "7"],
     "captures stdout/stderr": p["StandardOutPath"].endswith("hub.out.log") and p["StandardErrorPath"].endswith("hub.err.log"),
 }

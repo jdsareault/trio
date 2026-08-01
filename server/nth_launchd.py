@@ -22,7 +22,7 @@ LABEL = "com.nth.trio-hub"
 def build_plist(*, python: str, web_script: str, db_path: str, port: int = 8765,
                 idle_minutes: float = 10.0, log_dir: str) -> dict:
     args = [python, web_script, "--db", db_path, "--port", str(port),
-            "--agent-idle-minutes", str(idle_minutes)]
+            "--strict-port", "--agent-idle-minutes", str(idle_minutes)]
     return {
         "Label": LABEL,
         "ProgramArguments": args,
@@ -42,14 +42,14 @@ def launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Install the nth unified hub as a macOS LaunchAgent")
     ap.add_argument("command", choices=("install", "uninstall", "status"))
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--agent-idle-minutes", type=float, default=10.0)
     ap.add_argument("--db", default=str(Path.home() / ".claude" / "nth" / "nth.db"))
     ap.add_argument("--dry-run", action="store_true")
-    ns = ap.parse_args()
+    ns = ap.parse_args(argv)
     if sys.platform != "darwin":
         sys.stderr.write("nth_launchd is only available on macOS.\n")
         return 2
