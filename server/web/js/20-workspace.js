@@ -4,6 +4,7 @@
   const state = Trio.state;
   const api = Trio.api;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const pendingDecisions = new Set();
   const $ = id => document.getElementById(id);
 
   function groupNavigation(channels = [], dms = {}) {
@@ -26,7 +27,7 @@
       const items = [];
       for (const a of src.approvals || []) {
         if (a.status === 'resolved' || a.status === 'accepted') continue;
-        items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline','cancel'] });
+        items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline', ...(a.can_cancel ? ['cancel'] : [])] });
       }
       for (const t of src.tasks || []) {
         if (t.status !== 'blocked') continue;
@@ -100,15 +101,21 @@
     catch (error) { Trio.ui.toast(error.message || 'Could not update archive'); }
   }
   async function resolveApproval(id, decision) {
-    if (!id) return;
+    if (!id || pendingDecisions.has(id + ':' + decision)) return;
+    pendingDecisions.add(id + ':' + decision);
     try {
-      await api.post('/api/approvals/' + encodeURIComponent(id) + '/resolve', { decision });
+      const url = decision === 'cancel' ? '/api/approvals/' + encodeURIComponent(id) + '/cancel' : '/api/approvals/' + encodeURIComponent(id) + '/resolve';
+      await api.post(url, { decision });
       const list = state.approvals || [];
       const a = list.find(x => x.id === id);
-      if (a) { a.status = 'resolved'; a.resolved_decision = decision; }
+      if (a) {
+        a.status = (decision === 'accept' || decision === 'acceptForSession') ? 'accepted' : 'resolved';
+        a.resolved_decision = decision;
+      }
       showView('attention');
-      Trio.workspace?.refresh?.();
+      await Trio.workspace?.refresh?.();
     } catch (error) { Trio.ui.toast(error.message || 'Could not resolve approval'); }
+    finally { pendingDecisions.delete(id + ':' + decision); }
   }
   function railItem(label, subtitle, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'rail-item';
@@ -175,6 +182,7 @@
         const row = document.createElement('div'); row.className = 'attention-actions';
         for (const d of item.actions) {
           const b = document.createElement('button'); b.type = 'button'; b.textContent = d === 'acceptForSession' ? 'Allow this session' : d;
+          b.disabled = pendingDecisions.has(item.id + ':' + d);
           b.addEventListener('click', () => resolveApproval(item.id, d));
           row.append(b);
         }

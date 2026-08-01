@@ -602,7 +602,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Normalize approvals, unanswered questions, agent errors/blocks, usage warnings, and lock conflicts into common identity, severity, source, timestamp, status, and action fields.
   - Separate active and resolved/history items and define stable ordering/deduplication.
 
-- [~] **4.4 Complete approval interaction.**
+- [x] **4.4 Complete approval interaction.**
   - Render risk/context details from the real approval payload.
   - Support `accept`, `acceptForSession`, `decline`, and `cancel` only where valid; disable duplicate submissions and reconcile server conflicts.
   - Move resolved items to history and update all counts without waiting for the 15-second refresh.
