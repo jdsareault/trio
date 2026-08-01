@@ -1721,6 +1721,7 @@ _SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
+_RUNTIME_HEALTH: Tuple[float, Dict[str, Any]] = (0.0, {})
 
 # Auto-assigned friendly agent names (editable later).
 _AGENT_NAMES = ["Aragorn", "Boromir", "Celeborn", "Denethor", "Eomer",
@@ -1784,6 +1785,17 @@ def get_supervisor() -> "nsup.AgentSupervisor":
         if _SUPERVISOR is None:
             _SUPERVISOR = nsup.AgentSupervisor(db_path=_DB_PATH_GLOBAL)
         return _SUPERVISOR
+
+
+def runtime_health(refresh: bool = False) -> Dict[str, Any]:
+    """Cached Claude runtime readiness for the UI and spawn preflight."""
+    global _RUNTIME_HEALTH
+    checked_at, payload = _RUNTIME_HEALTH
+    if not refresh and payload and time.monotonic() - checked_at < 15.0:
+        return dict(payload)
+    payload = get_supervisor().runtime.diagnostics()
+    _RUNTIME_HEALTH = (time.monotonic(), dict(payload))
+    return payload
 
 
 def wake_agent(agent_id: str, supervisor, db_path: Path):
@@ -2226,6 +2238,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_dms(parsed)
         elif path == "/api/agents":
             self._handle_agents_list()
+        elif path == "/api/health":
+            self._handle_health()
         elif path == "/api/events":
             if not self._authorize_channel():
                 return
@@ -3161,12 +3175,50 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "count": len(agents), "agents": agents})
 
+    def _handle_health(self) -> None:
+        """Operator-facing app, database, and Claude runtime readiness."""
+        if self._require_operator() is None:
+            return
+        db_info: Dict[str, Any] = {"path": str(self.db_path), "ready": False}
+        counts = {"channels": 0, "agents": 0, "messages": 0}
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                db.execute("PRAGMA busy_timeout=3000")
+                db_info["quick_check"] = db.execute("PRAGMA quick_check").fetchone()[0]
+                for table in counts:
+                    counts[table] = db.execute(
+                        f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                db_info["ready"] = db_info["quick_check"] == "ok"
+            finally:
+                db.close()
+        except sqlite3.Error as exc:
+            db_info["error"] = str(exc)
+        runtime = runtime_health()
+        ready = bool(db_info["ready"] and runtime.get("ready"))
+        self._json({
+            "ok": True,
+            "status": "ready" if ready else "needs-attention",
+            "ready": ready,
+            "database": {**db_info, "counts": counts},
+            "runtime": runtime,
+            "supervisor": {"live_agents": len(get_supervisor().live_ids())},
+        })
+
     def _handle_agent_create(self) -> None:
         """Create + spawn an agent: `{model, prompt?, name?, channels?}`.
         Inserts the durable agents row, one members row per placement (member_id
         = agent_id -> agent-keyed identity) + agent_channels rows, then launches
         the process. Operator-only."""
         if self._require_operator() is None:
+            return
+        runtime = runtime_health(refresh=True)
+        if not runtime.get("ready"):
+            self._json({
+                "ok": False,
+                "error": runtime.get("detail") or "Claude runtime is not ready",
+                "runtime": runtime,
+            }, status=409)
             return
         body = self._read_json_body() or {}
         model = (body.get("model") or "").strip()
@@ -4209,6 +4261,11 @@ INDEX_HTML = r"""<!doctype html>
   #agent-new button { background: var(--accent, #3b82f6); color: #fff; border: 0;
     border-radius: 3px; padding: 5px 8px; cursor: pointer; font-size: 12px; }
   #agent-create-msg { font-size: 11px; color: var(--muted, #999); }
+  #agent-health { font-size: 11px; line-height: 1.4; padding: 6px 8px;
+    border-radius: 4px; border: 1px solid var(--border); color: var(--dim); }
+  #agent-health.ready { color: #79d991; border-color: rgba(121,217,145,.35); }
+  #agent-health.attention { color: #ffb86c; border-color: rgba(255,184,108,.4);
+    background: rgba(255,184,108,.06); }
   .agent-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 0;
     border-bottom: 1px solid var(--border); font-size: 12px; }
   .agent-row .a-name { font-weight: 600; }
@@ -5239,6 +5296,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div id="agents-panel" hidden>
     <div class="dm-head"><h3>Agents</h3></div>
+    <div id="agent-health">Checking Claude Code…</div>
     <div id="agent-new">
       <select id="agent-model" title="model">
         <option value="opus">Opus</option>
@@ -9166,6 +9224,7 @@ INDEX_HTML = r"""<!doctype html>
   const btnAgents = document.getElementById('btn-agents');
   const agentsPanel = document.getElementById('agents-panel');
   const agentsListEl = document.getElementById('agents-list');
+  const agentHealthEl = document.getElementById('agent-health');
   const agentModelSel = document.getElementById('agent-model');
   const agentEffortSel = document.getElementById('agent-effort');
   const agentNameInp = document.getElementById('agent-name');
@@ -9186,7 +9245,7 @@ INDEX_HTML = r"""<!doctype html>
             if (ef !== null && agentEffortSel) agentEffortSel.value = ef; } catch (e) {}
       if (agentChansInp && !agentChansInp.value) agentChansInp.value = state.channel || '';
       agentsPanel.removeAttribute('hidden'); btnAgents.classList.add('on');
-      loadAgents();
+      loadAgentHealth(); loadAgents();
     } else { agentsPanel.setAttribute('hidden', ''); btnAgents.classList.remove('on'); }
   }
   async function loadAgents() {
@@ -9198,6 +9257,29 @@ INDEX_HTML = r"""<!doctype html>
       const j = await r.json();
       renderAgents(j.agents || []);
     } catch (e) { agentsListEl.textContent = 'error'; }
+  }
+  async function loadAgentHealth() {
+    if (!agentHealthEl) return;
+    agentHealthEl.className = '';
+    agentHealthEl.textContent = 'Checking Claude Code…';
+    try {
+      const r = await fetch('/api/health');
+      const j = await r.json();
+      const rt = j.runtime || {};
+      if (rt.ready) {
+        agentHealthEl.className = 'ready';
+        agentHealthEl.textContent = '✓ Claude Code ready' +
+          (rt.version ? ' · ' + rt.version : '');
+        if (agentCreateBtn) agentCreateBtn.disabled = false;
+      } else {
+        agentHealthEl.className = 'attention';
+        agentHealthEl.textContent = '⚠ ' + (rt.detail || 'Claude Code needs attention');
+        if (agentCreateBtn) agentCreateBtn.disabled = true;
+      }
+    } catch (_) {
+      agentHealthEl.className = 'attention';
+      agentHealthEl.textContent = '⚠ Could not check Claude Code';
+    }
   }
   function renderAgents(agents) {
     agentsListEl.innerHTML = '';
@@ -9271,7 +9353,10 @@ INDEX_HTML = r"""<!doctype html>
         agentCreateMsg.textContent = 'spawned ' + j.agent.name;
         agentNameInp.value = ''; agentPromptInp.value = '';
         loadAgents(); loadWorkspaceRail();
-      } else { agentCreateMsg.textContent = (j.error || ('error ' + r.status)); }
+      } else {
+        agentCreateMsg.textContent = (j.error || ('error ' + r.status));
+        if (r.status === 409) loadAgentHealth();
+      }
     } catch (e) { if (agentCreateMsg) agentCreateMsg.textContent = 'error'; }
   }
   if (btnAgents) btnAgents.addEventListener('click', (e) => { e.stopPropagation(); toggleAgentsPanel(); });

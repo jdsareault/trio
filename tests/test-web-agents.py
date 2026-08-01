@@ -78,6 +78,12 @@ try:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     time.sleep(0.2)
 
+    st, health = http(port, "/api/health")
+    check("health: database and configured agent runtime are ready",
+          st == 200 and health.get("ready") is True
+          and health.get("runtime", {}).get("provider") == "claude"
+          and health.get("database", {}).get("quick_check") == "ok")
+
     # ── create + spawn ──
     st, d = http(port, "/api/agents", "POST",
                  {"model": "sonnet", "channels": ["chan-x"], "prompt": "be helpful"})
@@ -204,6 +210,23 @@ try:
     check("wake bogus agent -> 404", st == 404)
     http(port, f"/api/agents/{wid}/delete", "POST")
 
+    # ── runtime preflight fails before creating a broken durable row ──
+    _health = web.runtime_health
+    web.runtime_health = lambda refresh=False: {
+        "provider": "claude", "ready": False,
+        "detail": "Claude Code is not authenticated; run `claude login`",
+    }
+    try:
+        with sqlite3.connect(str(srv.DB_PATH)) as check_db:
+            before = check_db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+        st, d = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": []})
+        with sqlite3.connect(str(srv.DB_PATH)) as check_db:
+            after = check_db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+        check("create: unavailable runtime returns actionable 409 before DB insert",
+              st == 409 and "claude login" in d.get("error", "") and before == after)
+    finally:
+        web.runtime_health = _health
+
     # ── operator-only ──
     _orig = web.is_all_seeing
     web.is_all_seeing = lambda mid: False
@@ -212,6 +235,8 @@ try:
         check("guest: GET /api/agents -> 403", st == 403)
         st, _ = http(port, "/api/agents", "POST", {"model": "sonnet"})
         check("guest: POST /api/agents -> 403", st == 403)
+        st, _ = http(port, "/api/health")
+        check("guest: GET /api/health -> 403", st == 403)
     finally:
         web.is_all_seeing = _orig
 finally:
