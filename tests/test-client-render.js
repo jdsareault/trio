@@ -70,6 +70,17 @@ check('composer send payload keeps integer attachment ids and channel targets', 
   });
   delete H.state.dmTargetId;
 });
+check('DM send payload includes the conversation recipients, not just a single target id', () => {
+  H.Trio.state.dmKey = 'dm-thread';
+  H.Trio.state.dmMemberIds = ['ag_1'];
+  H.Trio.state.dmTargetId = undefined;
+  const input = cx.document.getElementById('input'); input.value = 'hello';
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(H.buildSendPayload())), {
+    content: '@ag_1 hello', mentions: ['ag_1'], attachment_ids: [4, 8], recipients: ['ag_1'],
+  });
+  delete H.Trio.state.dmKey;
+  delete H.Trio.state.dmMemberIds;
+});
 
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);

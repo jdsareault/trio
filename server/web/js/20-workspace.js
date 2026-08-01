@@ -26,6 +26,7 @@
   }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false) {
     if (dmPoll) { clearInterval(dmPoll); dmPoll = null; }
+    state.view = 'conversation';
     state.readOnly = !!readOnly;
     state.dmKey = isDm ? (state.dmKey || '') : '';
     state.channel = channel;
@@ -93,8 +94,9 @@
       Trio.workspace?.refresh?.();
     } catch (error) { toast(error.message || 'Could not resolve approval'); }
   }
-  function railItem(label, subtitle, onClick, badge = '') {
+  function railItem(label, subtitle, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'rail-item';
+    button.classList.toggle('active', active);
     button.innerHTML = `<span class="rail-copy"><strong>${esc(label)}</strong>${subtitle ? `<small>${esc(subtitle)}</small>` : ''}</span>${badge ? `<b class="rail-badge">${esc(badge)}</b>` : ''}`;
     button.addEventListener('click', onClick); return button;
   }
@@ -108,14 +110,15 @@
     rail.textContent = '';
     const controls = document.createElement('div'); controls.className = 'rail-views';
     [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, view]) =>
-      controls.append(railItem(label, '', () => showView(view), view === 'attention' && attentionCount() ? attentionCount() : '')));
-    rail.append(controls, section('Channels', nav.active.map(c => railItem(c.code, c.topic || c.status, () => openChannel(c.code), c.unread || ''))));
-    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d)))));
-    if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent', () => openDm(d, true)))));
+      controls.append(railItem(label, '', () => showView(view), view === 'attention' && attentionCount() ? attentionCount() : '', state.view === view)));
+    rail.append(controls, section('Channels', nav.active.map(c => railItem(c.code, c.topic || c.status, () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code))));
+    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d), '', state.view === 'conversation' && state.dmKey === d.key))));
+    if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent', () => openDm(d, true), '', state.view === 'conversation' && state.dmKey === d.key))));
     const actions = document.createElement('div'); actions.className = 'rail-actions';
     actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => { const panel = document.getElementById('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); }), railItem('Preferences', '', () => Trio.preferences?.panel?.())); rail.append(actions);
   }
   function showView(view) {
+    state.view = view;
     document.querySelectorAll('[data-trio-view]').forEach(n => n.hidden = true);
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
