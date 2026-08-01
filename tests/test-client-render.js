@@ -47,6 +47,9 @@ check('answer payload matches the server reply_to and selection contract', () =>
   assert.deepStrictEqual(JSON.parse(JSON.stringify(H.answerPayload(message, message.choices.questions))), {
     content: 'two', reply_to: 91, selection: { answers: [{ picked: [1], custom: [] }] },
   });
+  H.state.answers.set(92, [{ picked: new Set([1]), custom: '' }, { picked: new Set([0, 1]), custom: 'Olives' }]);
+  const multiMsg = { id: 92, choices: { target: 'operator', questions: [{ question: 'Size?', options: ['S', 'M'] }, { question: 'Top?', options: ['Cheese', 'Pep'] }] } };
+  assert.strictEqual(H.answerPayload(multiMsg, multiMsg.choices.questions).content, 'Size? → M\nTop? → Cheese, Pep, Olives');
 });
 check('private state derives from the server recipients field', () => {
   assert.strictEqual(H.isPrivate({ recipients: ['ag_1'] }), true);
