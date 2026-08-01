@@ -607,22 +607,22 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Support `accept`, `acceptForSession`, `decline`, and `cancel` only where valid; disable duplicate submissions and reconcile server conflicts.
   - Move resolved items to history and update all counts without waiting for the 15-second refresh.
 
-- [ ] **4.5 Decide and implement the operator task contract.**
+- [x] **4.5 Decide and implement the operator task contract.**
   - Confirm whether humans may create, claim, release, complete, cancel, and edit dependencies from the UI.
   - If yes, add authenticated HTTP handlers in `server/nth_web.py` that reuse task validation/transactions from `nth_server.py`; add authorization and conflict tests.
   - If no, remove mutation affordances and label the board read-only.
 
-- [ ] **4.6 Build the task board.**
+- [x] **4.6 Build the task board.**
   - Render status chips, owner, blockers/dependencies, result, timestamps, and channel context.
   - Implement All/Open/Claimed/Blocked/Done filters, stable counts, empty states, and the approved inline/detail actions.
   - Route task-origin links back to the relevant channel/message.
 
-- [ ] **4.7 Replace interval-only refresh with store updates.**
+- [x] **4.7 Replace interval-only refresh with store updates.**
   - Route task, approval, agent, and message events into workspace selectors immediately.
   - Retain a low-frequency reconciliation fetch for missed events and visibility resume.
   - Ensure reconciliation never reopens resolved items or overwrites an optimistic pending state with older data.
 
-- [ ] **4.8 Add complete workspace states and tests.**
+- [~] **4.8 Add complete workspace states and tests.**
   - Implement skeleton/loading, all-clear, first-run, partial failure, stale, offline, forbidden, and retry states for Home/Attention/Tasks.
   - Add DOM/browser tests for card routing, count agreement, approval success/conflict/failure, task filters/actions, and live updates while a view is open.
 

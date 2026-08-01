@@ -22,6 +22,17 @@
     activeAgents(src = state) { return (state.agents || []).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
+    taskItems(src = state) {
+      return (src.tasks || []).map(t => ({
+        id: t.id || t.task_id,
+        status: t.status || 'open',
+        title: t.message || t.title || 'Task',
+        owner: t.claimed_by || '',
+        blockers: Array.isArray(t.blocked_by) ? t.blocked_by : [],
+        channel: t.channel,
+        updatedAt: t.updated_at,
+      }));
+    },
     attention(src = state) { return selectors.pendingApprovals(src) + selectors.openTasks(src) + selectors.blockedAgents(src); },
     attentionItems(src = state) {
       const items = [];
@@ -147,6 +158,8 @@
   }
   function renderHome(panel) {
     panel.replaceChildren();
+    if (state.workspaceLoading) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Loading workspace…'; panel.append(p); return; }
+    if (state.workspaceError) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = state.workspaceError; const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Retry'; b.addEventListener('click', refresh); p.append(b); panel.append(p); return; }
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
       { title: 'Attention', count: selectors.attention(), subtitle: 'Need action', action: () => showView('attention') },
@@ -193,6 +206,36 @@
     panel.append(list);
   }
   function timeAgo(iso) { if (!iso) return ''; try { const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; return Math.floor(h / 24) + 'd'; } catch { return ''; } }
+  function renderTasks(panel) {
+    panel.replaceChildren();
+    const heading = document.createElement('h2'); heading.textContent = 'Tasks'; panel.append(heading);
+    const filters = ['open', 'claimed', 'blocked', 'done', 'all'];
+    const filter = filters.includes(state.taskFilter) ? state.taskFilter : 'open';
+    const filterBar = document.createElement('div'); filterBar.className = 'task-filters';
+    for (const f of filters) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = f;
+      b.className = f === filter ? 'active' : '';
+      b.addEventListener('click', () => { state.taskFilter = f; showView('tasks'); });
+      filterBar.append(b);
+    }
+    panel.append(filterBar);
+    const counts = { open: 0, claimed: 0, blocked: 0, done: 0, all: 0 };
+    const all = selectors.taskItems();
+    for (const t of all) { counts[t.status] = (counts[t.status] || 0) + 1; counts.all++; }
+    const list = document.createElement('div'); list.className = 'task-list';
+    const rows = filter === 'all' ? all : all.filter(t => t.status === filter);
+    if (!rows.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No ' + (filter === 'all' ? '' : filter + ' ') + 'tasks.'; list.append(p); }
+    for (const t of rows) {
+      const row = document.createElement('article'); row.className = 'task-row';
+      row.innerHTML = `<b>#${esc(t.id)}</b><span>${esc(t.title)}</span><small>${esc(t.status)}</small>`;
+      if (t.owner) { const owner = document.createElement('small'); owner.textContent = 'claimed by ' + t.owner; row.append(owner); }
+      if (t.blockers.length) { const b = document.createElement('small'); b.textContent = 'blocked: ' + t.blockers.join(', '); b.style.color = 'var(--warm)'; row.append(b); }
+      list.append(row);
+    }
+    panel.append(list);
+    const count = document.createElement('p'); count.className = 'task-count'; count.textContent = `open ${counts.open} · claimed ${counts.claimed} · blocked ${counts.blocked} · done ${counts.done}`;
+    panel.append(count);
+  }
   function showView(view) {
     state.view = view;
     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
@@ -201,12 +244,7 @@
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
     panel.hidden = false;
     if (view === 'home') { renderHome(panel); }
-    else if (view === 'tasks') {
-      const filter = state.taskFilter || 'open';
-      const tasks = (state.tasks || state.meta?.tasks || []).filter(t => filter === 'all' || (t.status || 'open') === filter);
-      panel.innerHTML = `<h2>Tasks</h2><div class="task-filters" id="trio-task-filters"><button data-filter="open" ${filter === 'open' ? 'class="active"' : ''}>Open</button><button data-filter="claimed" ${filter === 'claimed' ? 'class="active"' : ''}>Claimed</button><button data-filter="all" ${filter === 'all' ? 'class="active"' : ''}>All</button></div><div id="trio-task-list">${tasks.map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks match.</p>'}</div>`;
-      panel.querySelectorAll('#trio-task-filters [data-filter]').forEach(b => b.addEventListener('click', () => { state.taskFilter = b.dataset.filter; showView('tasks'); }));
-    }
+    else if (view === 'tasks') { renderTasks(panel); }
     else if (view === 'attention') { renderAttention(panel); }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
   }
@@ -237,6 +275,8 @@
     });
   }
   let unroute = null;
+  let wsl = null;
+  function onWorkspaceUpdate() { if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
   function onRoute(route) {
     if (!route) return;
     if (route.name === 'channel' && state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, route.params.archived ? 'Archived channel — read only' : 'Live agent workspace', !!route.params.archived, false);
@@ -244,6 +284,8 @@
     else if (route.name === 'home') showView('home');
   }
   async function refresh() {
+    if (state.workspaceLoading) return;
+    state.workspaceLoading = true; state.workspaceError = '';
     try {
       const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
       const [channels, dms, meta, tasks, approvals] = await Promise.all([api.get('/api/channels'), api.get('/api/dms'), api.get('/api/meta' + query), api.get('/api/tasks' + query).catch(() => ({tasks:[]})), api.get('/api/approvals').catch(() => ({approvals:[]}))]);
@@ -255,10 +297,11 @@
       Trio.store.set('workspace.approvals', state.approvals);
       renderRail();
       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
-    } catch (error) { console.warn('workspace refresh failed', error); }
+    } catch (error) { state.workspaceError = error.message || 'Workspace refresh failed'; console.warn('workspace refresh failed', error); }
+    finally { state.workspaceLoading = false; if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
   }
   let refreshInterval = null;
-  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); }
-  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } }
+  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); }
+  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, selectors, showView, modal, toast};
 })();
