@@ -1,8 +1,11 @@
 (() => {
   'use strict';
   const root = window.Trio = window.Trio || {};
-  const params = new URLSearchParams(location.search);
-  root.state = root.state || { channel: params.get('channel') || '', messages: [], meta: null, members: new Map() };
+  // Keep the core usable in the intentionally tiny Node DOM harness too;
+  // browsers have URLSearchParams, but the runtime only needs this one value.
+  const channelMatch = ((globalThis.location?.search) || '').match(/[?&]channel=([^&]+)/);
+  const initialChannel = channelMatch ? decodeURIComponent(channelMatch[1].replace(/\+/g, ' ')) : '';
+  root.state = root.state || { channel: initialChannel, messages: [], meta: null, members: new Map() };
   root.events = root.events || new EventTarget();
   function url(path, channelScoped = true) {
     if (!channelScoped || !root.state.channel) return path;
