@@ -4508,9 +4508,9 @@ WEB_CSS_FILES = (
     "css/30-workspace.css", "css/40-responsive.css",
 )
 WEB_JS_FILES = (
-    "js/02-api.js", "js/00-core.js", "js/10-markdown.js", "js/11-conversation.js",
-    "js/12-composer.js", "js/20-workspace.js", "js/30-agents.js",
-    "js/40-preferences.js", "js/90-boot.js", "js/99-test-hook.js",
+    "js/01-store.js", "js/02-api.js", "js/00-core.js", "js/10-markdown.js",
+    "js/11-conversation.js", "js/12-composer.js", "js/20-workspace.js",
+    "js/30-agents.js", "js/40-preferences.js", "js/90-boot.js", "js/99-test-hook.js",
 )
 
 

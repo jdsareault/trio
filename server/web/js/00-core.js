@@ -10,7 +10,9 @@
   function validDmKey(key) { return typeof key === 'string' && key.length > 0 && key.length <= 512 && /^[A-Za-z0-9_,:-]+$/.test(key); }
   const conversationKind = initialDm ? (validDmKey(initialDm) ? 'dm' : 'unknown') : (initialChannel ? 'channel' : 'unknown');
   const conversationKey = initialDm ? (validDmKey(initialDm) ? initialDm : '') : initialChannel;
-  root.state = root.state || { channel: initialChannel, messages: [], meta: null, members: new Map(), conversation: { kind: conversationKind, key: conversationKey } };
+  root.state = root.state || { channel: '', messages: new Map(), meta: null, members: new Map() };
+  root.state.channel = initialChannel;
+  root.state.conversation = { kind: conversationKind, key: conversationKey };
   root.events = root.events || new EventTarget();
   root.api = root.api || {
     url(path, channelScoped = true) {
