@@ -1685,6 +1685,26 @@ _AGENT_NAMES = ["Aragorn", "Boromir", "Celeborn", "Denethor", "Eomer",
                 "Varda", "Beregond", "Elrond", "Gloin", "Halbarad"]
 
 
+def ensure_agents_schema(conn) -> None:
+    """Forward-compat: create the agents/agent_channels tables if a DB predates
+    them, so the standalone hub works against a DB the MCP server hasn't migrated
+    yet. Mirrors the canonical DDL in nth_server.get_db() (idempotent)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+            base_prompt TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'stopped',
+            managed INTEGER NOT NULL DEFAULT 1, session_id TEXT, pid INTEGER,
+            owner TEXT, created_at TEXT NOT NULL, last_active_at TEXT)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_channels (
+            agent_id TEXT NOT NULL, channel TEXT NOT NULL, member_id TEXT NOT NULL,
+            joined_at TEXT NOT NULL, PRIMARY KEY (agent_id, channel))
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_channel ON agent_channels (channel)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_member ON agent_channels (member_id)")
+
+
 def get_supervisor() -> "nsup.AgentSupervisor":
     global _SUPERVISOR
     with _SUPERVISOR_LOCK:
@@ -3561,14 +3581,31 @@ INDEX_HTML = r"""<!doctype html>
      inbox and hop straight to another thread without returning to the channel. */
 
   /* DM inbox panel — mirrors the settings drawer. */
-  #dm-panel {
+  #dm-panel, #agents-panel {
     position: fixed; top: 46px; right: 10px; z-index: 30;
     background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px 14px; min-width: 260px; max-width: 340px;
     max-height: 70vh; overflow-y: auto;
     box-shadow: 0 8px 30px rgba(0,0,0,0.4);
     display: flex; flex-direction: column; gap: 8px; }
-  #dm-panel[hidden] { display: none; }
+  #dm-panel[hidden], #agents-panel[hidden] { display: none; }
+  #agent-new { display: flex; flex-direction: column; gap: 5px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  #agent-new select, #agent-new input, #agent-new textarea {
+    background: var(--bg2); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 4px 6px; font-family: inherit; font-size: 12px; }
+  #agent-new button { background: var(--accent, #3b82f6); color: #fff; border: 0;
+    border-radius: 3px; padding: 5px 8px; cursor: pointer; font-size: 12px; }
+  #agent-create-msg { font-size: 11px; color: var(--muted, #999); }
+  .agent-row { display: flex; align-items: center; gap: 6px; padding: 5px 0;
+    border-bottom: 1px solid var(--border); font-size: 12px; }
+  .agent-row .a-name { font-weight: 600; }
+  .agent-row .a-state { font-size: 10px; text-transform: uppercase; opacity: .8; }
+  .agent-row .a-spacer { flex: 1; }
+  .agent-row button { background: transparent; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px; padding: 2px 6px;
+    cursor: pointer; font-size: 11px; }
+  .agent-row.abandoned .a-name::after { content: ' · abandoned'; color: #e0a; font-weight: 400; }
   #dm-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
                  letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
   #dm-panel .dm-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
@@ -4519,6 +4556,7 @@ INDEX_HTML = r"""<!doctype html>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill pill-icon" id="btn-search" title="search the full channel history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span class="lbl">search</span></span>
     <span class="pill pill-icon" id="btn-dm" title="direct messages addressed to you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H5.2L4 17.2z"/></svg><span class="lbl">DMs</span><span class="dm-badge" id="dm-count" hidden>0</span></span>
+    <span class="pill" id="btn-agents" title="spawn and manage agents" hidden>agents</span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
@@ -4537,6 +4575,23 @@ INDEX_HTML = r"""<!doctype html>
     </div>
     <div id="dm-picker" hidden></div>
     <div id="dm-list"></div>
+  </div>
+  <div id="agents-panel" hidden>
+    <div class="dm-head"><h3>Agents</h3></div>
+    <div id="agent-new">
+      <select id="agent-model" title="model">
+        <option value="opus">Opus</option>
+        <option value="sonnet">Sonnet</option>
+        <option value="haiku">Haiku</option>
+        <option value="fable">Fable</option>
+      </select>
+      <input id="agent-name" type="text" placeholder="name (optional)" spellcheck="false">
+      <input id="agent-channels" type="text" placeholder="channels (comma-separated codes)" spellcheck="false">
+      <textarea id="agent-prompt" placeholder="prompt (optional)" rows="2"></textarea>
+      <button type="button" id="agent-create-btn">+ Spawn agent</button>
+      <span id="agent-create-msg"></span>
+    </div>
+    <div id="agents-list"></div>
   </div>
 
   <div id="chat-wrap">
@@ -8266,6 +8321,90 @@ INDEX_HTML = r"""<!doctype html>
       renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
     } else { toggleDmPicker(false); dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
   }
+
+  // ── Agents panel (operator-only agent control plane) ──
+  const btnAgents = document.getElementById('btn-agents');
+  const agentsPanel = document.getElementById('agents-panel');
+  const agentsListEl = document.getElementById('agents-list');
+  const agentModelSel = document.getElementById('agent-model');
+  const agentNameInp = document.getElementById('agent-name');
+  const agentChansInp = document.getElementById('agent-channels');
+  const agentPromptInp = document.getElementById('agent-prompt');
+  const agentCreateBtn = document.getElementById('agent-create-btn');
+  const agentCreateMsg = document.getElementById('agent-create-msg');
+
+  function toggleAgentsPanel(force) {
+    if (!agentsPanel) return;
+    const show = (force !== undefined) ? force : agentsPanel.hasAttribute('hidden');
+    if (show) {
+      if (typeof toggleSettings === 'function') toggleSettings(false);
+      toggleDmPanel(false);
+      try { const m = localStorage.getItem('trio.agent.model');
+            if (m && agentModelSel) agentModelSel.value = m; } catch (e) {}
+      if (agentChansInp && !agentChansInp.value) agentChansInp.value = state.channel || '';
+      agentsPanel.removeAttribute('hidden'); btnAgents.classList.add('on');
+      loadAgents();
+    } else { agentsPanel.setAttribute('hidden', ''); btnAgents.classList.remove('on'); }
+  }
+  async function loadAgents() {
+    if (!agentsListEl) return;
+    agentsListEl.textContent = 'loading…';
+    try {
+      const r = await fetch('/api/agents');
+      if (!r.ok) { agentsListEl.textContent = (r.status === 403 ? 'operator only' : 'error ' + r.status); return; }
+      const j = await r.json();
+      renderAgents(j.agents || []);
+    } catch (e) { agentsListEl.textContent = 'error'; }
+  }
+  function renderAgents(agents) {
+    agentsListEl.innerHTML = '';
+    if (!agents.length) { agentsListEl.textContent = 'no agents yet'; return; }
+    for (const a of agents) {
+      const row = document.createElement('div');
+      row.className = 'agent-row' + (a.abandoned ? ' abandoned' : '');
+      const nm = document.createElement('span'); nm.className = 'a-name'; nm.textContent = a.name;
+      const stt = document.createElement('span'); stt.className = 'a-state';
+      stt.textContent = (a.live ? 'live' : a.state) + (a.model ? ' · ' + a.model : '');
+      const sp = document.createElement('span'); sp.className = 'a-spacer';
+      const ch = document.createElement('span'); ch.className = 'a-state';
+      ch.textContent = (a.channels || []).map(c => '#' + c).join(' ');
+      row.appendChild(nm); row.appendChild(stt); row.appendChild(sp); row.appendChild(ch);
+      for (const act of (a.live ? ['stop', 'delete'] : ['wake', 'delete'])) {
+        const b = document.createElement('button');
+        b.textContent = act; b.onclick = () => agentAction(a.id, act);
+        row.appendChild(b);
+      }
+      agentsListEl.appendChild(row);
+    }
+  }
+  async function agentAction(id, action) {
+    if (action === 'delete' && !confirm('Delete this agent?')) return;
+    try { await fetch('/api/agents/' + encodeURIComponent(id) + '/' + action, { method: 'POST' }); }
+    catch (e) {}
+    loadAgents();
+  }
+  async function createAgent() {
+    if (!agentModelSel) return;
+    const model = agentModelSel.value;
+    try { localStorage.setItem('trio.agent.model', model); } catch (e) {}
+    const channels = (agentChansInp.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    const body = { model, name: (agentNameInp.value || '').trim(),
+                   prompt: (agentPromptInp.value || '').trim(), channels };
+    if (agentCreateMsg) agentCreateMsg.textContent = 'spawning…';
+    try {
+      const r = await fetch('/api/agents', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (r.ok && j.ok) {
+        agentCreateMsg.textContent = 'spawned ' + j.agent.name;
+        agentNameInp.value = ''; agentPromptInp.value = '';
+        loadAgents();
+      } else { agentCreateMsg.textContent = (j.error || ('error ' + r.status)); }
+    } catch (e) { if (agentCreateMsg) agentCreateMsg.textContent = 'error'; }
+  }
+  if (btnAgents) btnAgents.addEventListener('click', (e) => { e.stopPropagation(); toggleAgentsPanel(); });
+  if (agentCreateBtn) agentCreateBtn.addEventListener('click', (e) => { e.stopPropagation(); createAgent(); });
+
   if (btnDm) {
     btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });
     document.addEventListener('click', (e) => {
@@ -9250,6 +9389,9 @@ INDEX_HTML = r"""<!doctype html>
 
   function applyOperator(op) {
     state.operator = op;
+    // Agent control plane is operator-only — reveal it for loopback/tailscale.
+    state.isOperator = (op.source === 'loopback' || op.source === 'tailscale');
+    if (btnAgents && state.isOperator) btnAgents.removeAttribute('hidden');
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
@@ -9480,9 +9622,10 @@ def main() -> int:
     _mig = sqlite3.connect(str(db_path), timeout=5)
     try:
         ensure_ask_columns(_mig)
+        ensure_agents_schema(_mig)
         _mig.commit()
     except sqlite3.Error as e:
-        sys.stderr.write(f"[nth_web] ask-column migration skipped: {e}\n")
+        sys.stderr.write(f"[nth_web] forward-compat migration skipped: {e}\n")
     finally:
         _mig.close()
 
