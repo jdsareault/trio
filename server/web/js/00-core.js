@@ -23,22 +23,6 @@
     async post(path, body, channelScoped = true) { const response = await fetch(this.url(path, channelScoped), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
   };
   root.actions = root.actions || {};
-  let stream;
-  function setConnection(text, failed = false) { const el = document.getElementById('h-conn'); if (el) { el.textContent = `● ${text}`; el.classList.toggle('bad', failed); } }
-  function startEvents() {
-    if (!root.state.channel) return;
-    stream?.close(); stream = new EventSource(root.api.url('/api/events'));
-    stream.onopen = () => setConnection('live');
-    stream.onmessage = event => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'roster' && Array.isArray(payload.members)) root.state.members = new Map(payload.members.map(member => [member.id, member]));
-        root.events.dispatchEvent(new CustomEvent(payload.type || 'message', {detail: payload}));
-      } catch (error) { console.warn('invalid Trio event', error); }
-    };
-    stream.onerror = () => setConnection('reconnecting…', true);
-  }
-  root.startEvents = startEvents;
   root.boot = async function boot() {
     const meta = await root.api.get('/api/meta'); root.state.meta = meta;
     root.state.channel = root.state.channel || meta.default_channel || meta.channel || '';
@@ -48,6 +32,7 @@
     }
     document.getElementById('h-channel').textContent = root.state.channel ? `trio#${root.state.channel}` : 'Atrium';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
-    startEvents(); root.events.dispatchEvent(new CustomEvent('boot', {detail: meta})); return true;
+    if (root.startEvents) root.startEvents(root.state.channel);
+    root.events.dispatchEvent(new CustomEvent('boot', {detail: meta})); return true;
   };
 })();

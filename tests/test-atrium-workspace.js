@@ -33,6 +33,7 @@ function loadModule(name, context) {
 const base = baseContext();
 loadModule('01-store.js', base);
 loadModule('02-api.js', base);
+loadModule('04-events.js', base);
 loadModule('00-core.js', base);
 loadModule('20-workspace.js', base);
 loadModule('40-preferences.js', base);
@@ -52,6 +53,7 @@ function routeFor(search) {
   const cx = baseContext(search);
   loadModule('01-store.js', cx);
   loadModule('02-api.js', cx);
+  loadModule('04-events.js', cx);
   loadModule('00-core.js', cx);
   return cx.Trio.state.conversation;
 }
