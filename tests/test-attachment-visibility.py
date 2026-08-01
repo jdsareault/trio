@@ -140,7 +140,10 @@ server = None
 try:
     hub.start()
     web.NthWebHandler.hub = hub
-    web.NthWebHandler.channel = CH
+    # Exercise the guest/member visibility path in the supported
+    # single-channel mode. `channel` is now a per-request property; the CLI
+    # channel is carried by `_default_channel`.
+    web.NthWebHandler._default_channel = CH
     web.NthWebHandler.db_path = srv.DB_PATH
     server = web.QuietThreadingHTTPServer(("127.0.0.1", 0), web.NthWebHandler)
     server.daemon_threads = True
