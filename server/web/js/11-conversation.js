@@ -114,6 +114,7 @@
       body.className = 'message-body';
       body.innerHTML = M.renderMarkdown(vm.content);
       decorateSigils(body, vm);
+      Trio.fileLinks?.decorateFilePaths?.(body);
     }
     if (vm.isEdited) {
       const edited = document.createElement('span');

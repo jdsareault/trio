@@ -90,11 +90,13 @@ check('task filters default to open and all shows every row', () => {
   H.Trio.workspace.showView('tasks');
   assert.strictEqual(panel.querySelectorAll('.task-row').length, 2);
 });
-check('agent roster panel is hidden on render', () => {
+check('agent roster panel is not force-hidden by a later render()', () => {
   H.Trio.agents.render([]);
   const panel = cx.document.getElementById('trio-agents');
   assert.ok(panel);
-  assert.strictEqual(panel.hidden, true);
+  panel.hidden = false;
+  H.Trio.agents.render([]);
+  assert.strictEqual(panel.hidden, false);
 });
 check('agent view model normalizes lifecycle and status', () => {
   const vm = H.Trio.agents.viewModel({ id: 'ag_1', name: 'Test', live: true, busy: true, provider: 'claude', model: 'sonnet', filter_mode: 'about', error: 'boom' });
