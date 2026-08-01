@@ -3,7 +3,10 @@
   const Trio = window.Trio;
   async function boot() {
     if (!(await Trio.boot())) return;
-    ['conversation', 'workspace', 'agents', 'preferences', 'router'].forEach(name => Trio[name]?.init?.());
+    ['conversation', 'workspace', 'agents', 'preferences', 'router'].forEach(name => {
+      const feature = Trio[name];
+      if (feature) Trio.lifecycle?.mount?.(name, feature);
+    });
     const app = document.getElementById('app');
     const nav = document.getElementById('nav-toggle');
     const scrim = document.getElementById('scrim-nav');

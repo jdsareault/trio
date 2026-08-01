@@ -490,7 +490,7 @@ function buildSandbox() {
 // Keeping this list explicit is deliberate: a new production module must be
 // considered by the harness instead of silently escaping client coverage.
 function buildScript() {
-  const files = ['01-store.js', '02-api.js', '05-loader.js', '04-events.js', '00-core.js', '03-router.js', '10-markdown.js', '11-conversation.js', '06-ui.js', '12-composer.js', '20-workspace.js', '30-agents.js', '40-preferences.js'];
+  const files = ['01-store.js', '02-api.js', '05-loader.js', '04-events.js', '00-core.js', '03-router.js', '10-markdown.js', '11-conversation.js', '06-ui.js', '12-composer.js', '20-workspace.js', '30-agents.js', '40-preferences.js', '07-lifecycle.js'];
   return [
     fs.readFileSync(ASK_JS, 'utf8'),
     ...files.map(name => fs.readFileSync(path.join(WEB_ROOT, 'js', name), 'utf8')),
