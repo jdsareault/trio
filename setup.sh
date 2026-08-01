@@ -230,8 +230,8 @@ case "$PLATFORM" in
         ;;
 esac
 
-# Tool base names (19 tools)
-TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract)
+# Tool base names (23 tools)
+TOOL_BASES=(connect send dm poll ack pounds ask claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract)
 
 # Build allowlist arrays
 TRIO_TOOLS=()

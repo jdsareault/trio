@@ -135,7 +135,7 @@ def _startup_banner():
     _safe_print("  +-------------------------------------------+")
     _safe_print(f"  |  nth server - {SERVER_NAME:<27s}|")
     _safe_print(f"  |  {f'{SERVER_HOST}:{SERVER_PORT}':<31s}|")
-    _safe_print(f"  |  tools: {TOOL_PREFIX}_* (19)                    |")
+    _safe_print(f"  |  tools: {TOOL_PREFIX}_* (23)                    |")
     _safe_print(f"  |  db: ~/.claude/nth/nth.db                 |")
     if connect_url:
         _safe_print("  |                                           |")

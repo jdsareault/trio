@@ -45,6 +45,15 @@ DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 # How many stderr lines to retain per agent for post-mortem diagnostics.
 STDERR_TAIL_LINES = 200
 
+TRIO_TOOL_NAMES = (
+    "connect", "send", "dm", "poll", "ack", "pounds", "ask",
+    "claim", "complete", "cancel", "release", "lock", "unlock",
+    "set_status", "rename", "status", "roster", "history", "end",
+    "list", "cull", "cleanup", "retract",
+)
+MANAGED_ALLOWED_TOOLS = ",".join(
+    f"mcp__nth-trio__trio_{name}" for name in TRIO_TOOL_NAMES)
+
 # Valid agent lifecycle states (mirror the supervisor state machine in the
 # design doc). Kept as plain strings in agents.state. ST_IDLE is set by the hub
 # (idle-timer), not by this core — it's here so the enum is complete.
@@ -150,6 +159,7 @@ def build_spawn_argv(
     resume_session_id: str = "",
     permission_mode: str = "acceptEdits",
     disallowed_tools: str = "AskUserQuestion",
+    allowed_tools: str = MANAGED_ALLOWED_TOOLS,
     effort: str = "",
     _runtime: Optional[ClaudeRuntime] = None,
 ) -> List[str]:
@@ -174,6 +184,8 @@ def build_spawn_argv(
         argv += ["--effort", effort]
     if disallowed_tools:
         argv += ["--disallowedTools", disallowed_tools]
+    if allowed_tools:
+        argv += ["--allowedTools", allowed_tools]
     if model:
         argv += ["--model", model]
     if system_prompt:
