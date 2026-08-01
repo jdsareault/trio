@@ -19,10 +19,7 @@
       document.documentElement.dataset.theme = next;
       Trio.preferences?.save?.({ theme: next });
     });
-    ['search-btn', 'details-btn'].forEach(id => {
-      const btn = document.getElementById(id);
-      if (btn) { btn.disabled = true; btn.title = (id === 'search-btn' ? 'Search' : 'Conversation details') + ' — not yet implemented'; }
-    });
+    ['search-btn', 'details-btn'].forEach(id => { const btn = document.getElementById(id); if (btn) { btn.disabled = false; btn.title = id === 'search-btn' ? 'Search (Ctrl/Cmd+K)' : 'Conversation details'; } });
     const archiveBtn = document.getElementById('archive-btn');
     archiveBtn?.addEventListener('click', () => Trio.workspace?.archiveCurrent?.());
     if (Trio.state.conversation?.kind === 'dm' && Trio.workspace?.openDmByKey) {

@@ -708,7 +708,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Restore in place, update rail/archive counts immediately, and redirect an open restored conversation to its active route.
   - Verify newer DMs automatically resurface and archived channels preserve tasks/membership/runtime state.
 
-- [ ] **6.5 Finalize the supported preference schema.**
+- [x] **6.5 Finalize the supported preference schema.**
   - List every preference, default, persistence key, affected component, and platform capability.
   - Migrate/validate old `trio.preferences.v1` data and ignore unknown/corrupt values safely.
   - Remove controls for rejected features and add reset-to-default behavior.
@@ -728,7 +728,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Test full keyboard flows and logical focus return for navigation, send, questions, approvals, tasks, agents, search, archives, and settings.
   - Verify reduced motion, contrast, non-color status cues, target size, and screen-reader announcements.
 
-- [ ] **6.9 Remove placeholders and dead compatibility UI.**
+- [~] **6.9 Remove placeholders and dead compatibility UI.**
   - Search the shipped shell for unused IDs/classes, inert controls, raw debug JSON, hard-coded product copy, and old bridge styles.
   - Remove temporary Phase 0 disabled controls only after their real implementations exist.
   - Add a test that every enabled toolbar/nav action has a registered handler.
