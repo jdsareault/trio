@@ -108,8 +108,42 @@ is empty in the rail data.
 should show "live" and new DM messages should appear in real-time. Currently it
 shows "offline" and no live updates occur.
 
+## Bug C: Cross-channel DM updates cannot stay live on a single channel-scoped SSE
+
+### Symptom
+
+A unified DM can contain messages whose actual backing channel is different from
+the channel on the newest row. The operator client subscribes to
+`/api/events?channel=<dm.channel>`, so it will not receive messages that were
+sent in another backing channel. The server already exposes a multiplexed
+operator-only workspace SSE at `/api/workspace/events` (`server/nth_web.py:2534-2587`),
+but the client never connects to it.
+
+### Root cause
+
+`20-workspace.js:42-61` (`openDm()`) sets `state.channel = dm.channel` and then
+`loadConversation()` calls `Trio.startEvents()` (via `04-events.js:25`), which
+builds a channel-scoped EventSource from `api.url('/api/events')`. A merged
+thread may span several channels, so one channel-scoped stream cannot keep the
+whole DM live. The temporary 5-second DM polling in `20-workspace.js` was
+removed during the review, leaving no fallback.
+
+### Fix
+
+For operator sessions, connect to `/api/workspace/events` and route each
+incoming event to the active conversation by thread key. Continue using
+`_event_visible_to()` on the server so privacy is not weakened.
+
+## Additional context from a separate LOTC pass at `d2582d7`
+
+A later review confirmed the same DM SSE gaps and noted the workspace SSE
+endpoint is already implemented on the server but unused on the client. The
+client-side routing needed is: identify the conversation (channel/dm/audit) from
+each event and upsert it into the right view.
+
 ## Reviewer notes
 
-Sauron traced both of these. Bug B is the more impactful of the two — DM-only
-deep links have no live event connection at all. The fix is a one-line change.
-Bug A is lower probability but can cause confusing message loss.
+Sauron traced both of these. Bug B is the most impactful — DM-only deep links
+have no live event connection at all. Bug C becomes the long-term fix once the
+client adopts the workspace SSE endpoint. Bug A is lower probability but can
+cause confusing message loss.

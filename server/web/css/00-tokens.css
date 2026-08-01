@@ -62,6 +62,17 @@
   --st-thinking: #c98a3c;
   --st-idle: #b0a99d;
   --st-offline: #b9b1a6;
+
+  /* z-index scale */
+  --z-base: 1;
+  --z-rail: 10;
+  --z-sidebar: 60;
+  --z-scrim: 80;
+  --z-search: 85;
+  --z-drawer: 70;
+  --z-menu: 90;
+  --z-dialog: 100;
+  --z-toast: 110;
 }
 
 /* accent variants (light) */

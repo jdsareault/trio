@@ -147,9 +147,34 @@ appear saying "No conversation to archive".
 **Bug D:** Click "Activity" on an agent. The output should be a formatted
 timeline, not raw JSON.
 
+## Bug E: Home/Attention/Tasks panels overlay the conversation without hiding the composer
+
+### Symptom
+
+Selecting Home, Attention, or Tasks renders a full-screen panel over the
+message list, but the `messages` region, `private-banner`, and `composer-shell`
+(textarea, Send, attach, dictate) remain in the DOM and interactive. A user can
+be in the Attention view and accidentally send a message to the current channel.
+
+### Root cause
+
+`server/web/js/20-workspace.js:112-129` (`showView()`) only hides
+`[data-trio-view]` panels and prepends a new panel. It does not hide the
+conversation body or the composer, and it does not set a `readOnly` or
+`composer.disabled` state. `30-workspace.css` positions workspace views with
+`position: absolute; inset: 64px 0 0; z-index: 3`, so they visually cover the
+message list but do not disable the underlying composer.
+
+### Fix
+
+`showView()` should hide `messages`, `private-banner`, and `composer-shell`
+while non-conversation views are active, or these views should render in a
+separate mount point that does not share the conversation layout.
+
 ## Reviewer notes
 
 Frodo flagged all four. Bugs A and B are the most impactful — destructive
 actions without confirmation and silent no-ops are both confusing UX. Bug C is
 a CSS oversight. Bug D is a placeholder that should be improved as part of the
-agent details work in Phase 2+.
+agent details work in Phase 2+. Bug E was flagged in a separate LOTC pass at
+`d2582d7` and is a distinct navigation-view defect.

@@ -497,17 +497,17 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Port semantic landmarks and prototype SVG icons; remove placeholder letters and glyphs.
   - Keep dynamic content rendered by features rather than copying mock fixtures.
 
-- [~] **2.5 Match navigation hierarchy and state.**
+- [x] **2.5 Match navigation hierarchy and state.**
   - Render Home, Attention, Tasks, Channels, Agent↔Agent audit, Direct messages, Agent roster, Settings, and New agent in prototype order.
   - Show active route, unread/attention badges, status markers, previews, and intentional empty sections.
   - Populate owner identity from `/api/meta`, not hard-coded prototype data.
 
-- [~] **2.6 Match the topbar and connection treatment.**
+- [x] **2.6 Match the topbar and connection treatment.**
   - Render conversation/view title, topic/subtitle, connection pill, participant face pile, Search, Details, and overflow actions from route state.
   - Give connection and agent states text/icon cues so color is never the only signal.
   - Test long channel names, missing topics, many participants, and reconnecting/offline states.
 
-- [~] **2.7 Implement one responsive shell model.**
+- [x] **2.7 Implement one responsive shell model.**
   - Consolidate the duplicated 880px sidebar/scrim rules.
   - Define z-index tokens for sidebar, scrim, drawer, dialog, menu, toast, and search.
   - Support keyboard and pointer closing, body scroll lock, safe-area padding, and focus return.
