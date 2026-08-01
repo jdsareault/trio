@@ -12,21 +12,20 @@
   const conversationKey = initialDm ? (validDmKey(initialDm) ? initialDm : '') : initialChannel;
   root.state = root.state || { channel: initialChannel, messages: [], meta: null, members: new Map(), conversation: { kind: conversationKind, key: conversationKey } };
   root.events = root.events || new EventTarget();
-  function url(path, channelScoped = true) {
-    if (!channelScoped || !root.state.channel) return path;
-    return path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(root.state.channel);
-  }
   root.api = root.api || {
-    url,
-    async get(path, channelScoped = true) { const response = await fetch(url(path, channelScoped)); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
-    async post(path, body, channelScoped = true) { const response = await fetch(url(path, channelScoped), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
+    url(path, channelScoped = true) {
+      if (!channelScoped || !root.state.channel) return path;
+      return path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(root.state.channel);
+    },
+    async get(path, channelScoped = true) { const response = await fetch(this.url(path, channelScoped)); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
+    async post(path, body, channelScoped = true) { const response = await fetch(this.url(path, channelScoped), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
   };
   root.actions = root.actions || {};
   let stream;
   function setConnection(text, failed = false) { const el = document.getElementById('h-conn'); if (el) { el.textContent = `● ${text}`; el.classList.toggle('bad', failed); } }
   function startEvents() {
     if (!root.state.channel) return;
-    stream?.close(); stream = new EventSource(url('/api/events'));
+    stream?.close(); stream = new EventSource(root.api.url('/api/events'));
     stream.onopen = () => setConnection('live');
     stream.onmessage = event => {
       try {

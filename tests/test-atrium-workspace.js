@@ -13,6 +13,7 @@ function baseContext(search = '') {
       documentElement: { dataset: {} },
     },
     localStorage: { getItem: () => null, setItem() {} },
+    fetch: () => Promise.resolve({ ok: false, status: 404 }),
     EventTarget: class { addEventListener() {} dispatchEvent() {} },
     CustomEvent: class {},
     console,
@@ -30,6 +31,7 @@ function loadModule(name, context) {
 
 // Base workspace tests run with the default empty search.
 const base = baseContext();
+loadModule('02-api.js', base);
 loadModule('00-core.js', base);
 loadModule('20-workspace.js', base);
 loadModule('40-preferences.js', base);
@@ -47,6 +49,7 @@ check('attention count', base.Trio.workspace.attentionCount({ approvals: [{}], t
 // URL routing contract tests.
 function routeFor(search) {
   const cx = baseContext(search);
+  loadModule('02-api.js', cx);
   loadModule('00-core.js', cx);
   return cx.Trio.state.conversation;
 }

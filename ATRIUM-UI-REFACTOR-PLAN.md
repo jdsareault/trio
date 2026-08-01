@@ -414,7 +414,8 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** prevent the remaining prototype port from rebuilding a distributed monolith.  
 **Prerequisite:** Phase 0 regressions have focused tests so the migration cannot silently remove behavior again.
 
-- [ ] **1.1 Lock the module/deployment decision.**
+- [x] **1.1 Lock the module/deployment decision.**
+  - **Decision:** Keep the existing `server/nth_web.py` single-response, zero-build inline module registry. New foundation modules (`02-api.js`, `01-store.js`, `03-router.js`, `04-events.js`) are inserted before `00-core.js` in the bundle. This preserves the current Python-only deploy footprint, works offline without a build step, and allows both browser and Node harnesses to load the same ordered files. Browser support is modern evergreen (URL, EventTarget, fetch, CustomEvent); caching is the existing Python-rendered page response. Tests mirror the server module order in `tests/test-web-bundle.py` and `tests/dom-harness.js`.
   - Prototype native ESM served from safe `/assets/` routes and compare it with an explicit inlined module registry that preserves the portable single response.
   - Record the choice, browser support, cache behavior, test-loading strategy, and single-channel compatibility implications in this document.
   - Update `server/nth_web.py` composition tests before moving feature code.
