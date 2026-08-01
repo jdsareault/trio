@@ -456,7 +456,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Include enough conversation identity in each event to route it without guessing from the current channel.
   - Replace and delete Phase 0's temporary DM polling; add cross-channel DM live-update and privacy tests.
 
-- [ ] **1.8 Define feature lifecycle boundaries.**
+- [x] **1.8 Define feature lifecycle boundaries.**
   - Require each feature to expose `mount`, `update`, and `unmount` and to declare its services/slices.
   - Move timers, EventSource listeners, media streams, and DOM listeners into lifecycle cleanup.
   - Add a development/test guard that reports leaked subscriptions after unmount.
