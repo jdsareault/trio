@@ -15,6 +15,7 @@ hold_turns = "--hold" in sys.argv
 held = []
 last_approval = ""
 last_input = []
+last_thread_start = {}
 
 
 TOOL_NAMES = (
@@ -72,6 +73,7 @@ for raw in sys.stdin:
                 for name in TOOL_NAMES},
             "authStatus": "unsupported"}], "nextCursor": None}})
     elif method == "thread/start":
+        last_thread_start = dict(params)
         tid = f"thr_fake_{os.getpid()}_{next_thread}"
         next_thread += 1
         threads[tid] = {"active": None}
@@ -115,6 +117,8 @@ for raw in sys.stdin:
         send({"id": request_id, "result": {"decision": last_approval}})
     elif method == "fake/last-input":
         send({"id": request_id, "result": {"input": last_input}})
+    elif method == "fake/last-thread-start":
+        send({"id": request_id, "result": {"params": last_thread_start}})
     elif method == "fake/crash":
         raise SystemExit(7)
     elif method == "turn/interrupt":

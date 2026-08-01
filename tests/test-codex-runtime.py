@@ -67,6 +67,11 @@ try:
         "ag1", model="fake-codex", effort="high", cwd=str(tmp),
         system_prompt="You are Codexer")
     check("spawn creates a persistent Codex thread", handle.thread_id.startswith("thr_fake_"))
+    start_params = manager._client.request("fake/last-thread-start").get("params", {})
+    check("spawn applies installed App Server permission enums",
+          start_params.get("sandbox") == "workspace-write"
+          and start_params.get("approvalPolicy") == "on-request"
+          and start_params.get("approvalsReviewer") == "auto_review")
     check("shared runtime reports agent live without a per-agent pid",
           handle.alive() and handle.pid is None)
     with sqlite3.connect(str(db_path)) as check_db:

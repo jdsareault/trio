@@ -89,6 +89,7 @@ joined = " ".join(argv)
 check("production argv injects required nth-trio MCP config",
       argv[:2] == ["codex", "app-server"]
       and "mcp_servers.nth-trio.required=true" in argv
+      and '"trio_connect"' in joined and '"trio_retract"' in joined
       and "/tmp/nth server.py" in joined)
 
 print(f"\n{'OK' if failures == 0 else 'FAILED'} — {failures} failure(s)")

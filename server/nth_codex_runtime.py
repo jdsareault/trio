@@ -48,12 +48,12 @@ def build_app_server_argv(nth_server_path: str = "",
     argv = ["codex", "app-server"]
     if nth_server_path:
         py = python_cmd or sys.executable
-        tool_names = [
+        tool_names = ["trio_" + name for name in (
             "connect", "send", "dm", "poll", "ack", "pounds", "ask",
             "claim", "complete", "cancel", "release", "lock", "unlock",
             "set_status", "rename", "status", "roster", "history", "end",
             "list", "cull", "cleanup", "retract",
-        ]
+        )]
         argv += [
             "-c", f"mcp_servers.nth-trio.command={_toml_string(py)}",
             "-c", "mcp_servers.nth-trio.args=" + json.dumps([nth_server_path]),
@@ -467,7 +467,7 @@ class CodexRuntimeManager:
                 "developerInstructions": system_prompt or None,
                 "approvalPolicy": "never" if permission_profile == "autonomous" else "on-request",
                 "approvalsReviewer": "auto_review" if permission_profile == "balanced" else "user",
-                "sandbox": "readOnly" if permission_profile == "observe" else "workspaceWrite",
+                "sandbox": "read-only" if permission_profile == "observe" else "workspace-write",
             }
             if model:
                 params["model"] = model
