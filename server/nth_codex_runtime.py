@@ -272,11 +272,24 @@ class CodexAppServerClient:
 
 def codex_cli_diagnostics(timeout: float = 5.0) -> Dict[str, Any]:
     """Cheap readiness probe that never starts a model turn."""
+    override = os.environ.get("TRIO_CODEX_CMD", "").strip()
+    if override:
+        command = shlex.split(override)
+        executable = shutil.which(command[0]) if command else None
+        return {
+            "provider": "codex", "command": command,
+            "executable": executable or "", "available": bool(executable),
+            "authenticated": None, "version": "", "ready": bool(executable),
+            "detail": ("custom Codex App Server command configured" if executable
+                       else "custom Codex App Server command was not found"),
+            "override": True,
+        }
     executable = shutil.which("codex")
     result: Dict[str, Any] = {
         "provider": "codex", "command": ["codex"],
         "executable": executable or "", "available": bool(executable),
         "authenticated": None, "version": "", "ready": False, "detail": "",
+        "override": False,
     }
     if not executable:
         result["detail"] = "Codex CLI was not found on PATH"

@@ -83,6 +83,9 @@ class UnifiedAgentSupervisor:
         finally:
             db.close()
         manager = self.codex if provider == "codex" else self.claude
+        if provider == "claude":
+            kwargs.pop("cwd", None)
+            kwargs.pop("permission_profile", None)
         return manager.spawn(agent_id, **kwargs)
 
     def wake(self, agent_id: str, **kwargs):

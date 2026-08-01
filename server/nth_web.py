@@ -59,6 +59,7 @@ from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, animal_for,
                            animal_for_channel, can_see, is_all_seeing,
                            parse_recipients)
 import nth_supervisor as nsup
+import nth_agent_manager as nam
 
 
 # ───────── Config ─────────
@@ -1713,11 +1714,11 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
 
 # ── agent control plane (supervisor-backed) ──
 # The hub owns ONE AgentSupervisor. Agent management endpoints are operator-only.
-_SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
+_SUPERVISOR: Optional["nam.UnifiedAgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
-_RUNTIME_HEALTH: Tuple[float, Dict[str, Any]] = (0.0, {})
+_RUNTIME_HEALTH: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
 class UnifiedHubLock:
@@ -1843,22 +1844,25 @@ def initialize_database(db_path: Path) -> bool:
     return True
 
 
-def get_supervisor() -> "nsup.AgentSupervisor":
+def get_supervisor() -> "nam.UnifiedAgentSupervisor":
     global _SUPERVISOR
     with _SUPERVISOR_LOCK:
         if _SUPERVISOR is None:
-            _SUPERVISOR = nsup.AgentSupervisor(db_path=_DB_PATH_GLOBAL)
+            _SUPERVISOR = nam.UnifiedAgentSupervisor(
+                db_path=_DB_PATH_GLOBAL, nth_server_path=NTH_SERVER_PATH)
         return _SUPERVISOR
 
 
-def runtime_health(refresh: bool = False) -> Dict[str, Any]:
-    """Cached Claude runtime readiness for the UI and spawn preflight."""
-    global _RUNTIME_HEALTH
-    checked_at, payload = _RUNTIME_HEALTH
+def runtime_health(refresh: bool = False, provider: str = "claude",
+                   deep: bool = False) -> Dict[str, Any]:
+    """Cached provider readiness for the UI and spawn preflight."""
+    provider = provider.lower()
+    cache_key = provider + (":deep" if deep else ":shallow")
+    checked_at, payload = _RUNTIME_HEALTH.get(cache_key, (0.0, {}))
     if not refresh and payload and time.monotonic() - checked_at < 15.0:
         return dict(payload)
-    payload = get_supervisor().runtime.diagnostics()
-    _RUNTIME_HEALTH = (time.monotonic(), dict(payload))
+    payload = get_supervisor().diagnostics(provider, deep=deep)
+    _RUNTIME_HEALTH[cache_key] = (time.monotonic(), dict(payload))
     return payload
 
 
@@ -2306,6 +2310,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_dms(parsed)
         elif path == "/api/agents":
             self._handle_agents_list()
+        elif path == "/api/agent-models":
+            self._handle_agent_models(parsed)
         elif path == "/api/health":
             self._handle_health()
         elif path == "/api/events":
@@ -3218,7 +3224,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
                 "SELECT id, name, model, state, managed, session_id, pid, "
-                "effort, created_at, last_active_at FROM agents ORDER BY created_at"
+                "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
+                "wake_mode, created_at, last_active_at FROM agents ORDER BY created_at"
             ).fetchall()
             agents = []
             for r in rows:
@@ -3230,11 +3237,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "id": r["id"], "name": r["name"], "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
                     "effort": (r["effort"] if "effort" in r.keys() else "") or "",
+                    "provider": r["runtime_provider"] or "claude",
+                    "runtime_ref": r["runtime_ref"] or r["session_id"],
+                    "cwd": r["cwd"] or "",
+                    "permission_profile": r["permission_profile"] or "balanced",
+                    "wake_mode": r["wake_mode"] or "at",
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,
                     "dm_ready": dm_ready,
                     "abandoned": not chans and not dm_ready,
                     "live": sup.is_running(r["id"]),
+                    "busy": sup.is_busy(r["id"]),
+                    "queued": sup.queued_count(r["id"]),
                     "created_at": r["created_at"],
                     "last_active_at": r["last_active_at"],
                 })
@@ -3249,8 +3263,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "count": len(agents), "agents": agents})
 
+    def _handle_agent_models(self, parsed) -> None:
+        """Discover provider model and reasoning capabilities without a turn."""
+        if self._require_operator() is None or not self._require_agent_control():
+            return
+        provider = (parse_qs(parsed.query).get("provider", ["claude"])[0]
+                    or "claude").strip().lower()
+        if provider not in ("claude", "codex"):
+            self._error(400, "provider must be claude or codex")
+            return
+        try:
+            models = get_supervisor().list_models(provider)
+        except Exception as exc:
+            self._json({"ok": False, "provider": provider, "models": [],
+                        "error": str(exc)}, status=409)
+            return
+        self._json({"ok": True, "provider": provider, "models": models})
+
     def _handle_health(self) -> None:
-        """Operator-facing app, database, and Claude runtime readiness."""
+        """Operator-facing app, database, and provider runtime readiness."""
         if self._require_operator() is None:
             return
         db_info: Dict[str, Any] = {"path": str(self.db_path), "ready": False}
@@ -3268,14 +3299,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 db.close()
         except sqlite3.Error as exc:
             db_info["error"] = str(exc)
-        runtime = runtime_health()
-        ready = bool(db_info["ready"] and runtime.get("ready"))
+        runtimes = {
+            "claude": runtime_health(provider="claude"),
+            "codex": runtime_health(provider="codex"),
+        }
+        ready = bool(db_info["ready"] and any(
+            runtime.get("ready") for runtime in runtimes.values()))
         self._json({
             "ok": True,
             "status": "ready" if ready else "needs-attention",
             "ready": ready,
             "database": {**db_info, "counts": counts},
-            "runtime": runtime,
+            # Keep the original field for Phase 4 clients; new clients consume
+            # the provider-keyed readiness map.
+            "runtime": runtimes["claude"],
+            "runtimes": runtimes,
             "supervisor": {"live_agents": len(get_supervisor().live_ids())},
         })
 
@@ -3286,22 +3324,60 @@ class NthWebHandler(BaseHTTPRequestHandler):
         the process. Operator-only."""
         if self._require_operator() is None or not self._require_agent_control():
             return
-        runtime = runtime_health(refresh=True)
+        body = self._read_json_body() or {}
+        provider = (body.get("provider") or "claude").strip().lower()
+        if provider not in ("claude", "codex"):
+            self._error(400, "provider must be claude or codex")
+            return
+        runtime = runtime_health(
+            refresh=True, provider=provider, deep=(provider == "codex"))
         if not runtime.get("ready"):
             self._json({
                 "ok": False,
-                "error": runtime.get("detail") or "Claude runtime is not ready",
+                "error": runtime.get("detail") or f"{provider.title()} runtime is not ready",
                 "runtime": runtime,
             }, status=409)
             return
-        body = self._read_json_body() or {}
         model = (body.get("model") or "").strip()
         prompt = (body.get("prompt") or "").strip()
         desired = (body.get("name") or "").strip()
         effort = (body.get("effort") or "").strip().lower()
-        if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
-            self._error(400, "effort must be one of low|medium|high|xhigh|max")
+        if effort and effort not in ("low", "medium", "high", "xhigh", "max", "ultra"):
+            self._error(400, "effort must be one of low|medium|high|xhigh|max|ultra")
             return
+        permission_profile = (body.get("permission_profile") or "balanced").strip().lower()
+        if permission_profile not in ("observe", "balanced", "autonomous"):
+            self._error(400, "permission_profile must be observe, balanced, or autonomous")
+            return
+        wake_mode = (body.get("wake_mode") or "at").strip().lower()
+        if wake_mode not in FILTER_MODES:
+            self._error(400, "wake_mode must be all, about, or at")
+            return
+        cwd = (body.get("cwd") or "").strip()
+        if provider == "codex":
+            cwd_path = Path(cwd or os.getcwd()).expanduser().resolve()
+            if not cwd_path.is_dir():
+                self._error(400, "cwd must be an existing directory")
+                return
+            cwd = str(cwd_path)
+            try:
+                models = get_supervisor().list_models("codex")
+            except Exception as exc:
+                self._error(409, f"Codex model discovery failed: {exc}")
+                return
+            if not model:
+                preferred = next((m for m in models if m.get("default")), None)
+                if preferred is None and models:
+                    preferred = models[0]
+                model = (preferred or {}).get("id") or ""
+            selected = next((m for m in models if m.get("id") == model), None)
+            if model and selected is None:
+                self._error(400, f"unknown Codex model: {model}")
+                return
+            if effort and selected and selected.get("efforts") \
+                    and effort not in selected["efforts"]:
+                self._error(400, f"{model} does not support effort {effort}")
+                return
         raw_channels = body.get("channels") or []
         if not isinstance(raw_channels, list):
             self._error(400, "channels must be a list of channel codes")
@@ -3328,8 +3404,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 ensure_agent_inboxes(db)
                 db.execute(
                     "INSERT INTO agents (id, name, model, base_prompt, state, "
-                    "managed, effort, created_at) VALUES (?,?,?,?,?,1,?,?)",
-                    (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort, now))
+                    "managed, effort, runtime_provider, cwd, permission_profile, "
+                    "wake_mode, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?)",
+                    (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
+                     provider, cwd, permission_profile, wake_mode, now))
                 for c in channels + [AGENT_INBOX_CHANNEL]:
                     db.execute(
                         "INSERT OR IGNORE INTO members (id, channel, name, summary, "
@@ -3354,9 +3432,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             build_agent_preamble(name, all_channels, member_id=agent_id)
         mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
         try:
-            proc = get_supervisor().spawn(agent_id, model=model,
+            proc = get_supervisor().spawn(agent_id, provider=provider, model=model,
                                           system_prompt=preamble, mcp_config=mcp_config,
-                                          effort=effort)
+                                          effort=effort, cwd=cwd,
+                                          permission_profile=permission_profile)
         except Exception as e:
             # Spawn threw — don't leave the row stuck at 'spawning'.
             try:
@@ -3376,6 +3455,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "inbox is for direct messages and is not a public workspace channel.")
         self._json({"ok": True, "agent": {
             "id": agent_id, "name": name, "model": model, "channels": channels,
+            "provider": provider, "cwd": cwd,
+            "permission_profile": permission_profile, "wake_mode": wake_mode,
             "state": nsup.ST_RUNNING if proc.alive() else nsup.ST_ERRORED,
             "live": proc.alive(),
         }})
@@ -3387,6 +3468,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         sup = get_supervisor()
         if action == "stop":
             ok = sup.stop(agent_id)
+        elif action == "interrupt":
+            ok = sup.interrupt(agent_id)
         elif action == "hibernate":
             ok = sup.hibernate(agent_id)
         elif action == "wake":
@@ -3444,8 +3527,26 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 sup.feed(agent_id, channel,
                          "Your placement was updated. Connect to this channel with your existing Trio identity, then acknowledge here.")
             ok = True
+        elif action == "wake-mode":
+            body = self._read_json_body(max_bytes=4096)
+            if body is None:
+                return
+            mode = (body.get("mode") or "").strip().lower()
+            if mode not in FILTER_MODES:
+                self._error(400, "mode must be all, about, or at")
+                return
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                with db:
+                    cur = db.execute(
+                        "UPDATE agents SET wake_mode=? WHERE id=?", (mode, agent_id))
+                ok = cur.rowcount > 0
+            finally:
+                db.close()
         elif action == "delete":
-            sup.stop(agent_id)
+            if not sup.delete(agent_id):
+                self._error(404, "agent not found or provider delete failed")
+                return
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
                 with db:

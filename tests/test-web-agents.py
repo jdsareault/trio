@@ -219,7 +219,7 @@ try:
 
     # ── runtime preflight fails before creating a broken durable row ──
     _health = web.runtime_health
-    web.runtime_health = lambda refresh=False: {
+    web.runtime_health = lambda refresh=False, **_kwargs: {
         "provider": "claude", "ready": False,
         "detail": "Claude Code is not authenticated; run `claude login`",
     }
