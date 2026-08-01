@@ -43,6 +43,7 @@ for channel in ("chan-a", "chan-b"):
                "VALUES (?,?, 'Workspace Agent','','',?,?,1,'agent')", (aid, channel, now, now))
     db.execute("INSERT INTO agent_channels (agent_id,channel,member_id,joined_at) VALUES (?,?,?,?)",
                (aid, channel, aid, now))
+web.ensure_agent_inboxes(db)
 db.commit()
 db.close()
 
@@ -89,6 +90,12 @@ try:
     check("duplicate channel is a conflict", st == 409)
     st, _ = http(port, "/api/channels", "POST", {"code": "Bad channel"})
     check("invalid channel code is rejected", st == 400)
+    st, _ = http(port, "/api/channels", "POST", {"code": web.AGENT_INBOX_CHANNEL})
+    check("private agent inbox name is reserved", st == 400)
+    st, listed = http(port, "/api/channels")
+    check("private agent inbox is hidden from the channel list",
+          st == 200 and web.AGENT_INBOX_CHANNEL not in
+          {c.get("code") for c in listed.get("channels", [])})
 
     # Operator messages the same durable agent in two different placements.
     for channel, content in (("chan-a", "from operator A"), ("chan-b", "from operator B")):
@@ -111,7 +118,8 @@ try:
           st == 200 and len(threads) == 1 and threads[0].get("member_ids") == [aid])
     targets = {t["id"]: t for t in inbox.get("targets", [])}
     check("newly-created agent is directly DM-addressable from the global picker",
-          aid in targets and targets[aid]["channels"] == ["chan-a", "chan-b"])
+          aid in targets and targets[aid]["channels"] == ["chan-a", "chan-b"]
+          and targets[aid]["dm_channel"] == web.AGENT_INBOX_CHANNEL)
 
     st, thread = http(port, "/api/dms?with=" + aid)
     messages = thread.get("messages", [])

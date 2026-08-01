@@ -67,6 +67,10 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# Managed agents always have one private transport channel for direct messages.
+# It is a real Trio channel so the existing MCP visibility/routing guarantees
+# apply unchanged, but it is hidden from every public channel/placement surface.
+AGENT_INBOX_CHANNEL = "nth-agent-inbox"
 
 # ── Image attachments (Phase-1 prototype) ──
 ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
@@ -1674,6 +1678,43 @@ def channel_exists(channel: str, db_path: Optional[Path] = None) -> bool:
         return False
 
 
+def public_agent_channels(conn: sqlite3.Connection, agent_id: str) -> List[str]:
+    """Public workspace placements for an agent (never its private inbox)."""
+    return [r[0] for r in conn.execute(
+        "SELECT channel FROM agent_channels WHERE agent_id = ? AND channel != ? "
+        "ORDER BY channel", (agent_id, AGENT_INBOX_CHANNEL)).fetchall()]
+
+
+def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
+    """Create the private DM transport and place every managed agent in it.
+
+    This is an idempotent migration.  Existing agents become directly
+    messageable on the next hub start without acquiring a visible channel.
+    """
+    now = now_iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+        "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
+    rows = conn.execute(
+        "SELECT id, name, model, base_prompt FROM agents WHERE managed = 1"
+    ).fetchall()
+    for row in rows:
+        agent_id, name, model, base_prompt = row
+        conn.execute(
+            "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, "
+            "last_seen, last_read, joined_at, active, kind, model) "
+            "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+            (agent_id, AGENT_INBOX_CHANNEL, name,
+             (base_prompt or "")[:200], "", now, now, model))
+        conn.execute(
+            "UPDATE members SET active=1, name=?, model=? WHERE id=? AND channel=?",
+            (name, model, agent_id, AGENT_INBOX_CHANNEL))
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_channels "
+            "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+            (agent_id, AGENT_INBOX_CHANNEL, agent_id, now))
+
+
 # ── agent control plane (supervisor-backed) ──
 # The hub owns ONE AgentSupervisor. Agent management endpoints are operator-only.
 _SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
@@ -1963,7 +2004,9 @@ def build_agent_preamble(name: str, channels: List[str], member_id: str = "") ->
     Tells the agent to reclaim its pre-assigned identity (member_id) on each of
     its channels — trio_connect(resume_member_id=…) re-attaches instead of
     minting a duplicate (B1)."""
-    chans = ", ".join("#" + c for c in channels) if channels else "(none yet)"
+    public_channels = [c for c in channels if c != AGENT_INBOX_CHANNEL]
+    chans = ", ".join("#" + c for c in public_channels) if public_channels else "(none yet)"
+    has_inbox = AGENT_INBOX_CHANNEL in channels
     connect_lines = ""
     if member_id and channels:
         joins = " ".join(
@@ -1975,7 +2018,11 @@ def build_agent_preamble(name: str, channels: List[str], member_id: str = "") ->
             "session_token each returns and pass it to trio_send/trio_poll.")
     return (
         f"You are {name}, an agent in the Trio multi-agent workspace. You are "
-        f"placed in these channels: {chans}.{connect_lines} Talk to a channel "
+        f"placed in these public channels: {chans}."
+        + (f" Your private DM transport is #{AGENT_INBOX_CHANNEL}; it is hidden "
+           "from the workspace channel list. Reply to direct messages there "
+           "with trio_dm so only the human recipient can see them." if has_inbox else "")
+        + f"{connect_lines} Talk to a channel "
         "through the Trio MCP tools (trio_connect / trio_send / trio_poll), "
         "naming the target channel explicitly on each reply. These are MCP tools "
         "— CALL THEM DIRECTLY. If they appear as deferred tools, load their "
@@ -2858,9 +2905,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
                 "     WHERE msg.channel = c.code) AS last_at "
-                "FROM channels c "
-                "ORDER BY last_at DESC"
-            ).fetchall()
+                "FROM channels c WHERE c.code != ? "
+                "ORDER BY last_at DESC",
+                (AGENT_INBOX_CHANNEL,)).fetchall()
             channels = []
             for r in rows:
                 last_at = r["last_at"]
@@ -2915,6 +2962,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             code = "channel-" + secrets.token_hex(3)
         if not CHANNEL_CODE_PATTERN.fullmatch(code):
             self._error(400, "channel code must be lowercase alphanumeric with hyphens, 1-32 chars")
+            return
+        if code == AGENT_INBOX_CHANNEL:
+            self._error(400, "that channel name is reserved for private agent messages")
             return
         db = sqlite3.connect(str(self.db_path), timeout=5)
         db.row_factory = sqlite3.Row
@@ -3015,12 +3065,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "SELECT id, name, state, model FROM agents ORDER BY name COLLATE NOCASE"
             ).fetchall()
             for a in agent_rows:
-                channels = [c[0] for c in db.execute(
-                    "SELECT channel FROM agent_channels WHERE agent_id=? ORDER BY channel",
-                    (a["id"],)).fetchall()]
+                channels = public_agent_channels(db, a["id"])
                 targets.append({"id": a["id"], "name": a["name"],
                                 "state": a["state"], "model": a["model"],
-                                "channels": channels})
+                                "channels": channels,
+                                "dm_channel": AGENT_INBOX_CHANNEL})
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
             return
@@ -3061,16 +3110,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
             ).fetchall()
             agents = []
             for r in rows:
-                chans = [c[0] for c in db.execute(
-                    "SELECT channel FROM agent_channels WHERE agent_id = ? "
-                    "ORDER BY channel", (r["id"],)).fetchall()]
+                chans = public_agent_channels(db, r["id"])
+                dm_ready = db.execute(
+                    "SELECT 1 FROM agent_channels WHERE agent_id=? AND channel=?",
+                    (r["id"], AGENT_INBOX_CHANNEL)).fetchone() is not None
                 agents.append({
                     "id": r["id"], "name": r["name"], "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
                     "effort": (r["effort"] if "effort" in r.keys() else "") or "",
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,
-                    "abandoned": len(chans) == 0,
+                    "dm_ready": dm_ready,
+                    "abandoned": not chans and not dm_ready,
                     "live": sup.is_running(r["id"]),
                     "created_at": r["created_at"],
                     "last_active_at": r["last_active_at"],
@@ -3107,6 +3158,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         channels = [str(c).strip() for c in raw_channels if str(c).strip()]
         for c in channels:
+            if c == AGENT_INBOX_CHANNEL:
+                self._error(400, "reserved channel")
+                return
             if not channel_exists(c, self.db_path):
                 self._error(400, f"unknown channel: {c}")
                 return
@@ -3121,11 +3175,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # One transaction: agents row + all placements commit or roll back
             # together, so a mid-loop failure can't leave a half-placed orphan.
             with db:
+                ensure_agent_inboxes(db)
                 db.execute(
                     "INSERT INTO agents (id, name, model, base_prompt, state, "
                     "managed, effort, created_at) VALUES (?,?,?,?,?,1,?,?)",
                     (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort, now))
-                for c in channels:
+                for c in channels + [AGENT_INBOX_CHANNEL]:
                     db.execute(
                         "INSERT OR IGNORE INTO members (id, channel, name, summary, "
                         "skills, last_seen, last_read, joined_at, active, kind, model) "
@@ -3144,8 +3199,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
+        all_channels = channels + [AGENT_INBOX_CHANNEL]
         preamble = (prompt + "\n\n" if prompt else "") + \
-            build_agent_preamble(name, channels, member_id=agent_id)
+            build_agent_preamble(name, all_channels, member_id=agent_id)
         mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
         try:
             proc = get_supervisor().spawn(agent_id, model=model,
@@ -3164,9 +3220,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         # Nudge the agent to connect + participate on startup (a stream-json
         # agent is request/response, so it needs a first message to act on).
-        if channels:
-            get_supervisor().feed(agent_id, channels[0],
-                                  "You are online — connect to your channels and say hello.")
+        get_supervisor().feed(
+            agent_id, channels[0] if channels else AGENT_INBOX_CHANNEL,
+            "You are online — connect to your channels and say hello. Your private "
+            "inbox is for direct messages and is not a public workspace channel.")
         self._json({"ok": True, "agent": {
             "id": agent_id, "name": name, "model": model, "channels": channels,
             "state": nsup.ST_RUNNING if proc.alive() else nsup.ST_ERRORED,
@@ -3196,6 +3253,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 return
             channel = (body.get("channel") or "").strip()
             present = bool(body.get("present", True))
+            if channel == AGENT_INBOX_CHANNEL:
+                self._error(400, "the private agent inbox cannot be changed")
+                return
             if not channel_exists(channel, self.db_path):
                 self._error(400, "unknown channel")
                 return
@@ -8871,8 +8931,12 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   function dmChannelFor(cp, preferred) {
-    if (preferred) return preferred;
     const t = state.dmTargets.get(cp);
+    // Managed agents use a hidden, durable inbox. Prefer it even when a
+    // historical DM thread originated in a public channel, so all new direct
+    // messages are live on one transport and agents need no public placement.
+    if (t && t.dm_channel) return t.dm_channel;
+    if (preferred) return preferred;
     if (t && t.channels && t.channels.includes(state.channel)) return state.channel;
     if (t && t.channels && t.channels.length) return t.channels[0];
     return state.channel || '';
@@ -8882,8 +8946,8 @@ INDEX_HTML = r"""<!doctype html>
     markDmRead(cp);
     refreshDmBadge();
     if (dmPanel.hasAttribute('hidden') === false) renderDmInbox();
-    // DMs are unified above channels, but sends still use the counterpart's
-    // placement channel so the existing Trio protocol remains unchanged.
+    // Managed-agent DMs use the target's private inbox. Legacy/external members
+    // fall back to their current channel placement.
     var u = '/?dm=' + encodeURIComponent(cp);
     const ch = dmChannelFor(cp, channel);
     if (ch) u += '&channel=' + encodeURIComponent(ch);
@@ -9123,10 +9187,10 @@ INDEX_HTML = r"""<!doctype html>
         + (a.effort ? ' · ' + a.effort : '');
       const sp = document.createElement('span'); sp.className = 'a-spacer';
       row.appendChild(nm); row.appendChild(stt); row.appendChild(sp);
-      if (a.channels && a.channels.length) {
+      if (a.dm_ready || (a.channels && a.channels.length)) {
         const msg = document.createElement('button'); msg.textContent = 'message';
         msg.title = 'Open a direct message with ' + a.name;
-        msg.onclick = () => openDmTab(a.id, a.channels.includes(state.channel) ? state.channel : a.channels[0]);
+        msg.onclick = () => openDmTab(a.id);
         row.appendChild(msg);
       }
       for (const act of (a.live
@@ -10317,7 +10381,7 @@ INDEX_HTML = r"""<!doctype html>
       colorFor, rememberColors, chimeScopeAllows,
       dmCounterparty, dmThreadsFor, unreadDmCount,
       renderDmInbox, refreshDmBadge, markDmRead, dmListEl, dmCountEl,
-      dmPickerMembers, renderDmPicker, openDmTab, dmPickerEl,
+      dmPickerMembers, renderDmPicker, dmChannelFor, openDmTab, dmPickerEl,
     };
   }
   // __TRIO_TEST_HOOK_END__
@@ -10418,6 +10482,7 @@ def main() -> int:
     try:
         ensure_ask_columns(_mig)
         ensure_agents_schema(_mig)
+        ensure_agent_inboxes(_mig)
         _mig.commit()
     except sqlite3.Error as e:
         sys.stderr.write(f"[nth_web] forward-compat migration skipped: {e}\n")

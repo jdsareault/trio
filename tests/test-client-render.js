@@ -654,6 +654,14 @@ check('renderDmPicker: selecting a member opens a DM tab targeting THAT id', () 
   assert.ok(/[?&]dm=a2(\b|$)/.test(opened[0]), 'opened the DM for bob (a2): ' + opened[0]);
 });
 
+check('dmChannelFor: managed agent private inbox wins over public/history channels', () => {
+  H.state.channel = 'public-room';
+  H.state.dmTargets = new Map([['a1', {
+    id: 'a1', channels: ['public-room'], dm_channel: 'nth-agent-inbox',
+  }]]);
+  assert.strictEqual(H.dmChannelFor('a1', 'old-public-room'), 'nth-agent-inbox');
+});
+
 // ── Roster: DM moved off the row and into the expanded detail panel ──────────
 function memberRowFor(m, opId) {
   H.state.operator = { id: opId || '_op_l_me', name: 'me' };

@@ -93,7 +93,7 @@ try:
     ac = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=?", (aid,)).fetchone()[0]
     mem = db.execute("SELECT kind FROM members WHERE id=? AND channel='chan-x'", (aid,)).fetchone()
     db.close()
-    check("create: agent_channels placement row", ac == 1)
+    check("create: public placement + private DM inbox rows", ac == 2)
     check("create: members row is kind=agent", mem and mem[0] == "agent")
 
     # ── roster ──
@@ -143,13 +143,23 @@ try:
     st, _ = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": 123})
     check("create with channels as an INT -> 400 (not a 500)", st == 400)
 
-    # ── create with NO channels (abandoned agent) ──
+    # ── create with NO public channels (still directly messageable) ──
     st, d = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": []})
     ab = d.get("agent", {})
     check("create with no channels -> 200, empty channels", st == 200 and ab.get("channels") == [])
     st, d = http(port, "/api/agents")
     match = [a for a in d.get("agents", []) if a["id"] == ab.get("id")]
-    check("abandoned agent flagged in roster", match and match[0]["abandoned"] is True)
+    check("zero-placement agent has a private inbox and is not abandoned",
+          match and match[0]["dm_ready"] is True
+          and match[0]["abandoned"] is False
+          and match[0]["channels"] == [])
+    st, inbox = http(port, "/api/dms")
+    target = next((t for t in inbox.get("targets", []) if t["id"] == ab.get("id")), {})
+    check("zero-placement agent is exposed as a direct-message target",
+          st == 200 and target.get("dm_channel") == web.AGENT_INBOX_CHANNEL)
+    st, _ = http(port, f"/api/send?channel={web.AGENT_INBOX_CHANNEL}", "POST",
+                 {"content": "private hello", "recipients": [ab.get("id")]})
+    check("operator can DM a zero-public-placement agent", st == 200)
     http(port, f"/api/agents/{ab.get('id')}/delete", "POST")
 
     # ── wake endpoint ──
