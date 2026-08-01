@@ -78,6 +78,8 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   color:var(--ink-2); transition:background var(--dur) var(--ease), color var(--dur) var(--ease), transform .12s var(--ease);
 }
 .icon-btn:hover{ background:var(--surface-hover); color:var(--ink); }
+.icon-btn:disabled{ opacity:.45; cursor:not-allowed; }
+.icon-btn:disabled:hover{ background:transparent; }
 .icon-btn:active{ transform:scale(.92); }
 .icon-btn svg{ width:19px; height:19px; }
 

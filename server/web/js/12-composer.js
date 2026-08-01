@@ -10,6 +10,7 @@
   let recognition = null, recorder = null, stream = null, chunks = [];
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
+  function inputValue(newValue) { const el = input(); if (!el) return ''; if (newValue !== undefined) el.value = newValue; return el.value; }
 
   function targetName(id) { return state.members?.get(id)?.name || id; }
   function apiUrl(path) {
@@ -81,7 +82,7 @@
     if (!body.recipients?.length && state.confirmBroadcast && !window.confirm('Send this message to the channel?')) { updateSendState(); return false; }
     try {
       const result = await api.post(apiUrl('/api/send'), body);
-      input().value = ''; state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
+      inputValue(''); state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
@@ -100,7 +101,7 @@
     if (!Speech) throw new Error('Browser speech recognition is unavailable');
     recognition = new Speech(); recognition.continuous = true; recognition.interimResults = true;
     let finalText = '';
-    recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; input().value = (input().value + ' ' + finalText + interim).trim(); updateSendState(); };
+    recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; inputValue((inputValue() + ' ' + finalText + interim).trim()); updateSendState(); };
     recognition.onend = () => { recognition = null; document.body.classList.remove('dictating'); };
     recognition.start(); document.body.classList.add('dictating');
   }
@@ -108,7 +109,7 @@
     stream = await navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
     recorder = new MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } catch (error) { if (window.SpeechRecognition || window.webkitSpeechRecognition) { Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => Trio.ui.toast(fallback.message)); } else Trio.ui.toast(error.message || 'Transcription failed'); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
+    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); inputValue((inputValue() + ' ' + (data.text || '')).trim()); updateSendState(); } catch (error) { if (window.SpeechRecognition || window.webkitSpeechRecognition) { Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => Trio.ui.toast(fallback.message)); } else Trio.ui.toast(error.message || 'Transcription failed'); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
     recorder.start(); document.body.classList.add('dictating');
   }
   async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { Trio.ui.toast(error.message); } }

@@ -252,16 +252,33 @@
       if (!op || !recips.has(op)) return;
       const others = [...recips].filter(id => id !== op);
       const expected = state.dmMemberIds || [];
-      if (others.length !== expected.length || others.some(id => !expected.includes(id))) return;
+      if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
     }
     const wasNear = nearBottom(dom()); const previous = state.messages.get(msg.id) || {};
     state.messages.set(msg.id, Object.assign({}, previous, msg));
     const existing = state.messageDomById.get(msg.id);
-    if (!existing) { render(); return; }
+    const list = dom();
+    if (!existing) {
+      const card = cardFor(state.messages.get(msg.id));
+      if (list) { list.append(card); state.messageDomById.set(msg.id, card); }
+      else { render(); }
+      if (wasNear && list) list.scrollTop = list.scrollHeight;
+      pruneMessages();
+      return;
+    }
     const replacement = cardFor(state.messages.get(msg.id)); existing.replaceWith(replacement); state.messageDomById.set(msg.id, replacement);
-    if (wasNear) dom().scrollTop = dom().scrollHeight;
+    if (wasNear) list.scrollTop = list.scrollHeight;
   }
 
+  function pruneMessages(limit = 500) {
+    const entries = [...state.messages.entries()];
+    if (entries.length <= limit) return;
+    entries.sort((a, b) => b[0] - a[0]).slice(limit).forEach(([id]) => {
+      const node = state.messageDomById.get(id);
+      if (node) { node.remove(); state.messageDomById.delete(id); }
+      state.messages.delete(id);
+    });
+  }
   function ingest(payload) {
     const messages = Array.isArray(payload) ? payload : (payload.messages || [payload.message || payload]);
     messages.filter(Boolean).forEach(upsert);
@@ -273,7 +290,6 @@
   function init() {
     state.operator = state.operator || state.meta?.operator;
     events.addEventListener('boot', onBoot); listeners.boot = onBoot;
-    events.addEventListener('messages', onMessage); listeners.messages = onMessage;
     events.addEventListener('message', onMessage); listeners.message = onMessage;
     events.addEventListener('message_update', onMessage); listeners.message_update = onMessage;
     events.addEventListener('roster', onRoster); listeners.roster = onRoster;

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const Trio = window.Trio = window.Trio || {};
-  const esc = value => String(value ?? '').replace(/[&<"']/g, c => ({'&':'&amp;','<':'&lt;','"':'&quot;',"'":'&#39;'}[c]));
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function toast(message, timeout = 3500) {
     let host = document.getElementById('trio-toasts');
     if (!host) { host = document.createElement('div'); host.id = 'trio-toasts'; host.className = 'toast-wrap'; document.body.append(host); }

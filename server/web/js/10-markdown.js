@@ -34,8 +34,8 @@
       } catch { return ''; }
     }
     function inlineFmt(t) {
-      t = escapeHtml(t);
       t = humanizeIdSigils(t);
+      t = escapeHtml(t);
       t = t.replace(/\*\*([^*\n][^*\n]*?)\*\*/g, '<strong>$1</strong>');
       t = t.replace(/(^|[\s(\[])\*([^*\n]+?)\*(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
       t = t.replace(/(^|[\s(\[])_([^_\n]+?)_(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
@@ -341,21 +341,26 @@
   // agents can address-by-id for rename resilience and the UI translates
   // back to the current display name on the fly. Unknown ids are left
   // alone so stale history isn't mangled.
-  function humanizeIdSigils(text) {
-    if (!text) return text;
-    if (!state.members || !state.members.size) return text;
-    // Build a single alternation across all known ids, longest first so
-    // "_op_g_bob_abcdef" beats a hypothetical prefix "_op_g_bob".
-    const ids = Array.from(state.members.keys())
+  let sigilRegex = null;
+  let sigilMembers = null;
+  let sigilSize = -1;
+  function buildSigilRegex() {
+    sigilMembers = state.members;
+    sigilSize = sigilMembers ? sigilMembers.size : -1;
+    if (!sigilMembers || !sigilMembers.size) { sigilRegex = null; return; }
+    const ids = Array.from(sigilMembers.keys())
       .filter(Boolean)
       .sort((a, b) => b.length - a.length)
       .map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    if (!ids.length) return text;
-    const re = new RegExp('([@#!])(' + ids.join('|') + ')(?=\\b|$)', 'g');
-    return text.replace(re, (match, sigil, id) => {
-      const mem = state.members.get(id);
-      const name = mem && mem.name ? escapeHtml(mem.name) : id;
-      return sigil + name;
+    sigilRegex = ids.length ? new RegExp('([@#!])(' + ids.join('|') + ')(?=\\b|$)', 'g') : null;
+  }
+  function humanizeIdSigils(text) {
+    if (!text) return text;
+    if (sigilMembers !== state.members || (state.members && state.members.size !== sigilSize)) buildSigilRegex();
+    if (!sigilRegex) return text;
+    return text.replace(sigilRegex, (match, sigil, id) => {
+      const mem = sigilMembers.get(id);
+      return sigil + (mem && mem.name ? mem.name : id);
     });
   }
 
