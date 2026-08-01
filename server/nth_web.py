@@ -2382,6 +2382,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_agent_activity(path.split("/")[3], parsed)
         elif path == "/api/health":
             self._handle_health()
+        elif path == "/api/workspace/events":
+            self._serve_workspace_sse()
         elif path == "/api/events":
             if not self._authorize_channel():
                 return
@@ -2528,6 +2530,60 @@ class NthWebHandler(BaseHTTPRequestHandler):
             pass
         finally:
             hub.unsubscribe(q)
+
+    def _serve_workspace_sse(self) -> None:
+        """Cross-channel, operator-only SSE that multiplexes every channel hub."""
+        _token, ident, _is_new = self._resolve_identity()
+        viewer_id = ident.member_id
+        if not is_all_seeing(viewer_id):
+            self._error(403, "operator only")
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            channels = [r["code"] for r in db.execute("SELECT code FROM channels").fetchall()]
+        finally:
+            db.close()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        merged: queue.Queue = queue.Queue(maxsize=500)
+        subs = []
+        stop = threading.Event()
+        def pump(q):
+            while not stop.is_set():
+                try:
+                    payload = q.get(timeout=0.5)
+                    merged.put(payload)
+                except queue.Empty:
+                    continue
+        for ch in channels:
+            hub = get_channel_runtime(ch)[0]
+            q = hub.subscribe(viewer_id=viewer_id, all_seeing=True)
+            subs.append((hub, q))
+            threading.Thread(target=pump, args=(q,), daemon=True).start()
+        last_heartbeat = time.monotonic()
+        try:
+            while True:
+                try:
+                    payload = merged.get(timeout=1.0)
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    now = time.monotonic()
+                    if now - last_heartbeat >= SSE_HEARTBEAT_SEC:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = now
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            stop.set()
+            for hub, q in subs:
+                hub.unsubscribe(q)
 
     def _read_json_body(self, max_bytes: int = 16384) -> Optional[Dict[str, Any]]:
         length = int(self.headers.get("Content-Length", "0") or 0)

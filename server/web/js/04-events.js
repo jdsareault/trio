@@ -22,24 +22,37 @@
     events.dispatchEvent(new CustomEvent(type, { detail: payload }));
     if (payload.id != null && (type === 'message' || type === 'message_update')) { lastId = payload.id; }
   }
+  function onMessage(event) {
+    try {
+      const payload = JSON.parse(event.data);
+      if (Array.isArray(payload)) { payload.forEach(dispatch); }
+      else if (Array.isArray(payload.messages)) { payload.messages.forEach(dispatch); }
+      else { dispatch(payload); }
+    } catch (error) { console.warn('invalid Trio event', error); }
+  }
   function startEvents(channel = null) {
     if (!channel) { notify('offline', { reason: 'no channel' }); return; }
     stream?.close();
     notify('connecting');
     stream = new EventSource(Trio.api.url('/api/events'));
     stream.onopen = () => { setConnection('live'); notify('live'); };
-    stream.onmessage = event => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (Array.isArray(payload)) { payload.forEach(dispatch); }
-        else if (Array.isArray(payload.messages)) { payload.messages.forEach(dispatch); }
-        else { dispatch(payload); }
-      } catch (error) { console.warn('invalid Trio event', error); }
-    };
+    stream.onmessage = onMessage;
     stream.onerror = () => { setConnection('reconnecting…', true); notify('reconnecting'); };
   }
+  let workspaceStream;
+  function startWorkspaceEvents() {
+    workspaceStream?.close();
+    notify('workspace:connecting');
+    workspaceStream = new EventSource('/api/workspace/events');
+    workspaceStream.onopen = () => { notify('workspace:live'); };
+    workspaceStream.onmessage = onMessage;
+    workspaceStream.onerror = () => { notify('workspace:reconnecting'); };
+  }
+  function stopWorkspaceEvents() { workspaceStream?.close(); workspaceStream = null; notify('workspace:offline'); }
   function stopEvents() { stream?.close(); stream = null; notify('offline', { reason: 'stopped' }); }
   Trio.startEvents = startEvents;
   Trio.stopEvents = stopEvents;
+  Trio.startWorkspaceEvents = startWorkspaceEvents;
+  Trio.stopWorkspaceEvents = stopWorkspaceEvents;
   Trio.events = events;
 })();

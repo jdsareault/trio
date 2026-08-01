@@ -450,7 +450,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Track connection states (`connecting`, `live`, `reconnecting`, `offline`) and last received message ID.
   - Add deduplication and reconnection tests without duplicating cards or resetting scroll.
 
-- [ ] **1.7 Add a permanent workspace/DM live-event contract.**
+- [x] **1.7 Add a permanent workspace/DM live-event contract.**
   - Choose either an operator-scoped workspace EventSource or a thread-scoped DM EventSource in `server/nth_web.py`.
   - Reuse `_event_visible_to()` so workspace events cannot weaken DM/attachment visibility.
   - Include enough conversation identity in each event to route it without guessing from the current channel.
