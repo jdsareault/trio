@@ -461,7 +461,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Move timers, EventSource listeners, media streams, and DOM listeners into lifecycle cleanup.
   - Add a development/test guard that reports leaked subscriptions after unmount.
 
-- [ ] **1.9 Build shared UI services.**
+- [x] **1.9 Build shared UI services.**
   - Implement accessible dialog, drawer, toast/live-region, icon, avatar, and normalized status primitives.
   - Centralize focus capture/return, Escape behavior, destructive confirmation, pending buttons, and user-facing error formatting.
   - Replace `window.alert`, `window.prompt`, ad hoc dialogs, and raw Unicode toolbar icons incrementally.
