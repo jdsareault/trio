@@ -40,6 +40,33 @@ check('SSE upsert keeps the timeline state keyed by message id', () => {
   H.upsert({ id: 77, member_id: 'b1', content: 'edited', edited_at: 'now' });
   assert.strictEqual(H.state.messages.get(77).content, 'edited');
 });
+check('answer payload matches the server reply_to and selection contract', () => {
+  H.state.operator = { id: 'operator' };
+  const message = { id: 91, choices: { target: 'operator', questions: [{ options: ['one', 'two'], mode: 'one' }] } };
+  H.state.answers.set(91, [{ picked: new Set([1]), custom: '' }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(H.answerPayload(message, message.choices.questions))), {
+    content: 'Answered question #91', reply_to: 91, selection: { answers: [{ picked: [1], custom: [] }] },
+  });
+});
+check('private state derives from the server recipients field', () => {
+  assert.strictEqual(H.isPrivate({ recipients: ['ag_1'] }), true);
+  assert.strictEqual(H.isPrivate({ recipients: [] }), false);
+});
+check('composer send payload keeps integer attachment ids and channel targets', () => {
+  H.state.selectedTargets = new Set(['ag_1']);
+  H.state.pendingAttachments = [{ id: 4 }, { id: 'bad' }, { id: 8 }];
+  H.state.dmTargetId = 'ag_1';
+  H.Trio.state.channel = 'atrium';
+  H.Trio.composer.setTargets(['ag_1']);
+  H.Trio.composer.init();
+  H.Trio.composer.buildSendPayload();
+  H.Trio.state.pendingAttachments = H.state.pendingAttachments;
+  const input = cx.document.getElementById('input'); input.value = 'hello';
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(H.buildSendPayload())), {
+    content: '@ag_1 hello', mentions: ['ag_1'], attachment_ids: [4, 8], recipients: ['ag_1'],
+  });
+  delete H.state.dmTargetId;
+});
 
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);

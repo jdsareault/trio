@@ -15,7 +15,9 @@
 
   function member(id) { return state.members.get(id) || {}; }
   function nameFor(id, fallback) { return member(id).name || fallback || id || 'unknown'; }
-  function isOwn(msg) { return !!state.operator && msg.member_id === state.operator.id; }
+  function operator() { return state.operator || state.meta?.operator || {}; }
+  function isOwn(msg) { return msg.member_id === operator().id; }
+  function isPrivate(msg) { return !!msg.is_dm || Array.isArray(msg.recipients) && msg.recipients.length > 0; }
   function time(iso) {
     if (!iso) return '';
     try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
@@ -77,18 +79,64 @@
     }
   }
 
+  function answerState(msg, questions) {
+    let answers = state.answers.get(msg.id);
+    if (!answers || answers.length !== questions.length) {
+      answers = questions.map(() => ({ picked: new Set(), custom: '' }));
+      state.answers.set(msg.id, answers);
+    }
+    return answers;
+  }
+  function answerPayload(msg, questions) {
+    const answers = answerState(msg, questions).map(answer => ({
+      picked: [...answer.picked], custom: answer.custom.trim() ? [answer.custom.trim()] : [],
+    }));
+    if (answers.some(answer => !answer.picked.length && !answer.custom.length)) throw new Error('Answer every question before sending');
+    return { content: 'Answered question #' + msg.id, reply_to: msg.id, selection: { answers } };
+  }
+  async function submitAnswer(msg, questions, button) {
+    try {
+      button.disabled = true;
+      const result = await Trio.api.post(apiUrl('/api/send'), answerPayload(msg, questions));
+      if (result?.message) upsert(result.message);
+      button.textContent = 'Answer sent';
+    } catch (error) {
+      button.disabled = false;
+      window.alert(error.message || 'Could not send answer');
+    }
+  }
   function askCard(msg) {
     const choices = msg.choices;
     if (!choices || !Array.isArray(choices.questions || choices.options)) return null;
     const wrap = document.createElement('section'); wrap.className = 'ask-card';
     const questions = choices.questions || [choices];
-    for (const q of questions) {
+    const alreadyAnswered = [...state.messages.values()].some(candidate => candidate.reply_to === msg.id && candidate.selection);
+    const canAnswer = choices.target === operator().id && !alreadyAnswered && !msg.selection;
+    const answers = answerState(msg, questions);
+    questions.forEach((q, questionIndex) => {
       const title = document.createElement('p'); title.className = 'ask-question'; title.textContent = q.question || '';
       wrap.append(title);
       const options = document.createElement('div'); options.className = 'ask-options';
-      for (const option of q.options || []) { const row = document.createElement('span'); row.className = 'ask-option'; row.textContent = option; options.append(row); }
+      (q.options || []).forEach((option, optionIndex) => {
+        const row = document.createElement(canAnswer ? 'button' : 'span'); row.className = 'ask-option'; row.textContent = option;
+        if (canAnswer) {
+          row.type = 'button'; row.classList.toggle('selected', answers[questionIndex].picked.has(optionIndex));
+          row.addEventListener('click', () => {
+            const picked = answers[questionIndex].picked;
+            if (q.mode === 'one') { picked.clear(); picked.add(optionIndex); } else if (picked.has(optionIndex)) picked.delete(optionIndex); else picked.add(optionIndex);
+            [...options.children].forEach((child, index) => child.classList.toggle('selected', picked.has(index)));
+          });
+        }
+        options.append(row);
+      });
       wrap.append(options);
-    }
+      if (canAnswer && q.custom !== false) {
+        const custom = document.createElement('input'); custom.className = 'ask-custom'; custom.placeholder = 'Other answer…'; custom.value = answers[questionIndex].custom;
+        custom.addEventListener('input', () => { answers[questionIndex].custom = custom.value; }); wrap.append(custom);
+      }
+    });
+    if (canAnswer) { const send = document.createElement('button'); send.type = 'button'; send.className = 'ask-send'; send.textContent = 'Send answer'; send.addEventListener('click', () => submitAnswer(msg, questions, send)); wrap.append(send); }
+    else if (choices.target) { const note = document.createElement('small'); note.className = 'ask-note'; note.textContent = 'Awaiting @' + nameFor(choices.target, choices.target); wrap.append(note); }
     return wrap;
   }
 
@@ -124,17 +172,29 @@
   }
 
   function cardFor(msg) {
-    const card = document.createElement('article'); card.className = 'message' + (isOwn(msg) ? ' own' : '') + (msg.is_dm ? ' private' : '');
+    const privateMessage = isPrivate(msg);
+    const card = document.createElement('article'); card.className = 'message' + (isOwn(msg) ? ' own' : '') + (privateMessage ? ' private' : '');
     card.dataset.messageId = msg.id;
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = nameFor(msg.member_id, msg.member_name);
     const stamp = document.createElement('time'); stamp.textContent = time(msg.created_at);
     head.append(author, stamp);
     if (msg.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + msg.confidence; confidence.textContent = msg.confidence; head.append(confidence); }
-    if (msg.is_dm) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
+    if (privateMessage) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
     card.append(head);
     const target = renderTargets(msg); if (target) card.append(target);
     const body = document.createElement('div'); body.className = 'message-body'; paintBody(card, body, msg); card.append(body);
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      const attachments = document.createElement('div'); attachments.className = 'message-attachments';
+      msg.attachments.forEach(attachment => {
+        if (!attachment || !attachment.id) return;
+        const link = document.createElement('a'); link.href = apiUrl('/api/attachment/' + attachment.id); link.target = '_blank'; link.rel = 'noopener'; link.className = 'message-attachment';
+        if (/^image\//.test(attachment.mime || '')) { const image = document.createElement('img'); image.src = link.href; image.alt = attachment.filename || 'Attached image'; image.loading = 'lazy'; link.append(image); }
+        else link.textContent = attachment.filename || ('Attachment #' + attachment.id);
+        attachments.append(link);
+      });
+      if (attachments.children.length) card.append(attachments);
+    }
     const ask = askCard(msg); if (ask) card.append(ask);
     if (isOwn(msg) && !msg.retracted_at) {
       const controls = document.createElement('div'); controls.className = 'message-controls';
@@ -153,7 +213,12 @@
     const stick = nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
     const messages = ordered();
     if (!messages.length) { const empty = document.createElement('p'); empty.className = 'conversation-empty'; empty.textContent = 'No messages yet. Say hello to get things moving.'; list.append(empty); }
-    for (const msg of messages) { const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card); }
+    let unread = messages.findIndex(msg => Number(msg.id) > Number(state.lastSeenId));
+    if (state.lastSeenId === 0) unread = -1;
+    messages.forEach((msg, index) => {
+      if (index === unread) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
+      const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card);
+    });
     if (stick) list.scrollTop = list.scrollHeight;
   }
 
@@ -172,11 +237,15 @@
     messages.filter(Boolean).forEach(upsert);
   }
   function init() {
+    state.operator = state.operator || state.meta?.operator;
+    events.addEventListener('boot', event => { state.operator = event.detail?.operator || state.operator; });
     events.addEventListener('messages', event => ingest(event.detail));
     events.addEventListener('message', event => ingest(event.detail));
     events.addEventListener('message_update', event => ingest(event.detail));
+    events.addEventListener('roster', event => { if (Array.isArray(event.detail?.members)) state.members = new Map(event.detail.members.map(m => [m.id, m])); render(); });
+    events.addEventListener('sse', event => { const detail = event.detail || {}; if (detail.type === 'message' || detail.type === 'message_update') ingest(detail); });
     render();
   }
 
-  Trio.conversation = { init, render, ingest, upsert, paintBody, cardFor };
+  Trio.conversation = { init, render, ingest, upsert, paintBody, cardFor, answerPayload, isPrivate };
 })();

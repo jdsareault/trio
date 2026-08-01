@@ -36,16 +36,32 @@
     return (names.length ? names.join(' ') + ' ' : '') + text;
   }
   function validate() { return !!renderedContent() || state.pendingAttachments.length > 0; }
+  function buildSendPayload() {
+    const body = {
+      content: renderedContent(),
+      mentions: [...state.selectedTargets],
+      attachment_ids: state.pendingAttachments.map(a => a.id).filter(id => Number.isInteger(id) && id > 0),
+    };
+    if (state.dmTargetId) body.recipients = [state.dmTargetId];
+    if (state.composerReply?.id) {
+      body.reply_to = state.composerReply.id;
+      if (state.composerReply.selection) body.selection = state.composerReply.selection;
+    }
+    return body;
+  }
   function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); }
 
   async function upload(file) {
     if (!file) return;
-    if (!/^image\//.test(file.type || '')) throw new Error('Only image attachments are supported');
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type || '')) throw new Error('Choose a PNG, JPEG, GIF, or WebP image');
+    if (file.size > 20 * 1024 * 1024) throw new Error('Image must be 20 MB or smaller');
     const response = await fetch(apiUrl('/api/upload'), {
       method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
     });
     if (!response.ok) throw new Error('upload failed (' + response.status + ')');
-    const attachment = await response.json(); state.pendingAttachments.push(attachment); renderAttachments(); updateSendState();
+    const attachment = await response.json();
+    if (!attachment.ok || !Number.isInteger(attachment.id)) throw new Error('Upload did not return an attachment id');
+    state.pendingAttachments.push(attachment); renderAttachments(); updateSendState();
   }
   function renderAttachments() {
     const strip = byId('attachment-strip'); if (!strip) return;
@@ -60,11 +76,11 @@
   async function send() {
     if (!validate()) return false;
     const button = byId('send'); if (button) button.disabled = true;
-    const body = { content: renderedContent(), mentions: [...state.selectedTargets], attachment_ids: state.pendingAttachments.map(a => a.id).filter(Boolean) };
-    if (state.dmTargetId) body.recipients = [state.dmTargetId];
+    const body = buildSendPayload();
+    if (!body.recipients?.length && state.confirmBroadcast && !window.confirm('Send this message to the channel?')) { updateSendState(); return false; }
     try {
       const result = await api.post(apiUrl('/api/send'), body);
-      input().value = ''; state.pendingAttachments = []; renderAttachments(); updateSendState();
+      input().value = ''; state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
@@ -91,7 +107,7 @@
     stream = await navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
     recorder = new MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
+    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } catch (error) { if (window.SpeechRecognition || window.webkitSpeechRecognition) { window.alert((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => window.alert(fallback.message)); } else window.alert(error.message || 'Transcription failed'); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
     recorder.start(); document.body.classList.add('dictating');
   }
   async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { window.alert(error.message); } }
@@ -104,6 +120,6 @@
     attach?.addEventListener('click', () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => window.alert(error.message)); picker.click(); });
     renderTargets(); renderAttachments(); updateSendState();
   }
-  Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation });
-  Trio.composer = { init, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation };
+  Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
+  Trio.composer = { init, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload };
 })();
