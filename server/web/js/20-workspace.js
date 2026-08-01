@@ -29,6 +29,9 @@
     state.view = 'conversation';
     state.readOnly = !!readOnly;
     state.dmKey = isDm ? (state.dmKey || '') : '';
+    state.dmLoading = false;
+    state.dmError = '';
+    if (!isDm) state.dmThread = null;
     state.channel = channel;
     document.getElementById('h-channel').textContent = title;
     document.getElementById('h-meta').textContent = subtitle;
@@ -43,13 +46,18 @@
     state.dmTargetId = state.dmMemberIds[0] || '';
     state.dmName = dm.name || dm.key;
     state.dmKey = dm.key;
+    state.dmThread = dm;
     loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, readOnly ? 'Archived private conversation' : 'Private conversation', readOnly, true);
     if (dmPoll) { clearInterval(dmPoll); dmPoll = null; }
     // Temporary polling for DM freshness; remove once a workspace/DM EventSource lands (task 1.7).
     if (!readOnly) dmPoll = setInterval(() => refreshDm(dm.key), 5000);
+    state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
     api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly ? '&archived=1' : '')).then(data => {
+      state.dmLoading = false; state.dmError = '';
       if (data && Array.isArray(data.messages)) { data.messages.forEach(Trio.conversation.upsert); }
-    }).catch(error => toast(error.message || 'Could not load DM'));
+      if (data && data.ok === false) { state.dmError = data.error || 'Could not load DM'; }
+      Trio.conversation?.render?.();
+    }).catch(error => { state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.(); });
   }
   function refreshDm(key) {
     if (!key || document.hidden) return;

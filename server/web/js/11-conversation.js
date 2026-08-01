@@ -220,7 +220,21 @@
     const list = dom(); if (!list) return;
     const stick = nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
     const messages = ordered();
-    if (!messages.length) { const empty = document.createElement('p'); empty.className = 'conversation-empty'; empty.textContent = 'No messages yet. Say hello to get things moving.'; list.append(empty); }
+    if (!messages.length) {
+      const empty = document.createElement('div'); empty.className = 'conversation-empty';
+      const p = document.createElement('p');
+      if (state.dmLoading) { p.textContent = 'Loading private conversation…'; }
+      else if (state.dmError) { p.textContent = 'Could not load conversation: ' + state.dmError; }
+      else if (state.dmKey) { p.textContent = 'No messages yet. This is the start of your private conversation.'; }
+      else { p.textContent = 'No messages yet. Say hello to get things moving.'; }
+      empty.append(p);
+      if (state.dmError && state.dmThread) {
+        const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Try again';
+        retry.addEventListener('click', () => Trio.workspace?.openDm?.(state.dmThread));
+        empty.append(retry);
+      }
+      list.append(empty);
+    }
     let unread = messages.findIndex(msg => Number(msg.id) > Number(state.lastSeenId));
     if (state.lastSeenId === 0) unread = -1;
     messages.forEach((msg, index) => {

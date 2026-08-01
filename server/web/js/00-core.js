@@ -7,7 +7,10 @@
   const parseParam = name => { const m = qs.match(new RegExp('[?&]' + name + '=([^&]+)')); return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : ''; };
   const initialChannel = parseParam('channel');
   const initialDm = parseParam('dm');
-  root.state = root.state || { channel: initialChannel, messages: [], meta: null, members: new Map(), conversation: { kind: initialDm ? 'dm' : 'channel', key: initialDm || initialChannel } };
+  function validDmKey(key) { return typeof key === 'string' && key.length > 0 && key.length <= 512 && /^[A-Za-z0-9_,:-]+$/.test(key); }
+  const conversationKind = initialDm ? (validDmKey(initialDm) ? 'dm' : 'unknown') : (initialChannel ? 'channel' : 'unknown');
+  const conversationKey = initialDm ? (validDmKey(initialDm) ? initialDm : '') : initialChannel;
+  root.state = root.state || { channel: initialChannel, messages: [], meta: null, members: new Map(), conversation: { kind: conversationKind, key: conversationKey } };
   root.events = root.events || new EventTarget();
   function url(path, channelScoped = true) {
     if (!channelScoped || !root.state.channel) return path;
