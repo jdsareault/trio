@@ -19,6 +19,9 @@ checks = {
     "pins a strict service port": "--strict-port" in p["ProgramArguments"],
     "passes idle timeout": p["ProgramArguments"][-2:] == ["--agent-idle-minutes", "7"],
     "captures stdout/stderr": p["StandardOutPath"].endswith("hub.out.log") and p["StandardErrorPath"].endswith("hub.err.log"),
+    "service PATH includes common Claude CLI locations":
+        "/opt/homebrew/bin" in p["EnvironmentVariables"]["PATH"]
+        and "/usr/local/bin" in p["EnvironmentVariables"]["PATH"],
 }
 for label, ok in checks.items():
     print(("PASS" if ok else "FAIL") + ": " + label)

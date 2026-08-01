@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,8 +20,21 @@ from pathlib import Path
 LABEL = "com.nth.trio-hub"
 
 
+def service_path() -> str:
+    """PATH for a non-shell LaunchAgent, including installed CLI locations."""
+    entries = []
+    for candidate in (str(Path(sys.executable).resolve().parent),
+                      str(Path(shutil.which("claude") or "").parent),
+                      "/opt/homebrew/bin", "/usr/local/bin",
+                      "/usr/bin", "/bin", "/usr/sbin", "/sbin"):
+        if candidate and candidate != "." and candidate not in entries:
+            entries.append(candidate)
+    return ":".join(entries)
+
+
 def build_plist(*, python: str, web_script: str, db_path: str, port: int = 8765,
-                idle_minutes: float = 10.0, log_dir: str) -> dict:
+                idle_minutes: float = 10.0, log_dir: str,
+                path_env: str = "") -> dict:
     args = [python, web_script, "--db", db_path, "--port", str(port),
             "--strict-port", "--agent-idle-minutes", str(idle_minutes)]
     return {
@@ -32,7 +46,10 @@ def build_plist(*, python: str, web_script: str, db_path: str, port: int = 8765,
         "WorkingDirectory": str(Path(web_script).resolve().parent.parent),
         "StandardOutPath": str(Path(log_dir) / "hub.out.log"),
         "StandardErrorPath": str(Path(log_dir) / "hub.err.log"),
-        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+        "EnvironmentVariables": {
+            "PYTHONUNBUFFERED": "1",
+            "PATH": path_env or service_path(),
+        },
         "ProcessType": "Interactive",
     }
 
