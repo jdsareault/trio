@@ -2334,6 +2334,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_agents_list()
         elif path == "/api/agent-models":
             self._handle_agent_models(parsed)
+        elif path == "/api/approvals":
+            self._handle_approvals()
+        elif path.startswith("/api/agents/") and path.endswith("/activity") \
+                and path.count("/") == 4:
+            self._handle_agent_activity(path.split("/")[3], parsed)
         elif path == "/api/health":
             self._handle_health()
         elif path == "/api/events":
@@ -2373,6 +2378,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # /api/agents/<id>/<action>
             _, _, _, agent_id, action = parsed.path.split("/")
             self._handle_agent_action(agent_id, action)
+        elif parsed.path.startswith("/api/approvals/") \
+                and parsed.path.endswith("/resolve") and parsed.path.count("/") == 4:
+            self._handle_approval_resolve(parsed.path.split("/")[3])
         elif parsed.path == "/api/send":
             if not self._authorize_channel():
                 return
@@ -3301,6 +3309,41 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "error": str(exc)}, status=409)
             return
         self._json({"ok": True, "provider": provider, "models": models})
+
+    def _handle_agent_activity(self, agent_id: str, parsed) -> None:
+        """Operator-only provider activity; never mixed into channel history."""
+        if self._require_operator() is None or not self._require_agent_control():
+            return
+        try:
+            limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+        except (TypeError, ValueError):
+            limit = 100
+        if not get_supervisor().provider_for(agent_id):
+            self._error(404, "agent not found")
+            return
+        events = get_supervisor().activity(agent_id, limit=limit)
+        self._json({"ok": True, "agent_id": agent_id, "events": events})
+
+    def _handle_approvals(self) -> None:
+        if self._require_operator() is None or not self._require_agent_control():
+            return
+        approvals = get_supervisor().pending_approvals()
+        self._json({"ok": True, "count": len(approvals), "approvals": approvals})
+
+    def _handle_approval_resolve(self, approval_id: str) -> None:
+        if self._require_operator() is None or not self._require_agent_control():
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        decision = (body.get("decision") or "").strip()
+        if decision not in ("accept", "acceptForSession", "decline", "cancel"):
+            self._error(400, "invalid approval decision")
+            return
+        if not get_supervisor().resolve_approval(approval_id, decision):
+            self._error(404, "approval is missing or already resolved")
+            return
+        self._json({"ok": True, "approval_id": approval_id, "decision": decision})
 
     def _handle_health(self) -> None:
         """Operator-facing app, database, and provider runtime readiness."""
@@ -4469,6 +4512,11 @@ INDEX_HTML = r"""<!doctype html>
   #agent-health.ready { color: #79d991; border-color: rgba(121,217,145,.35); }
   #agent-health.attention { color: #ffb86c; border-color: rgba(255,184,108,.4);
     background: rgba(255,184,108,.06); }
+  #agent-approvals:empty { display: none; }
+  .agent-approval { border: 1px solid #8a642c; background: rgba(255,184,108,.06);
+    border-radius: 4px; padding: 7px; font-size: 11px; line-height: 1.4; }
+  .agent-approval code { display: block; margin: 4px 0; overflow-wrap: anywhere; }
+  .agent-approval button { margin-right: 5px; font-size: 10px; }
   .agent-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 0;
     border-bottom: 1px solid var(--border); font-size: 12px; }
   .agent-row .a-name { font-weight: 600; }
@@ -4481,6 +4529,9 @@ INDEX_HTML = r"""<!doctype html>
     border: 1px solid var(--border); border-radius: 3px; padding: 2px 6px;
     cursor: pointer; font-size: 11px; }
   .agent-row.abandoned .a-name::after { content: ' · abandoned'; color: #e0a; font-weight: 400; }
+  .agent-activity { flex: 1 0 100%; max-height: 150px; overflow-y: auto;
+    background: var(--bg2); border-radius: 4px; padding: 5px 7px; color: var(--dim);
+    font-size: 10px; line-height: 1.45; }
   #dm-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
                  letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
   #dm-panel .dm-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
@@ -5500,6 +5551,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="agents-panel" hidden>
     <div class="dm-head"><h3>Agents</h3></div>
     <div id="agent-health">Checking agent runtimes…</div>
+    <div id="agent-approvals"></div>
     <div id="agent-new">
       <select id="agent-provider" title="agent runtime provider">
         <option value="claude">Claude Code</option>
@@ -9442,6 +9494,7 @@ INDEX_HTML = r"""<!doctype html>
   const agentsPanel = document.getElementById('agents-panel');
   const agentsListEl = document.getElementById('agents-list');
   const agentHealthEl = document.getElementById('agent-health');
+  const agentApprovalsEl = document.getElementById('agent-approvals');
   const agentProviderSel = document.getElementById('agent-provider');
   const agentModelSel = document.getElementById('agent-model');
   const agentEffortSel = document.getElementById('agent-effort');
@@ -9470,7 +9523,8 @@ INDEX_HTML = r"""<!doctype html>
             if (cwd && agentCwdInp) agentCwdInp.value = cwd; } catch (e) {}
       if (agentChansInp && !agentChansInp.value) agentChansInp.value = state.channel || '';
       agentsPanel.removeAttribute('hidden'); btnAgents.classList.add('on');
-      updateAgentProviderFields(); loadAgentHealth(); loadAgentModels(); loadAgents();
+      updateAgentProviderFields(); loadAgentHealth(); loadAgentModels();
+      loadApprovals(); loadAgents();
     } else { agentsPanel.setAttribute('hidden', ''); btnAgents.classList.remove('on'); }
   }
   async function loadAgents() {
@@ -9553,6 +9607,43 @@ INDEX_HTML = r"""<!doctype html>
     }
     if (efforts.includes(previous)) agentEffortSel.value = previous;
   }
+  async function loadApprovals() {
+    if (!agentApprovalsEl) return;
+    try {
+      const r = await fetch('/api/approvals');
+      const j = await r.json();
+      if (!r.ok) return;
+      agentApprovalsEl.innerHTML = '';
+      for (const approval of (j.approvals || [])) {
+        const card = document.createElement('div'); card.className = 'agent-approval';
+        const title = document.createElement('strong');
+        title.textContent = approval.agent_name + ' requests ' + approval.kind;
+        card.appendChild(title);
+        const detail = document.createElement('div');
+        detail.textContent = approval.reason || approval.cwd || 'Approval required';
+        card.appendChild(detail);
+        if (approval.command) {
+          const command = document.createElement('code'); command.textContent = approval.command;
+          card.appendChild(command);
+        }
+        for (const choice of [['accept', 'Allow once'], ['acceptForSession', 'Allow session'],
+                              ['decline', 'Decline']]) {
+          const button = document.createElement('button'); button.textContent = choice[1];
+          button.onclick = () => resolveApproval(approval.id, choice[0]);
+          card.appendChild(button);
+        }
+        agentApprovalsEl.appendChild(card);
+      }
+    } catch (_) {}
+  }
+  async function resolveApproval(id, decision) {
+    try {
+      await fetch('/api/approvals/' + encodeURIComponent(id) + '/resolve', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({decision}) });
+    } catch (_) {}
+    loadApprovals(); loadAgents();
+  }
   function renderAgents(agents) {
     agentsListEl.innerHTML = '';
     if (!agents.length) { agentsListEl.textContent = 'no agents yet'; return; }
@@ -9572,6 +9663,10 @@ INDEX_HTML = r"""<!doctype html>
         msg.title = 'Open a direct message with ' + a.name;
         msg.onclick = () => openDmTab(a.id);
         row.appendChild(msg);
+      }
+      if (a.provider === 'codex') {
+        const activity = document.createElement('button'); activity.textContent = 'activity';
+        activity.onclick = () => toggleAgentActivity(row, a.id); row.appendChild(activity);
       }
       for (const act of (a.live
         ? (a.busy ? ['interrupt', 'hibernate', 'stop', 'compact', 'clear', 'delete']
@@ -9597,6 +9692,21 @@ INDEX_HTML = r"""<!doctype html>
       chans.appendChild(wake); row.appendChild(chans);
       agentsListEl.appendChild(row);
     }
+  }
+  async function toggleAgentActivity(row, id) {
+    const existing = row.querySelector('.agent-activity');
+    if (existing) { existing.remove(); return; }
+    const panel = document.createElement('div'); panel.className = 'agent-activity';
+    panel.textContent = 'loading activity…'; row.appendChild(panel);
+    try {
+      const r = await fetch('/api/agents/' + encodeURIComponent(id) + '/activity?limit=50');
+      const j = await r.json();
+      const events = j.events || [];
+      panel.textContent = events.length ? events.map(e =>
+        (e.status ? e.status + ' · ' : '') + e.method +
+        (e.summary ? ' · ' + e.summary : '')).join('\n') : 'No runtime activity yet.';
+      panel.style.whiteSpace = 'pre-wrap';
+    } catch (_) { panel.textContent = 'Could not load activity.'; }
   }
   async function agentAction(id, action) {
     if (action === 'delete' && !confirm('Delete this agent?')) return;
@@ -9663,6 +9773,11 @@ INDEX_HTML = r"""<!doctype html>
     updateAgentProviderFields(); loadAgentModels();
   });
   if (agentModelSel) agentModelSel.addEventListener('change', updateAgentEfforts);
+  setInterval(() => {
+    if (agentsPanel && !agentsPanel.hasAttribute('hidden')) {
+      loadApprovals();
+    }
+  }, 2500);
 
   if (btnDm) {
     btnDm.addEventListener('click', (e) => { e.stopPropagation(); toggleDmPanel(); });

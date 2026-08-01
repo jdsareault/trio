@@ -170,6 +170,18 @@ class UnifiedAgentSupervisor:
             return self.codex.is_busy(agent_id)
         return False
 
+    def activity(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        manager = self.manager_for(agent_id)
+        if manager is self.codex:
+            return self.codex.activity(agent_id, limit=limit)
+        return []
+
+    def pending_approvals(self) -> List[Dict[str, Any]]:
+        return self.codex.pending_approvals()
+
+    def resolve_approval(self, approval_id: str, decision: str) -> bool:
+        return self.codex.resolve_approval(approval_id, decision)
+
     def diagnostics(self, provider: str, *, deep: bool = False) -> Dict[str, Any]:
         provider = provider.lower()
         if provider == "claude":

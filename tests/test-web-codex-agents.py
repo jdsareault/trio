@@ -85,6 +85,26 @@ try:
           and str(found.get("runtime_ref", "")).startswith("thr_fake_")
           and found.get("pid") is None and found.get("queued") == 0)
 
+    web.get_supervisor().codex._client.request(
+        "fake/request-approval", {"threadId": found["runtime_ref"]})
+    deadline = time.time() + 2
+    approvals = []
+    while not approvals and time.time() < deadline:
+        status, approval_payload = request(port, "/api/approvals")
+        approvals = approval_payload.get("approvals", [])
+        if not approvals:
+            time.sleep(0.02)
+    check("approval inbox exposes pending Codex decisions",
+          status == 200 and approvals and approvals[0]["command"] == "git status")
+    approval_id = approvals[0]["id"]
+    status, _ = request(
+        port, f"/api/approvals/{approval_id}/resolve", "POST", {"decision": "decline"})
+    check("approval endpoint resolves without blocking App Server", status == 200)
+    status, activity = request(port, f"/api/agents/{agent_id}/activity")
+    check("operator activity endpoint includes approval lifecycle",
+          status == 200 and any(e["method"] == "approval/pending"
+                                for e in activity.get("events", [])))
+
     status, _ = request(port, f"/api/agents/{agent_id}/wake-mode", "POST", {"mode": "all"})
     with sqlite3.connect(str(srv.DB_PATH)) as db:
         mode = db.execute("SELECT wake_mode FROM agents WHERE id=?", (agent_id,)).fetchone()[0]

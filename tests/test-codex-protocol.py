@@ -23,6 +23,7 @@ def check(label, condition):
 notifications = []
 requests = []
 got_turn = threading.Event()
+got_request = threading.Event()
 
 
 def on_notification(message):
@@ -33,6 +34,7 @@ def on_notification(message):
 
 def on_server_request(message):
     requests.append(message)
+    got_request.set()
     return {"decision": "decline"}
 
 
@@ -74,6 +76,7 @@ try:
     check("JSON-RPC errors become bounded protocol exceptions", errored)
 
     client.request("emit/request")
+    got_request.wait(2.0)
     check("server-initiated requests reach the host decision callback",
           requests and requests[0].get("method") == "item/commandExecution/requestApproval")
 finally:

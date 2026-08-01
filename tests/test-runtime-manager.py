@@ -3,6 +3,7 @@
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -62,6 +63,26 @@ try:
     check("unified spawn creates a Codex thread", handle.thread_id.startswith("thr_fake_"))
     check("unified live roster includes Codex", manager.live_ids() == ["cx1"])
     check("provider model discovery delegates", manager.list_models("codex")[0]["id"] == "fake-codex")
+    codex._client.request("fake/request-approval", {"threadId": handle.thread_id})
+    deadline = time.time() + 2
+    pending = []
+    while not pending and time.time() < deadline:
+        pending = manager.pending_approvals()
+        time.sleep(0.01)
+    check("Codex approval requests enter the operator inbox",
+          pending and pending[0]["agent_id"] == "cx1"
+          and pending[0]["command"] == "git status")
+    check("operator can resolve a pending approval",
+          manager.resolve_approval(pending[0]["id"], "accept"))
+    deadline = time.time() + 2
+    decision = ""
+    while not decision and time.time() < deadline:
+        decision = codex._client.request("fake/approval-result").get("decision") or ""
+        if not decision:
+            time.sleep(0.01)
+    check("approval decision returns asynchronously to App Server", decision == "accept")
+    check("structured runtime activity stays available outside chat",
+          any(row["method"] == "approval/pending" for row in manager.activity("cx1")))
     fresh = manager.clear("cx1", cwd=str(tmp))
     check("unified clear replaces Codex context", fresh.thread_id != handle.thread_id)
     db = sqlite3.connect(str(db_path))

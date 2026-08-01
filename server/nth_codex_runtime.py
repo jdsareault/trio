@@ -208,7 +208,12 @@ class CodexAppServerClient:
                         pending.event.set()
                     continue
                 if "id" in message and "method" in message:
-                    self._handle_server_request(message)
+                    # Approval/user-input handlers may wait on a UI decision.
+                    # Never block the one reader responsible for correlating
+                    # every other App Server response and notification.
+                    threading.Thread(
+                        target=self._handle_server_request,
+                        args=(message,), daemon=True).start()
                     continue
                 callback = self.on_notification
                 if callback is not None and message.get("method"):
@@ -353,6 +358,10 @@ class CodexRuntimeManager:
         self._turn_context: Dict[str, Dict[str, Any]] = {}
         self._turn_text: Dict[str, str] = {}
         self._queued: Dict[str, Deque[Dict[str, Any]]] = {}
+        self._activity: Dict[str, Deque[Dict[str, Any]]] = {}
+        self._approvals: Dict[str, Dict[str, Any]] = {}
+        self._approval_events: Dict[str, threading.Event] = {}
+        self._approval_seq = 0
         self._actions: "queue.Queue" = queue.Queue()
         self._worker_stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
@@ -610,6 +619,7 @@ class CodexRuntimeManager:
 
     def _unload(self, agent_id: str, state: str) -> bool:
         with self._agent_lock(agent_id):
+            self._cancel_approvals(agent_id)
             with self._lock:
                 thread_id = self._threads.get(agent_id)
                 turn_id = self._active.get(agent_id)
@@ -675,6 +685,7 @@ class CodexRuntimeManager:
 
     def delete(self, agent_id: str) -> bool:
         with self._agent_lock(agent_id):
+            self._cancel_approvals(agent_id)
             with self._lock:
                 thread_id = self._threads.get(agent_id)
             if not thread_id:
@@ -719,6 +730,42 @@ class CodexRuntimeManager:
         with self._lock:
             return agent_id in self._active or agent_id in self._starting
 
+    def activity(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = list(self._activity.get(agent_id, ()))
+        return rows[-max(1, min(limit, 200)):]
+
+    def pending_approvals(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(row) for row in self._approvals.values()
+                    if row.get("status") == "pending"]
+
+    def resolve_approval(self, approval_id: str, decision: str) -> bool:
+        if decision not in ("accept", "acceptForSession", "decline", "cancel"):
+            return False
+        with self._lock:
+            row = self._approvals.get(approval_id)
+            event = self._approval_events.get(approval_id)
+            if row is None or event is None or row.get("status") != "pending":
+                return False
+            row["decision"] = decision
+            row["status"] = "resolved"
+            row["resolved_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+            event.set()
+        return True
+
+    def _cancel_approvals(self, agent_id: str) -> None:
+        with self._lock:
+            for approval_id, row in self._approvals.items():
+                if row.get("agent_id") != agent_id or row.get("status") != "pending":
+                    continue
+                row["decision"] = "cancel"
+                row["status"] = "cancelled"
+                event = self._approval_events.get(approval_id)
+                if event is not None:
+                    event.set()
+
     def _on_notification(self, message: Dict[str, Any]) -> None:
         method = message.get("method") or ""
         params = message.get("params") or {}
@@ -729,6 +776,7 @@ class CodexRuntimeManager:
             agent_id = self._thread_agents.get(str(thread_id or ""))
         if not agent_id:
             return
+        self._record_activity(agent_id, message)
         if method == "turn/started":
             turn = params.get("turn") or {}
             turn_id = str(turn.get("id") or "")
@@ -765,14 +813,89 @@ class CodexRuntimeManager:
                 pass
 
     def _on_server_request(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        # Balanced mode uses Codex's auto reviewer when available. Any request
-        # that still reaches the headless Trio host must fail closed rather than
-        # freezing the agent indefinitely. A later UI approval inbox can replace
-        # this callback without changing the protocol client.
         method = message.get("method") or ""
-        if "requestApproval" in method:
-            return {"decision": "decline"}
+        params = message.get("params") or {}
+        thread_id = str(params.get("threadId") or "")
+        with self._lock:
+            agent_id = self._thread_agents.get(thread_id, "")
+        if "requestApproval" in method and agent_id:
+            db = self._db()
+            try:
+                row = db.execute(
+                    "SELECT name, permission_profile FROM agents WHERE id=?",
+                    (agent_id,)).fetchone()
+            finally:
+                db.close()
+            profile = (row["permission_profile"] if row else "balanced") or "balanced"
+            if profile == "autonomous":
+                return {"decision": "decline"}
+            with self._lock:
+                self._approval_seq += 1
+                approval_id = f"ap_{self._approval_seq}"
+                event = threading.Event()
+                approval = {
+                    "id": approval_id,
+                    "agent_id": agent_id,
+                    "agent_name": (row["name"] if row else agent_id),
+                    "provider": "codex", "method": method,
+                    "kind": ("command" if "commandExecution" in method else
+                             "file-change" if "fileChange" in method else "permission"),
+                    "reason": params.get("reason") or "",
+                    "command": params.get("command") or "",
+                    "cwd": params.get("cwd") or "",
+                    "status": "pending", "decision": "",
+                    "created_at": time.strftime(
+                        "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                }
+                self._approvals[approval_id] = approval
+                self._approval_events[approval_id] = event
+            self._record_activity(agent_id, {
+                "method": "approval/pending", "params": approval})
+            if self.on_event is not None:
+                try:
+                    self.on_event(agent_id, {
+                        "provider": "codex", "method": "approval/pending",
+                        "params": dict(approval)})
+                except Exception:
+                    pass
+            decided = event.wait(120.0)
+            with self._lock:
+                current = self._approvals.get(approval_id) or approval
+                decision = current.get("decision") if decided else "decline"
+                if not decided:
+                    current["status"] = "expired"
+                    current["decision"] = "decline"
+                self._approval_events.pop(approval_id, None)
+            return {"decision": decision or "decline"}
         raise CodexProtocolError(f"unsupported Codex server request: {method}")
+
+    def _record_activity(self, agent_id: str, message: Dict[str, Any]) -> None:
+        method = message.get("method") or "event"
+        params = message.get("params") or {}
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        entry = {
+            "method": method,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+            "turn_id": params.get("turnId") or turn.get("id") or "",
+            "item_type": item.get("type") or "",
+            "status": item.get("status") or turn.get("status") or "",
+        }
+        if item.get("type") == "commandExecution":
+            entry["summary"] = item.get("command") or "command"
+        elif item.get("type") == "fileChange":
+            entry["summary"] = f"{len(item.get('changes') or [])} file change(s)"
+        elif item.get("type") == "mcpToolCall":
+            entry["summary"] = f"{item.get('server', '')}/{item.get('tool', '')}".strip("/")
+        elif method == "turn/plan/updated":
+            entry["summary"] = f"plan updated ({len(params.get('plan') or [])} steps)"
+        elif method in ("warning", "configWarning"):
+            entry["summary"] = params.get("message") or params.get("summary") or "warning"
+        elif method == "approval/pending":
+            entry["summary"] = params.get("reason") or params.get("kind") or "approval requested"
+        with self._lock:
+            self._activity.setdefault(
+                agent_id, collections.deque(maxlen=200)).append(entry)
 
     def _worker_loop(self) -> None:
         while not self._worker_stop.is_set():
@@ -866,6 +989,7 @@ class CodexRuntimeManager:
             live = list(self._loaded)
             self._loaded.clear()
         for agent_id in live:
+            self._cancel_approvals(agent_id)
             self._set_state(agent_id, "sleeping" if preserve_sessions else "stopped")
         self._worker_stop.set()
         self._client.stop()

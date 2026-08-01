@@ -43,6 +43,10 @@ check("served bundle: Codex project and permissions controls present",
 check("served bundle: managed wake-policy control present", 'id="agent-wake"' in served)
 check("served bundle: model controls use provider discovery",
       "/api/agent-models?provider=" in served)
+check("served bundle: approval inbox is operator-actionable",
+      'id="agent-approvals"' in served and "resolveApproval" in served)
+check("served bundle: structured agent activity is separate from chat",
+      "toggleAgentActivity" in served and "/activity?limit=" in served)
 
 # The raw source keeps the block (with both sentinel markers) so the DOM
 # harness, which reads this file directly, still sees the hook.

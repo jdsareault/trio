@@ -12,6 +12,7 @@ threads = {}
 next_thread = 1
 hold_turns = "--hold" in sys.argv
 held = []
+last_approval = ""
 
 
 TOOL_NAMES = (
@@ -39,6 +40,9 @@ for raw in sys.stdin:
     method = msg.get("method")
     params = msg.get("params") or {}
     request_id = msg.get("id")
+    if request_id == 5000 and method is None:
+        last_approval = (msg.get("result") or {}).get("decision") or ""
+        continue
     if method == "initialized":
         continue
     if request_id is None:
@@ -97,6 +101,15 @@ for raw in sys.stdin:
         if held:
             complete_turn(*held.pop(0))
         send({"id": request_id, "result": {}})
+    elif method == "fake/request-approval":
+        tid = params.get("threadId")
+        send({"id": 5000, "method": "item/commandExecution/requestApproval",
+              "params": {"threadId": tid, "turnId": "turn_approval",
+                         "itemId": "item_approval", "reason": "test command",
+                         "command": "git status", "cwd": "/tmp"}})
+        send({"id": request_id, "result": {"approvalId": 5000}})
+    elif method == "fake/approval-result":
+        send({"id": request_id, "result": {"decision": last_approval}})
     elif method == "turn/interrupt":
         send({"id": request_id, "result": {}})
     elif method in ("thread/unsubscribe", "thread/archive", "thread/delete",
