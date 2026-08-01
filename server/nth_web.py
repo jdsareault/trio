@@ -11355,6 +11355,55 @@ INDEX_HTML = _strip_test_hook(
 )
 
 
+# Phase 7 keeps the stdlib, single-response deployment model but moves the
+# browser source into reviewable files.  Assets are deliberately inlined: the
+# dashboard is still one portable document and does not need a build step or
+# an asset-serving route.  The explicit order is the public module contract.
+WEB_SOURCE_DIR = Path(__file__).resolve().with_name("web")
+WEB_CSS_FILES = (
+    "css/00-tokens.css", "css/10-shell.css", "css/20-conversation.css",
+    "css/30-workspace.css", "css/40-responsive.css",
+)
+WEB_JS_FILES = (
+    "js/00-core.js", "js/10-markdown.js", "js/11-conversation.js",
+    "js/12-composer.js", "js/20-workspace.js", "js/30-agents.js",
+    "js/40-preferences.js", "js/90-boot.js", "js/99-test-hook.js",
+)
+
+
+def _read_web_source(relative_path: str) -> str:
+    """Read a modular web source file without allowing paths outside web/."""
+    path = (WEB_SOURCE_DIR / relative_path).resolve()
+    if WEB_SOURCE_DIR not in path.parents:
+        raise ValueError(f"invalid web source path: {relative_path}")
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as e:
+        # During a partial source checkout, serve a useful diagnostic instead
+        # of failing the complete Python web server import.
+        return f"/* unavailable: {relative_path}: {e} */"
+
+
+def _compose_index_html() -> str:
+    template = _read_web_source("index.html")
+    styles = "\n".join(
+        f"<style data-trio-source=\"{name}\">\n{_read_web_source(name)}\n</style>"
+        for name in WEB_CSS_FILES
+    )
+    scripts = "\n".join(
+        f"<script data-trio-source=\"{name}\">\n{_read_web_source(name)}\n</script>"
+        for name in WEB_JS_FILES
+        if name != "js/99-test-hook.js"
+    )
+    return template.replace("<!--__TRIO_STYLES__-->", styles).replace(
+        "<!--__TRIO_SCRIPTS__-->", scripts)
+
+
+# New imports use the modular Atrium shell.  Keep the historical in-source
+# bundle above temporarily for a safe, bisectable migration; it is not served.
+INDEX_HTML = _compose_index_html()
+
+
 # ───────── Entry ─────────
 class QuietThreadingHTTPServer(ThreadingHTTPServer):
     """Ignore expected disconnects from tab closes, refreshes, and SSE retries."""

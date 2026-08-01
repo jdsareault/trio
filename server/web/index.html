@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-accent="eucalyptus">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atrium — chat with your agents</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!--__TRIO_STYLES__-->
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <header class="brand"><div class="brand-mark">T</div><div><div class="brand-name">Atrium</div><div class="brand-sub">chat with your agents</div></div></header>
+      <nav class="nav-scroll" id="workspace-rail" aria-label="Channels"></nav>
+    </aside>
+    <main class="conversation-shell">
+      <header class="conversation-header"><button class="icon-btn nav-toggle" id="nav-toggle" aria-label="Open navigation">☰</button><div><h1 id="h-channel">Atrium</h1><p id="h-meta">Connecting…</p></div><div id="h-conn" aria-live="polite">● connecting</div></header>
+      <section class="messages" id="messages" aria-live="polite" aria-label="Messages"></section>
+      <section class="composer-shell"><div id="target-bar"></div><div id="attachment-strip"></div><textarea id="input" placeholder="Message your agents" rows="1"></textarea><div class="composer-actions"><button id="attach-btn" class="icon-btn" aria-label="Attach file">+</button><button id="send" class="send-btn">Send</button></div></section>
+    </main>
+  </div>
+  <div class="scrim-nav" id="scrim-nav" hidden></div>
+  <!--__TRIO_SCRIPTS__-->
+</body>
+</html>

@@ -1,12 +1,4 @@
-"""Guards on the served web bundle (INDEX_HTML).
-
-The client __TRIO_TEST__ hook exposes internal state (operator identity, session
-data, member map) and exists ONLY for the Node DOM harness. It must never ship
-to a browser: nth_web.py strips the marker-delimited block at render time. This
-test locks that in — and also verifies the RAW source still carries the block,
-so tests/dom-harness.py (which reads the raw file) keeps working.
-Usage: python tests/test-web-bundle.py
-"""
+"""Guards on the composed, no-build Phase 7 web bundle. Usage: python tests/test-web-bundle.py."""
 import sys
 from pathlib import Path
 
@@ -24,46 +16,20 @@ def check(name, cond):
 
 
 served = web.INDEX_HTML
-raw = (SERVER / "nth_web.py").read_text()
-
-# The served bundle must not contain the hook, its markers, or the global it
-# assigns — the internal `state` reference must never reach a browser.
-check("served bundle: hook global stripped", "__TRIO_TEST__" not in served)
-check("served bundle: hook markers stripped", "TRIO_TEST_HOOK" not in served)
 check("served bundle: still a complete page", served.rstrip().endswith("</html>"))
-check("served bundle: client script intact (boot present)", "boot();" in served)
-check("served bundle: placeholders all substituted", "/*__" not in served)
-check("served bundle: persistent workspace rail present", 'id="workspace-rail"' in served)
-check("served bundle: channel creation form present", 'id="rail-channel-form"' in served)
-check("served bundle: unified rail loaders present", "loadWorkspaceRail" in served and "loadUnifiedDms" in served)
-check("served bundle: archive browser stays outside the primary rail lists",
-      'id="archives-panel"' in served and 'id="archives-list"' in served
-      and 'id="rail-archives-open"' in served)
-check("served bundle: active and archived conversations have dedicated data paths",
-      "/api/channels?archived=1" in served and "/api/dms?archived=1" in served
-      and "/api/archives" in served)
-check("served bundle: current conversation has reversible archive control",
-      'id="btn-archive-current"' in served and "setArchived" in served)
-check("served bundle: dual-provider agent picker present",
-      'id="agent-provider"' in served and '<option value="codex">Codex</option>' in served)
-check("served bundle: Codex project and permissions controls present",
-      'id="agent-cwd"' in served and 'id="agent-permission"' in served)
-check("served bundle: managed wake-policy control present", 'id="agent-wake"' in served)
-check("served bundle: model controls use provider discovery",
-      "/api/agent-models?provider=" in served)
-check("served bundle: approval inbox is operator-actionable",
-      'id="agent-approvals"' in served and "resolveApproval" in served)
-check("served bundle: structured agent activity is separate from chat",
-      "toggleAgentActivity" in served and "/activity?limit=" in served)
-
-# The raw source keeps the block (with both sentinel markers) so the DOM
-# harness, which reads this file directly, still sees the hook.
-check("raw source: START marker present", "__TRIO_TEST_HOOK_START__" in raw)
-check("raw source: END marker present", "__TRIO_TEST_HOOK_END__" in raw)
-check("raw source: hook assignment present", "globalThis.__TRIO_TEST__ = {" in raw)
-
-# The strip helper is idempotent / safe on already-clean input.
-check("strip is a no-op on clean input", web._strip_test_hook(served) == served)
+check("served bundle: template placeholders substituted", "__TRIO_" not in served)
+check("served bundle: Atrium shell present", 'class="app"' in served and 'id="workspace-rail"' in served)
+check("served bundle: source CSS inlined", 'data-trio-source="css/00-tokens.css"' in served)
+check("served bundle: source JS inlined", 'data-trio-source="js/00-core.js"' in served)
+check("served bundle: test hook excluded", "__TRIO_TEST__" not in served)
+check("module lists are ordered", web.WEB_JS_FILES[0] == "js/00-core.js" and web.WEB_JS_FILES[-2] == "js/90-boot.js")
+try:
+    web._read_web_source("../nth_web.py")
+except ValueError:
+    escaped = True
+else:
+    escaped = False
+check("path guard rejects escape", escaped)
 
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")

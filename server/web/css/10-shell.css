@@ -1,0 +1,9 @@
+.app { display:grid; grid-template-columns:300px minmax(0,1fr); min-height:100dvh; }
+.sidebar { display:flex; flex-direction:column; min-height:0; background:var(--sidebar); border-right:1px solid var(--line); }
+.brand { display:flex; gap:12px; align-items:center; padding:20px; }
+.brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:12px; color:white; background:linear-gradient(150deg,var(--accent),var(--accent-strong)); }
+.brand-name { font:600 22px var(--font-display); }.brand-sub,#h-meta { color:var(--ink-3); font-size:12px; margin:0; }
+.nav-scroll { overflow:auto; padding:8px 12px; }.conversation-shell { display:grid; grid-template-rows:auto 1fr auto; min-height:0; }
+.conversation-header { display:flex; align-items:center; gap:12px; padding:16px 24px; border-bottom:1px solid var(--line); background:var(--surface); }.conversation-header h1 { margin:0; font:600 22px var(--font-display); }.conversation-header #h-conn { margin-left:auto; color:var(--ink-3); font-size:13px; }
+.icon-btn { border:0; background:transparent; border-radius:9px; padding:8px; cursor:pointer; }.icon-btn:hover { background:var(--accent-tint); }.nav-toggle { display:none; }
+.messages { overflow:auto; padding:24px; }.composer-shell { padding:12px 20px 18px; background:var(--surface); border-top:1px solid var(--line); }.composer-shell textarea { width:100%; resize:none; border:1px solid var(--line); background:var(--bg); border-radius:var(--radius); padding:12px; }.composer-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }.send-btn { border:0; border-radius:999px; padding:8px 16px; color:white; background:var(--accent); cursor:pointer; }
