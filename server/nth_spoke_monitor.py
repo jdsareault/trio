@@ -58,6 +58,13 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 
+# gap_for_emit: JSON-safe rounding for a gap-seconds diagnostic (inf -> None
+# instead of round(inf) raising OverflowError). nth_monitor.py is always
+# co-located with this script (both hub and remote installs copy it — see
+# setup.sh), so import its finite-gap helper instead of duplicating it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from nth_monitor import gap_for_emit  # noqa: E402
+
 # --- Tunables (match nth_monitor.py where applicable) ---------------------
 DEFAULT_URL          = "http://localhost:8000/sse"
 DEFAULT_POLL_WAIT    = 15            # quartet_poll long-poll window (server cap 30)
@@ -628,7 +635,7 @@ def monitor(client, channel, member_id, filter_mode, session_token,
         if not sleeping and claimed > 0:
             if own_gap > CADENCE_THRESHOLD and not cadence_fired:
                 emit({"event": "cadence",
-                      "gap_seconds": round(own_gap),
+                      "gap_seconds": gap_for_emit(own_gap),
                       "claimed_tasks": claimed})
                 cadence_fired = True
             elif own_gap < CADENCE_THRESHOLD:
@@ -657,9 +664,9 @@ def monitor(client, channel, member_id, filter_mode, session_token,
                 and not keepalive_fired):
             emit({
                 "event": "keepalive",
-                "gap_seconds": round(own_gap),
+                "gap_seconds": gap_for_emit(own_gap),
                 "threshold_seconds": KEEPALIVE_THRESHOLD,
-                "engaged_gap_seconds": round(engaged_gap),
+                "engaged_gap_seconds": gap_for_emit(engaged_gap),
             })
             keepalive_fired = True
         elif own_gap < KEEPALIVE_THRESHOLD:
