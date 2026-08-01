@@ -2,11 +2,13 @@
   'use strict';
   const Trio = window.Trio;
   async function boot() {
-    if (!(await Trio.boot())) return;
-    ['conversation', 'workspace', 'agents', 'preferences', 'router'].forEach(name => {
-      const feature = Trio[name];
-      if (feature) Trio.lifecycle?.mount?.(name, feature);
-    });
+    const mountFeatures = () => {
+      ['conversation', 'workspace', 'agents', 'preferences', 'router'].forEach(name => {
+        const feature = Trio[name];
+        if (feature) Trio.lifecycle?.mount?.(name, feature);
+      });
+    };
+    if (!(await Trio.boot(mountFeatures))) return;
     const app = document.getElementById('app');
     const nav = document.getElementById('nav-toggle');
     const scrim = document.getElementById('scrim-nav');

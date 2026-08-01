@@ -23,7 +23,7 @@
     async post(path, body, channelScoped = true) { const response = await fetch(this.url(path, channelScoped), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
   };
   root.actions = root.actions || {};
-  root.boot = async function boot() {
+  root.boot = async function boot(mountFeatures) {
     const meta = await root.api.get('/api/meta'); root.state.meta = meta;
     root.state.operator = meta.operator || null;
     root.state.channel = root.state.channel || meta.default_channel || meta.channel || '';
@@ -38,6 +38,7 @@
     }
     document.getElementById('h-channel').textContent = root.state.channel ? `trio#${root.state.channel}` : 'Atrium';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
+    mountFeatures?.();
     if (root.startEvents) root.startEvents(root.state.channel);
     root.events.dispatchEvent(new CustomEvent('boot', {detail: meta})); return true;
   };
