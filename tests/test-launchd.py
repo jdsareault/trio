@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Pure launchd configuration checks (does not call launchctl)."""
+import shutil
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -24,6 +25,22 @@ checks = {
         "/opt/homebrew/bin" in p["EnvironmentVariables"]["PATH"]
         and "/usr/local/bin" in p["EnvironmentVariables"]["PATH"],
 }
+# bugs/2026-08-01-launchd-path-omits-codex-discovery.md: a Codex CLI outside
+# the hardcoded system/Homebrew directories must still be discovered, matching
+# the existing claude-discovery behavior.
+original_which = shutil.which
+try:
+    def fake_which(name):
+        if name == "codex":
+            return "/custom/codex/bin/codex"
+        return original_which(name)
+    launchd.shutil.which = fake_which
+    path_with_codex = launchd.service_path()
+finally:
+    launchd.shutil.which = original_which
+checks["service PATH discovers a non-standard Codex install directory"] = \
+    "/custom/codex/bin" in path_with_codex.split(":")
+
 for label, ok in checks.items():
     print(("PASS" if ok else "FAIL") + ": " + label)
 

@@ -70,10 +70,18 @@ def database_status(path: Path) -> Dict[str, Any]:
 
 
 def doctor_report(db_path: Path, port: int, *, probe_hub: bool = True) -> Dict[str, Any]:
-    runtime = nth_supervisor.ClaudeRuntime().diagnostics()
+    # Report every configured provider (Claude, Codex) rather than requiring
+    # Claude specifically — a Codex-only workspace with a healthy database and
+    # hub must not be reported as failing (bugs/2026-08-01-app-doctor-requires-
+    # claude-for-codex-only.md).
+    runtimes = {
+        "claude": nth_supervisor.ClaudeRuntime().diagnostics(),
+        "codex": nth_web.runtime_health(provider="codex"),
+    }
     return {
         "database": database_status(db_path),
-        "claude": runtime,
+        "claude": runtimes["claude"],
+        "runtimes": runtimes,
         "service_loaded": launchd_loaded(),
         "hub": fetch_health(port) if probe_hub else None,
         "url": app_url(port),
@@ -82,7 +90,7 @@ def doctor_report(db_path: Path, port: int, *, probe_hub: bool = True) -> Dict[s
 
 def print_report(report: Dict[str, Any]) -> None:
     db = report["database"]
-    claude = report["claude"]
+    runtimes = report.get("runtimes") or {"claude": report["claude"]}
     hub = report.get("hub")
     print("nth app doctor")
     print(f"  database: {'ready' if db.get('ready') else 'needs attention'} — {db['path']}")
@@ -90,8 +98,9 @@ def print_report(report: Dict[str, Any]) -> None:
         print(f"            {db.get('channels', 0)} channels, {db.get('agents', 0)} agents")
     elif db.get("detail"):
         print(f"            {db['detail']}")
-    print(f"  Claude:   {'ready' if claude.get('ready') else 'needs attention'}")
-    print(f"            {claude.get('detail') or claude.get('version') or 'unknown'}")
+    for name, runtime in runtimes.items():
+        print(f"  {name}:{' ' * max(1, 9 - len(name))}{'ready' if runtime.get('ready') else 'needs attention'}")
+        print(f"            {runtime.get('detail') or runtime.get('version') or 'unknown'}")
     if sys.platform == "darwin":
         print(f"  service:  {'loaded' if report.get('service_loaded') else 'not loaded'}")
     print(f"  web app:  {'running' if hub else 'not reachable'} — {report['url']}")
@@ -125,7 +134,9 @@ def main(argv=None) -> int:
             print_report(report)
         elif ns.json:
             print()
-        return 0 if report["database"].get("ready") and report["claude"].get("ready") else 1
+        runtimes = report.get("runtimes") or {"claude": report["claude"]}
+        any_runtime_ready = any(r.get("ready") for r in runtimes.values())
+        return 0 if report["database"].get("ready") and any_runtime_ready else 1
 
     if ns.command == "open":
         url = app_url(ns.port)

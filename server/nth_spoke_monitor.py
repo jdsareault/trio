@@ -537,7 +537,20 @@ def monitor(client, channel, member_id, filter_mode, session_token,
                     local_hwm = max(local_hwm,
                                     max((m.get("id") or 0) for m in messages))
                 if new_msgs:
-                    wake, _kind = should_emit_summary(poll, filter_mode)
+                    # Compute wake flags from new_msgs alone — poll's aggregate
+                    # has_mentions/has_refs/has_bangs describe the FULL repeated
+                    # backlog (tokenless polling has no server-side watermark,
+                    # so the same old messages come back every time), not just
+                    # what's actually new. Using them directly let a stale old
+                    # mention/ref/bang in the backlog wake on a later purely
+                    # ambient message (bugs/2026-08-01-tokenless-spoke-stale-
+                    # flags-false-wake.md).
+                    fresh_flags = {
+                        "has_mentions": any(m.get("mentioned") for m in new_msgs),
+                        "has_refs": any(m.get("referenced") for m in new_msgs),
+                        "has_bangs": any(m.get("banged") for m in new_msgs),
+                    }
+                    wake, _kind = should_emit_summary(fresh_flags, filter_mode)
                     if wake:
                         from_names = []
                         seen = set()

@@ -22,10 +22,16 @@ LABEL = "com.nth.trio-hub"
 
 
 def service_path() -> str:
-    """PATH for a non-shell LaunchAgent, including installed CLI locations."""
+    """PATH for a non-shell LaunchAgent, including installed CLI locations.
+
+    A LaunchAgent doesn't inherit the interactive shell PATH, so any provider
+    CLI installed outside the hardcoded system/Homebrew directories must have
+    its parent directory added explicitly here — for every supported runtime
+    (claude, codex, ...), not just claude."""
     entries = []
     for candidate in (str(Path(sys.executable).resolve().parent),
                       str(Path(shutil.which("claude") or "").parent),
+                      str(Path(shutil.which("codex") or "").parent),
                       "/opt/homebrew/bin", "/usr/local/bin",
                       "/usr/bin", "/bin", "/usr/sbin", "/sbin"):
         if candidate and candidate != "." and candidate not in entries:

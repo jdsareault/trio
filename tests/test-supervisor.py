@@ -3,6 +3,7 @@
 wake(resume) / stop — driven against tests/fake_agent.py so NO real billed
 Claude session is ever launched.
 """
+import collections
 import sys
 import tempfile
 import threading
@@ -190,9 +191,19 @@ def main() -> int:
     s._procs["agconc"].proc.kill()
     time.sleep(0.2)
     check("feed to dead process returns False", s.feed("agconc", "alpha", "x") is False)
+
+    # bugs/2026-08-01-claude-crash-retains-pending-context.md: a turn context
+    # queued right before the crash must not survive reconcile() — otherwise
+    # the next process's plain result pops this stale entry and bridges to
+    # the DEAD turn's channel/baseline instead of its own.
+    s._pending["agconc"] = collections.deque([
+        {"channel": "alpha", "baseline": 0,
+         "source_message_id": 1, "source_sender": "someone"}])
     reaped = s.reconcile()
     check("reconcile reaps the dead agent", "agconc" in reaped)
     check("reconcile flips stale running→errored", _row(db_path, "agconc")["state"] == "errored")
+    check("reconcile clears the dead process's pending turn context",
+          "agconc" not in s._pending)
 
     # ── wake an agent that never spawned (no session_id) → cold start ──
     db5 = sqlite3.connect(str(db_path))

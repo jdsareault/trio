@@ -582,6 +582,10 @@ class AgentSupervisor:
             db.close()
         if row is None:
             return None
+        # Any turn context queued against a prior (possibly crashed) process
+        # for this agent_id no longer corresponds to a real in-flight turn —
+        # the fresh process starts with no pending results to bridge.
+        self._forget_pending(agent_id)
         return self.spawn(
             agent_id,
             model=spawn_kw.get("model", row["model"] or ""),
@@ -717,6 +721,12 @@ class AgentSupervisor:
                 del self._procs[a]
         for a, _ in dead:
             self._set_state(a, ST_ERRORED, clear_pid=True)
+            # A crash reaped here (as opposed to a deliberate stop/hibernate/
+            # clear) left _pending untouched. Without this, _bridge_result()
+            # would pop a turn context belonging to the DEAD process against
+            # a plain result from whatever wakes next, routing it to the
+            # wrong channel (bugs/2026-08-01-claude-crash-retains-pending-context.md).
+            self._forget_pending(a)
             reaped.append(a)
         return reaped
 
