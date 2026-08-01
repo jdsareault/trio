@@ -61,7 +61,8 @@ def build_db(path, filter_mode):
         CREATE TABLE messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT, member_id TEXT,
             member_name TEXT, content TEXT, created_at TEXT,
-            mentions TEXT DEFAULT '', refs TEXT DEFAULT '', bangs TEXT DEFAULT ''
+            mentions TEXT DEFAULT '', refs TEXT DEFAULT '', bangs TEXT DEFAULT '',
+            recipients TEXT DEFAULT ''
         );
         CREATE TABLE sessions (
             channel TEXT, member_id TEXT, last_read INTEGER DEFAULT 0, revoked_at TEXT

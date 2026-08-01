@@ -370,15 +370,15 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 except sqlite3.OperationalError:
                     try:
                         unread = db.execute(
-                            "SELECT id, mentions, refs, member_name, content FROM messages "
-                            "WHERE channel = ? AND id > ? AND member_id != ? "
+                            "SELECT id, mentions, refs, recipients, member_id, member_name, content "
+                            "FROM messages WHERE channel = ? AND id > ? AND member_id != ? "
                             "ORDER BY id",
                             (channel, local_hwm, member_id),
                         ).fetchall()
                     except sqlite3.OperationalError:
                         unread = db.execute(
-                            "SELECT id, mentions, member_name, content FROM messages "
-                            "WHERE channel = ? AND id > ? AND member_id != ? "
+                            "SELECT id, mentions, recipients, member_id, member_name, content "
+                            "FROM messages WHERE channel = ? AND id > ? AND member_id != ? "
                             "ORDER BY id",
                             (channel, local_hwm, member_id),
                         ).fetchall()
