@@ -12,7 +12,11 @@
   const input = () => byId('input');
 
   function targetName(id) { return state.members?.get(id)?.name || id; }
-  function apiUrl(path) { return typeof api.url === 'function' ? api.url(path) : path; }
+  function apiUrl(path) {
+    if (typeof api.url === 'function') return api.url(path);
+    const channel = state.channel || '';
+    return channel ? path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(channel) : path;
+  }
   function renderTargets() {
     const bar = byId('target-bar'); if (!bar) return;
     bar.replaceChildren();
@@ -36,8 +40,10 @@
 
   async function upload(file) {
     if (!file) return;
-    const form = new FormData(); form.append('file', file, file.name);
-    const response = await fetch(apiUrl('/api/upload'), { method: 'POST', body: form });
+    if (!/^image\//.test(file.type || '')) throw new Error('Only image attachments are supported');
+    const response = await fetch(apiUrl('/api/upload'), {
+      method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
+    });
     if (!response.ok) throw new Error('upload failed (' + response.status + ')');
     const attachment = await response.json(); state.pendingAttachments.push(attachment); renderAttachments(); updateSendState();
   }
@@ -54,7 +60,8 @@
   async function send() {
     if (!validate()) return false;
     const button = byId('send'); if (button) button.disabled = true;
-    const body = { content: renderedContent(), attachments: state.pendingAttachments, target_ids: [...state.selectedTargets] };
+    const body = { content: renderedContent(), mentions: [...state.selectedTargets], attachment_ids: state.pendingAttachments.map(a => a.id).filter(Boolean) };
+    if (state.dmTargetId) body.recipients = [state.dmTargetId];
     try {
       const result = await api.post(apiUrl('/api/send'), body);
       input().value = ''; state.pendingAttachments = []; renderAttachments(); updateSendState();
@@ -84,7 +91,7 @@
     stream = await navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
     recorder = new MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = async () => { try { const form = new FormData(); form.append('audio', new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }), 'dictation.webm'); const result = await fetch(apiUrl('/api/stt'), { method: 'POST', body: form }); const data = await result.json(); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
+    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); input().value = (input().value + ' ' + (data.text || '')).trim(); updateSendState(); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
     recorder.start(); document.body.classList.add('dictating');
   }
   async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { window.alert(error.message); } }
