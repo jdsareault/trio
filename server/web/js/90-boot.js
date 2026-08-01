@@ -1,7 +1,8 @@
 (() => {
   'use strict';
   const Trio = window.Trio;
-  function boot() {
+  async function boot() {
+    if (!(await Trio.boot())) return;
     ['conversation', 'workspace', 'agents', 'preferences'].forEach(name => Trio[name]?.init?.());
     const app = document.getElementById('app');
     const nav = document.getElementById('nav-toggle');
