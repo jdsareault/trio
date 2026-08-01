@@ -60,6 +60,7 @@
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false) {
     if (Trio.store) Trio.store.set('session.channel', channel);
     state.view = 'conversation';
+    showConversationPage();
     state.readOnly = !!readOnly;
     state.dmKey = isDm ? (state.dmKey || '') : '';
     state.dmLoading = false;
@@ -185,6 +186,11 @@
     if (h) h.textContent = title || 'Atrium';
     if (m) m.textContent = subtitle || '';
   }
+  function showConversationPage() {
+    const shell = document.querySelector('.conversation-shell');
+    shell?.classList.remove('workspace-page');
+    document.querySelectorAll('[data-trio-view]').forEach(panel => { panel.hidden = true; });
+  }
   function viewHeader(title, subtitle) {
     const header = document.createElement('div'); header.className = 'view-hero';
     header.innerHTML = `<h2>${esc(title)}</h2><p>${esc(subtitle)}</p>`;
@@ -290,6 +296,8 @@
   }
   function showView(view) {
     state.view = view;
+    const shell = document.querySelector('.conversation-shell');
+    shell?.classList.add('workspace-page');
     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
     document.querySelectorAll('[data-trio-view]').forEach(n => n.hidden = true);
     let panel = $(`trio-${view}-view`);
@@ -301,6 +309,7 @@
     else if (view === 'roster') { Trio.agents?.renderPage?.(panel); }
     else if (view === 'prefs') { Trio.preferences?.renderPage?.(panel); }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
+    renderRail();
   }
   async function createChannel() {
     modal('Create channel', '<label>Channel code<input name="code" required pattern="[a-z0-9][a-z0-9-]*"></label><label>Topic<input name="topic"></label>', async node => { const f=new FormData(node.querySelector('form')); try { await api.post('/api/channels', {code:f.get('code'),topic:f.get('topic')}); openChannel(f.get('code')); } catch (error) { toast(error.message || 'Could not create channel'); } });
@@ -358,7 +367,11 @@
   function onWorkspaceUpdate() { if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
   function onRoute(route) {
     if (!route) return;
-    if (route.name === 'channel' && state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, route.params.archived ? 'Archived channel — read only' : 'Live agent workspace', !!route.params.archived, false);
+    if (route.name === 'channel') {
+      const subtitle = route.params.archived ? 'Archived channel — read only' : 'Live agent workspace';
+      if (state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, subtitle, !!route.params.archived, false);
+      else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; showConversationPage(); updateTopbar('trio#' + route.params.code, subtitle); renderRail(); }
+    }
     else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key);
     else if (route.name === 'home') showView('home');
   }
