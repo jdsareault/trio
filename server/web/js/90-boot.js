@@ -10,8 +10,15 @@
     const closeNav = () => { app?.classList.remove('nav-open'); if (scrim) scrim.hidden = true; };
     nav?.addEventListener('click', () => { app?.classList.add('nav-open'); if (scrim) scrim.hidden = false; });
     scrim?.addEventListener('click', closeNav);
-    document.getElementById('theme-toggle')?.addEventListener('click', () => {
-      document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    const themeToggle = document.getElementById('theme-toggle');
+    themeToggle?.addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      Trio.preferences?.save?.({ theme: next });
+    });
+    ['search-btn', 'details-btn'].forEach(id => {
+      const btn = document.getElementById(id);
+      if (btn) { btn.disabled = true; btn.title = (id === 'search-btn' ? 'Search' : 'Conversation details') + ' — not yet implemented'; }
     });
   }
   document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', boot, {once:true}) : boot();

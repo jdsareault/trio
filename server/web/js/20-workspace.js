@@ -61,6 +61,17 @@
     try { await api.post('/api/archives', {kind, key, archived}); await refresh(); toast(archived ? 'Archived' : 'Restored'); }
     catch (error) { toast(error.message || 'Could not update archive'); }
   }
+  async function resolveApproval(id, decision) {
+    if (!id) return;
+    try {
+      await api.post('/api/approvals/' + encodeURIComponent(id) + '/resolve', { decision });
+      const list = state.approvals || [];
+      const a = list.find(x => x.id === id);
+      if (a) { a.status = 'resolved'; a.resolved_decision = decision; }
+      showView('attention');
+      Trio.workspace?.refresh?.();
+    } catch (error) { toast(error.message || 'Could not resolve approval'); }
+  }
   function railItem(label, subtitle, onClick, badge = '') {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'rail-item';
     button.innerHTML = `<span class="rail-copy"><strong>${esc(label)}</strong>${subtitle ? `<small>${esc(subtitle)}</small>` : ''}</span>${badge ? `<b class="rail-badge">${esc(badge)}</b>` : ''}`;
@@ -88,8 +99,16 @@
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
     panel.hidden = false;
-    if (view === 'tasks') panel.innerHTML = `<h2>Tasks</h2><div class="task-filters"><button data-filter="open">Open</button><button data-filter="claimed">Claimed</button><button data-filter="all">All</button></div><div id="trio-task-list">${(state.tasks || state.meta?.tasks || []).map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks yet.</p>'}</div>`;
-    else if (view === 'attention') panel.innerHTML = `<h2>Attention</h2><section class="attention-cards">${(state.approvals || []).map(a => `<article class="attention-card"><b>${esc(a.title || a.agent_name || 'Approval requested')}</b><p>${esc(a.reason || a.command || '')}</p><button data-approval="${esc(a.id)}" data-decision="accept">Allow</button><button data-approval="${esc(a.id)}" data-decision="decline">Decline</button></article>`).join('') || '<p>Nothing needs attention.</p>'}</section>`;
+    if (view === 'tasks') {
+      const filter = state.taskFilter || 'open';
+      const tasks = (state.tasks || state.meta?.tasks || []).filter(t => filter === 'all' || (t.status || 'open') === filter);
+      panel.innerHTML = `<h2>Tasks</h2><div class="task-filters" id="trio-task-filters"><button data-filter="open" ${filter === 'open' ? 'class="active"' : ''}>Open</button><button data-filter="claimed" ${filter === 'claimed' ? 'class="active"' : ''}>Claimed</button><button data-filter="all" ${filter === 'all' ? 'class="active"' : ''}>All</button></div><div id="trio-task-list">${tasks.map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks match.</p>'}</div>`;
+      panel.querySelectorAll('#trio-task-filters [data-filter]').forEach(b => b.addEventListener('click', () => { state.taskFilter = b.dataset.filter; showView('tasks'); }));
+    }
+    else if (view === 'attention') {
+      panel.innerHTML = `<h2>Attention</h2><section class="attention-cards" id="trio-attention-cards">${(state.approvals || []).map(a => `<article class="attention-card"><b>${esc(a.title || a.agent_name || 'Approval requested')}</b><p>${esc(a.reason || a.command || '')}</p><div class="decision-row"><button data-approval="${esc(a.id)}" data-decision="accept" ${a.status === 'resolved' ? 'disabled' : ''}>Allow</button><button data-approval="${esc(a.id)}" data-decision="decline" ${a.status === 'resolved' ? 'disabled' : ''}>Decline</button>${a.status === 'resolved' ? `<small>Resolved: ${esc(a.resolved_decision || '')}</small>` : ''}</div></article>`).join('') || '<p>Nothing needs attention.</p>'}</section>`;
+      panel.querySelectorAll('#trio-attention-cards [data-approval]').forEach(b => b.addEventListener('click', () => resolveApproval(b.dataset.approval, b.dataset.decision)));
+    }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
   }
   async function createChannel() {

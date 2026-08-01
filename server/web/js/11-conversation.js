@@ -259,8 +259,12 @@
     events.addEventListener('message', event => ingest(event.detail));
     events.addEventListener('message_update', event => ingest(event.detail));
     events.addEventListener('roster', event => { if (Array.isArray(event.detail?.members)) state.members = new Map(event.detail.members.map(m => [m.id, m])); render(); });
-    events.addEventListener('sse', event => { const detail = event.detail || {}; if (detail.type === 'message' || detail.type === 'message_update') ingest(detail); });
     render();
+    const list = dom(); const jump = document.getElementById('jump-latest');
+    if (list && jump) {
+      list.addEventListener('scroll', () => jump.classList.toggle('hidden', nearBottom(list)));
+      jump.addEventListener('click', () => { list.scrollTop = list.scrollHeight; });
+    }
   }
 
   Trio.conversation = { init, render, ingest, upsert, paintBody, cardFor, answerPayload, isPrivate };
