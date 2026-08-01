@@ -31,8 +31,11 @@
     if (!root.state.channel && meta.multi) {
       const channels = await root.api.get('/api/channels', false);
       if (channels.channels?.[0]?.code) {
-        if (root.router?.replace) { root.router.replace('channel', { code: channels.channels[0].code }); }
-        else { location.replace('/?channel=' + encodeURIComponent(channels.channels[0].code)); }
+        // Always a full reload here, even when the router module is loaded:
+        // router.replace only rewrites history without reloading, and boot()
+        // returning false then aborts 90-boot.js's feature-mounting pass,
+        // leaving the page on an unmounted shell.
+        location.replace('/?channel=' + encodeURIComponent(channels.channels[0].code));
         return false;
       }
     }

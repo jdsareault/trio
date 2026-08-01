@@ -8,6 +8,9 @@
     const node = document.createElement('div'); node.className = 'toast'; node.textContent = message; host.append(node);
     setTimeout(() => node.remove(), timeout);
   }
+  // `body` is raw HTML, unlike `title` — callers MUST pre-escape any
+  // user-controlled content (via `esc()` here or `Trio.markdown.escapeHtml`)
+  // before passing it in.
   function modal(title, body, submit) {
     let node = document.getElementById('trio-control-modal');
     if (!node) { node = document.createElement('dialog'); node.id = 'trio-control-modal'; document.body.append(node); }

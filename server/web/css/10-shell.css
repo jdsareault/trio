@@ -464,12 +464,6 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   --sleep:#9aa2df; --sleep-tint:color-mix(in oklab,#9aa2df 16%, var(--surface));
 }
 
-/* named-theme retints (applied on top of data-theme) */
-:root[data-palette="nord"]{ --bg:#e7ecf2; --bg-sink:#dde4ee; --surface:#f3f6fa; --surface-2:#fbfcfe; --surface-hover:#e9eef5; --sidebar:#e9eff6; --line:#d2dbe6; --line-soft:#dde4ee; --ink:#2e3440; --ink-2:#4c566a; --ink-3:#7b8698; }
-:root[data-theme="dark"][data-palette="nord"]{ --bg:#2e3440; --bg-sink:#272c36; --surface:#3b4252; --surface-2:#434c5e; --surface-hover:#414a5c; --sidebar:#333a47; --line:#4c566a; --line-soft:#434c5e; --ink:#eceff4; --ink-2:#d8dee9; --ink-3:#9aa5b8; }
-:root[data-theme="dark"][data-palette="dracula"]{ --bg:#282a36; --bg-sink:#21222c; --surface:#343746; --surface-2:#3c3f51; --surface-hover:#3a3d4d; --sidebar:#2d2f3d; --line:#464a5e; --line-soft:#3c3f51; --ink:#f8f8f2; --ink-2:#d5d6e0; --ink-3:#9ea0b5; }
-:root[data-palette="solarized"]{ --bg:#eee5cd; --bg-sink:#e6dcc0; --surface:#fdf6e3; --surface-2:#fffbf0; --surface-hover:#f3ead2; --sidebar:#f0e7cf; --line:#ddd2b4; --line-soft:#e6dcc0; --ink:#3a4b4f; --ink-2:#586e75; --ink-3:#93a1a1; }
-
 /* ============================================================
    status system — presence chips + rings (label + icon, not color alone)
    ============================================================ */

@@ -14,9 +14,13 @@
     return { name: 'home', params: {}, title: 'Atrium', readOnly: false };
   }
   function serialize(route) {
-    if (route.name === 'dm') return '/?dm=' + encodeURIComponent(route.params.key);
-    if (route.name === 'audit') return '/?dm=' + encodeURIComponent(route.params.key) + '&archived=1';
-    if (route.name === 'channel') return '/?channel=' + encodeURIComponent(route.params.code);
+    const extra = route.params.archived ? '&archived=1' : '';
+    if (route.name === 'dm' || route.name === 'audit') {
+      return '/?dm=' + encodeURIComponent(route.params.key) + extra;
+    }
+    if (route.name === 'channel') {
+      return '/?channel=' + encodeURIComponent(route.params.code) + extra;
+    }
     return '/';
   }
   function apply(route) {

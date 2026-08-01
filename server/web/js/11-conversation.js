@@ -154,7 +154,7 @@
       button.textContent = 'Answer sent';
     } catch (error) {
       button.disabled = false;
-      window.alert(error.message || 'Could not send answer');
+      Trio.ui.toast(error.message || 'Could not send answer');
     }
   }
   function askCard(msg) {
@@ -214,17 +214,27 @@
     if (typeof Trio.api.url === 'function') return Trio.api.url(path);
     return state.channel ? path + '?channel=' + encodeURIComponent(state.channel) : path;
   }
-  async function retract(msg) {
-    const reason = window.prompt('Reason for deleting this message (optional):', '') || '';
-    const response = await fetch(apiUrl('/api/delete'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, reason }) });
-    if (!response.ok) throw new Error('delete failed (' + response.status + ')');
+  function retract(msg) {
+    const html = '<label class="field">Reason for deleting this message (optional) <textarea name="reason" rows="2"></textarea></label>';
+    Trio.ui.modal('Delete message', html, async node => {
+      const reason = node.querySelector('[name="reason"]').value || '';
+      try {
+        const response = await fetch(apiUrl('/api/delete'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, reason }) });
+        if (!response.ok) throw new Error('delete failed (' + response.status + ')');
+      } catch (error) { Trio.ui.toast(error.message); }
+    });
   }
-  async function edit(msg, body) {
-    const content = window.prompt('Edit message', msg.content || '');
-    if (content == null || content === msg.content) return;
-    const response = await fetch(apiUrl('/api/edit'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, content }) });
-    if (!response.ok) throw new Error('edit failed (' + response.status + ')');
-    body.textContent = content;
+  function edit(msg, body) {
+    const html = '<label class="field">Edit message <textarea name="content" rows="4">' + M.escapeHtml(msg.content || '') + '</textarea></label>';
+    Trio.ui.modal('Edit message', html, async node => {
+      const content = node.querySelector('[name="content"]').value;
+      if (content == null || content === msg.content) return;
+      try {
+        const response = await fetch(apiUrl('/api/edit'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, content }) });
+        if (!response.ok) throw new Error('edit failed (' + response.status + ')');
+        body.textContent = content;
+      } catch (error) { Trio.ui.toast(error.message); }
+    });
   }
 
   function showLightbox(url, alt) {
@@ -277,7 +287,7 @@
       const controls = document.createElement('div'); controls.className = 'message-controls';
       for (const [label, fn] of [['edit', () => edit(msg, body)], ['delete', () => retract(msg)]]) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
-        button.addEventListener('click', () => fn().catch(error => window.alert(error.message))); controls.append(button);
+        button.addEventListener('click', () => fn()); controls.append(button);
       }
       card.append(controls);
     }

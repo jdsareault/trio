@@ -81,6 +81,13 @@ def main() -> int:
         except sqlite3.OperationalError:
             # DB predates the column (server not restarted since the feature
             # landed) — add it, then stamp, so we self-heal without a restart.
+            # The failed UPDATE above leaves BEGIN IMMEDIATE's transaction
+            # still open; roll it back before the DDL, matching
+            # nth_activity_hook.py's migration path.
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
             conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
             conn.execute(
                 "UPDATE sessions SET last_turn_end = ? WHERE fingerprint = ?",

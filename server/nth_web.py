@@ -2574,9 +2574,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             while not stop.is_set():
                 try:
                     payload = q.get(timeout=0.5)
-                    merged.put(payload)
                 except queue.Empty:
                     continue
+                try:
+                    merged.put(payload, timeout=1.0)
+                except queue.Full:
+                    if not stop.is_set():
+                        sys.stderr.write(
+                            "[nth_web] workspace SSE pump: merged queue full, dropping payload\n")
         for ch in channels:
             hub = get_channel_runtime(ch)[0]
             q = hub.subscribe(viewer_id=viewer_id, all_seeing=True)
@@ -3343,23 +3348,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if with_id:
                 requested_key = with_id
                 marker = archive_map.get(requested_key)
-                # Locate the thread's real latest id rather than using the
-                # global message watermark; group and cross-channel DMs share
-                # storage.
-                latest = 0
+                # Single pass over rows (already ORDER BY id DESC) instead of
+                # scanning twice: collect this thread's rows once, so the
+                # latest id is just the first match (highest id) and the
+                # event-building loop only touches this thread's rows, not
+                # all 2000 fetched for the cross-thread grouping above.
+                matched = []
                 for r in rows:
                     key, _others = dm_thread_key(r, operator_id)
                     if key == requested_key:
-                        latest = max(latest, r["id"])
+                        matched.append(r)
+                latest = matched[0]["id"] if matched else 0
                 thread_is_archived = bool(
                     marker and latest and latest <= marker["archived_through_id"])
                 if thread_is_archived == archived:
-                    for r in reversed(rows):
-                        key, _others = dm_thread_key(r, operator_id)
-                        if key == requested_key:
-                            evt = _message_event(db, r)
-                            evt["channel"] = r["channel"]
-                            merged.append(evt)
+                    for r in reversed(matched):
+                        evt = _message_event(db, r)
+                        evt["channel"] = r["channel"]
+                        merged.append(evt)
 
             targets = []
             agent_rows = db.execute(
@@ -4586,7 +4592,7 @@ def _strip_test_hook(html: str) -> str:
 WEB_SOURCE_DIR = Path(__file__).resolve().with_name("web")
 WEB_CSS_FILES = (
     "css/00-tokens.css", "css/10-shell.css", "css/20-conversation.css",
-    "css/30-workspace.css",
+    "css/30-workspace.css", "css/40-responsive.css",
 )
 WEB_JS_FILES = (
     "js/01-store.js", "js/02-api.js", "js/05-loader.js", "js/04-events.js",
