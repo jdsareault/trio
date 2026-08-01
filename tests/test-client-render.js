@@ -95,6 +95,8 @@ check('sidebar paints the selected channel immediately', () => {
   H.Trio.state.dmKey = '';
   H.Trio.state.channel = 'research';
   H.Trio.state.channels = [{ code: 'general' }, { code: 'research' }];
+  H.Trio.state.tasks = { filter: 'open', list: [] };
+  H.Trio.state.agents = { list: [] };
   H.Trio.workspace.render();
   const rail = cx.document.getElementById('workspace-rail');
   const active = rail.querySelectorAll('.nav-item.active');

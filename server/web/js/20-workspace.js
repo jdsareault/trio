@@ -4,6 +4,7 @@
   const state = Trio.state;
   const api = Trio.api;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const listOf = value => Array.isArray(value) ? value : [];
   const pendingDecisions = new Set();
   const $ = id => document.getElementById(id);
 
@@ -16,14 +17,14 @@
     };
   }
   const selectors = {
-    pendingApprovals(src = state) { return (src.approvals || []).filter(a => a.status !== 'resolved' && a.status !== 'accepted').length; },
-    openTasks(src = state) { return (src.tasks || []).filter(t => t.status === 'open' || t.status === 'blocked').length; },
-    blockedAgents(src = state) { return (Array.isArray(src.agents) ? src.agents : []).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
-    activeAgents(src = state) { return (Array.isArray(src.agents) ? src.agents : []).filter(a => ['working','active','idle'].includes(a.status)).length; },
+    pendingApprovals(src = state) { return listOf(src.approvals).filter(a => a.status !== 'resolved' && a.status !== 'accepted').length; },
+    openTasks(src = state) { return listOf(src.tasks).filter(t => t.status === 'open' || t.status === 'blocked').length; },
+    blockedAgents(src = state) { return listOf(src.agents).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
+    activeAgents(src = state) { return listOf(src.agents).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     taskItems(src = state) {
-      return (src.tasks || []).map(t => ({
+      return listOf(src.tasks).map(t => ({
         id: t.id || t.task_id,
         status: t.status || 'open',
         title: t.description || t.message || t.title || 'Task',
@@ -36,15 +37,15 @@
     attention(src = state) { return selectors.pendingApprovals(src) + selectors.openTasks(src) + selectors.blockedAgents(src); },
     attentionItems(src = state) {
       const items = [];
-      for (const a of src.approvals || []) {
+      for (const a of listOf(src.approvals)) {
         if (a.status === 'resolved' || a.status === 'accepted') continue;
         items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline', ...(a.can_cancel ? ['cancel'] : [])] });
       }
-      for (const t of src.tasks || []) {
+      for (const t of listOf(src.tasks)) {
         if (t.status !== 'blocked') continue;
         items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.description || t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
       }
-      for (const a of src.agents || []) {
+      for (const a of listOf(src.agents)) {
         if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
         items.push({ id: 'agent-' + a.id, kind: 'agent', severity: 'high', title: (a.name || a.id) + ' needs help', source: a.id, timestamp: a.last_active, status: a.status, body: a.status_text || a.error || '', actions: [] });
       }
@@ -120,7 +121,7 @@
     try {
       const url = decision === 'cancel' ? '/api/approvals/' + encodeURIComponent(id) + '/cancel' : '/api/approvals/' + encodeURIComponent(id) + '/resolve';
       await api.post(url, { decision });
-      const list = state.approvals || [];
+      const list = listOf(state.approvals);
       const a = list.find(x => x.id === id);
       if (a) {
         a.status = (decision === 'accept' || decision === 'acceptForSession') ? 'accepted' : 'resolved';
@@ -211,7 +212,7 @@
     const cards = [
       { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
       { title: 'Messages for you', count: selectors.unreadDms(), subtitle: 'Unread & mentions', tone: 'accent', detail: 'Private messages and direct pings', action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
-      { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${(state.tasks || []).filter(t => t.status === 'claimed').length} claimed · ${(state.tasks || []).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
+      { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
     ];
     for (const { title, count, subtitle, tone, detail, action } of cards) {
       const card = document.createElement('button'); card.type = 'button'; card.className = 'hcard';
