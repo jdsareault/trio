@@ -4576,6 +4576,8 @@ INDEX_HTML = r"""<!doctype html>
   .rail-state.running, .rail-state.idle { background: var(--accent2); }
   .rail-state.sleeping { background: var(--warn); }
   .rail-state.errored { background: var(--err); }
+  .rail-archives { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .rail-archives .rail-item { color: var(--dimmer); }
   #rail-channel-form { margin: 2px 6px 8px; padding: 8px; border-radius: 7px;
     border: 1px solid var(--border); background: var(--bg); display: grid; gap: 6px; }
   #rail-channel-form[hidden] { display: none; }
@@ -4653,14 +4655,14 @@ INDEX_HTML = r"""<!doctype html>
      inbox and hop straight to another thread without returning to the channel. */
 
   /* DM inbox panel — mirrors the settings drawer. */
-  #dm-panel, #agents-panel {
+  #dm-panel, #agents-panel, #archives-panel {
     position: fixed; top: 46px; right: 10px; z-index: 30;
     background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px 14px; min-width: 260px; max-width: 340px;
     max-height: 70vh; overflow-y: auto;
     box-shadow: 0 8px 30px rgba(0,0,0,0.4);
     display: flex; flex-direction: column; gap: 8px; }
-  #dm-panel[hidden], #agents-panel[hidden] { display: none; }
+  #dm-panel[hidden], #agents-panel[hidden], #archives-panel[hidden] { display: none; }
   #agent-new { display: flex; flex-direction: column; gap: 5px;
     padding-bottom: 8px; border-bottom: 1px solid var(--border); }
   #agent-new select, #agent-new input, #agent-new textarea {
@@ -4733,6 +4735,31 @@ INDEX_HTML = r"""<!doctype html>
   .dm-thread .dm-unread { flex: 0 0 auto; min-width: 16px; height: 16px; padding: 0 4px;
                           border-radius: 8px; background: var(--accent); color: #061019;
                           font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
+  .dm-thread .dm-archive { flex: 0 0 auto; border: 0; background: transparent;
+    color: var(--dimmer); border-radius: 4px; padding: 3px 5px; cursor: pointer;
+    font: inherit; font-size: 11px; }
+  .dm-thread .dm-archive:hover { color: var(--fg); background: rgba(var(--ov), .08); }
+  #archives-panel { min-width: 320px; max-width: 410px; }
+  .archive-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .archive-head h3, .archive-group-title { margin: 0; font-size: 10px;
+    text-transform: uppercase; letter-spacing: .6px; color: var(--dim); font-weight: 700; }
+  .archive-close { border: 0; background: transparent; color: var(--dim); cursor: pointer;
+    font: inherit; font-size: 18px; line-height: 1; border-radius: 4px; }
+  .archive-close:hover { color: var(--fg); background: rgba(var(--ov), .08); }
+  .archive-help, .archive-empty { color: var(--dim); font-size: 11px; margin: 0; }
+  .archive-group { display: flex; flex-direction: column; gap: 4px; }
+  .archive-group-title { padding-top: 4px; }
+  .archive-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+    border: 1px solid var(--border); border-radius: 5px; background: var(--bg2); }
+  .archive-copy { min-width: 0; flex: 1; }
+  .archive-name { color: var(--fg); font-size: 12px; font-weight: 650;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .archive-preview { color: var(--dim); font-size: 10px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .archive-row button { background: transparent; color: var(--dim);
+    border: 1px solid var(--border); border-radius: 3px; padding: 3px 6px;
+    cursor: pointer; font: inherit; font-size: 10px; }
+  .archive-row button:hover { color: var(--fg); border-color: var(--accent); }
   .dm-thread .dm-unread[hidden] { display: none; }
 
   /* ── Chat ── */
@@ -5659,6 +5686,11 @@ INDEX_HTML = r"""<!doctype html>
         <div class="rail-section-head"><span>Agents</span><button class="rail-add" id="rail-agent-add" title="Create an agent">+</button></div>
         <div id="rail-agents"></div>
       </section>
+      <div class="rail-archives">
+        <button type="button" class="rail-item" id="rail-archives-open" title="Browse archived channels and direct messages">
+          <span class="rail-icon">□</span><span class="rail-copy"><span class="rail-name">Archives</span></span>
+        </button>
+      </div>
     </div>
   </nav>
   <header>
@@ -5693,6 +5725,7 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill pill-icon" id="btn-search" title="search the full channel history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span class="lbl">search</span></span>
     <span class="pill pill-icon" id="btn-dm" title="direct messages addressed to you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H5.2L4 17.2z"/></svg><span class="lbl">DMs</span><span class="dm-badge" id="dm-count" hidden>0</span></span>
     <span class="pill" id="btn-agents" title="spawn and manage agents" hidden>agents</span>
+    <span class="pill" id="btn-archive-current" title="archive this conversation" hidden>archive</span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
@@ -5752,6 +5785,14 @@ INDEX_HTML = r"""<!doctype html>
       <span id="agent-create-msg"></span>
     </div>
     <div id="agents-list"></div>
+  </div>
+  <div id="archives-panel" hidden>
+    <div class="archive-head">
+      <h3>Archives</h3>
+      <button type="button" class="archive-close" id="archives-close" aria-label="Close archives">×</button>
+    </div>
+    <p class="archive-help">Hidden from the main workspace. View or restore anything here.</p>
+    <div id="archives-list"><p class="archive-empty">Loading…</p></div>
   </div>
 
   <div id="chat-wrap">
@@ -5862,6 +5903,11 @@ INDEX_HTML = r"""<!doctype html>
   const railDms = document.getElementById('rail-dms');
   const railAgents = document.getElementById('rail-agents');
   const railChannelForm = document.getElementById('rail-channel-form');
+  const railArchivesOpen = document.getElementById('rail-archives-open');
+  const archivesPanel = document.getElementById('archives-panel');
+  const archivesList = document.getElementById('archives-list');
+  const archivesClose = document.getElementById('archives-close');
+  const btnArchiveCurrent = document.getElementById('btn-archive-current');
 
   // Message-font picker — persists per-origin via localStorage.
   try {
@@ -5906,6 +5952,7 @@ INDEX_HTML = r"""<!doctype html>
   const URL_PARAMS = new URLSearchParams(location.search);
   const DM_TARGET_ID = URL_PARAMS.get('dm') || '';
   const DM_MODE = !!DM_TARGET_ID;
+  const ARCHIVED_MODE = URL_PARAMS.get('archived') === '1';
   // Multi-channel: which channel this page is viewing, from ?channel=. Empty
   // means "server default / pick one". apiUrl() appends it to channel-scoped
   // endpoints so one page can talk to any channel the hub serves.
@@ -8566,6 +8613,10 @@ INDEX_HTML = r"""<!doctype html>
   function resolveRefs(text)     { return resolveSigilTokens(text, '#'); }
   function resolveBangs(text)    { return resolveSigilTokens(text, '!'); }
   function updatePreview() {
+    if (ARCHIVED_MODE) {
+      preview.textContent = 'Archived — history is read-only until restored';
+      return;
+    }
     renderComposerMentionHighlights();
     const pings = resolveMentions(input.value);
     const refs  = resolveRefs(input.value);
@@ -9309,8 +9360,10 @@ INDEX_HTML = r"""<!doctype html>
 
   async function loadUnifiedDms(includeMessages) {
     if (!state.isOperator) return null;
-    let path = '/api/dms';
-    if (includeMessages && state.dmTargetId) path += '?with=' + encodeURIComponent(state.dmTargetId);
+    const params = new URLSearchParams();
+    if (ARCHIVED_MODE) params.set('archived', '1');
+    if (includeMessages && state.dmTargetId) params.set('with', state.dmTargetId);
+    let path = '/api/dms' + (params.toString() ? '?' + params.toString() : '');
     try {
       const r = await fetch(path);
       if (!r.ok) return null;
@@ -9381,6 +9434,139 @@ INDEX_HTML = r"""<!doctype html>
       renderWorkspaceRail(c.channels || [], d, a.agents || []);
     } catch (_) { /* rail is progressive enhancement */ }
   }
+
+  async function setArchived(kind, key, archived) {
+    const r = await fetch('/api/archives', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind, key, archived})
+    });
+    let data = {};
+    try { data = await r.json(); } catch (_) {}
+    if (!r.ok || !data.ok) throw new Error(data.error || ('Error ' + r.status));
+    return data;
+  }
+
+  function archiveRow(kind, item) {
+    const row = document.createElement('div'); row.className = 'archive-row';
+    const copy = document.createElement('div'); copy.className = 'archive-copy';
+    const name = document.createElement('div'); name.className = 'archive-name';
+    name.textContent = kind === 'channel' ? '#' + item.code : item.name;
+    const preview = document.createElement('div'); preview.className = 'archive-preview';
+    preview.textContent = item.preview || 'No message preview';
+    copy.appendChild(name); copy.appendChild(preview); row.appendChild(copy);
+    const view = document.createElement('button'); view.type = 'button'; view.textContent = 'View';
+    view.addEventListener('click', () => {
+      if (kind === 'channel') {
+        location.assign('/?channel=' + encodeURIComponent(item.code) + '&archived=1');
+      } else {
+        let u = '/?dm=' + encodeURIComponent(item.key);
+        if (item.channel) u += '&channel=' + encodeURIComponent(item.channel);
+        location.assign(u + '&archived=1');
+      }
+    });
+    const restore = document.createElement('button'); restore.type = 'button'; restore.textContent = 'Restore';
+    restore.addEventListener('click', async () => {
+      restore.disabled = true; restore.textContent = 'Restoring…';
+      try {
+        await setArchived(kind, kind === 'channel' ? item.code : item.key, false);
+        await loadArchives(); loadWorkspaceRail();
+      } catch (e) { restore.disabled = false; restore.textContent = 'Retry'; restore.title = e.message; }
+    });
+    row.appendChild(view); row.appendChild(restore);
+    return row;
+  }
+
+  function archiveGroup(title, kind, items) {
+    const group = document.createElement('section'); group.className = 'archive-group';
+    const heading = document.createElement('h4'); heading.className = 'archive-group-title';
+    heading.textContent = title; group.appendChild(heading);
+    for (const item of items) group.appendChild(archiveRow(kind, item));
+    return group;
+  }
+
+  async function loadArchives() {
+    if (!archivesList) return;
+    archivesList.innerHTML = '<p class="archive-empty">Loading…</p>';
+    try {
+      const [cr, dr] = await Promise.all([
+        fetch('/api/channels?archived=1'), fetch('/api/dms?archived=1')]);
+      if (!cr.ok || !dr.ok) throw new Error('Archive data unavailable');
+      const [channels, dms] = await Promise.all([cr.json(), dr.json()]);
+      archivesList.textContent = '';
+      const channelItems = channels.channels || [];
+      const dmItems = dms.your_dms || [];
+      if (channelItems.length) archivesList.appendChild(
+        archiveGroup('Channels', 'channel', channelItems));
+      if (dmItems.length) archivesList.appendChild(
+        archiveGroup('Direct messages', 'dm', dmItems));
+      if (!channelItems.length && !dmItems.length) {
+        const empty = document.createElement('p'); empty.className = 'archive-empty';
+        empty.textContent = 'Nothing archived yet.'; archivesList.appendChild(empty);
+      }
+    } catch (e) {
+      archivesList.innerHTML = '';
+      const error = document.createElement('p'); error.className = 'archive-empty';
+      error.textContent = e.message || 'Could not load archives.'; archivesList.appendChild(error);
+    }
+  }
+
+  function toggleArchivesPanel(force) {
+    if (!archivesPanel) return;
+    const show = force !== undefined ? force : archivesPanel.hasAttribute('hidden');
+    if (show) {
+      if (typeof toggleSettings === 'function') toggleSettings(false);
+      if (typeof toggleAgentsPanel === 'function') toggleAgentsPanel(false);
+      if (typeof toggleDmPanel === 'function') toggleDmPanel(false);
+      archivesPanel.removeAttribute('hidden');
+      if (railArchivesOpen) railArchivesOpen.classList.add('active');
+      loadArchives();
+    } else {
+      archivesPanel.setAttribute('hidden', '');
+      if (railArchivesOpen) railArchivesOpen.classList.remove('active');
+    }
+  }
+
+  if (railArchivesOpen) railArchivesOpen.addEventListener('click', (e) => {
+    e.stopPropagation(); toggleArchivesPanel();
+  });
+  if (archivesClose) archivesClose.addEventListener('click', () => toggleArchivesPanel(false));
+  if (archivesPanel) {
+    document.addEventListener('click', (e) => {
+      if (archivesPanel.hasAttribute('hidden')) return;
+      if (archivesPanel.contains(e.target) || (railArchivesOpen && railArchivesOpen.contains(e.target))) return;
+      toggleArchivesPanel(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !archivesPanel.hasAttribute('hidden')) toggleArchivesPanel(false);
+    });
+  }
+
+  if (btnArchiveCurrent) btnArchiveCurrent.addEventListener('click', async () => {
+    const kind = DM_MODE ? 'dm' : 'channel';
+    const key = DM_MODE ? DM_TARGET_ID : state.channel;
+    if (!key) return;
+    const next = !ARCHIVED_MODE;
+    if (next && !confirm('Archive this ' + (DM_MODE ? 'direct message' : 'channel') + '?')) return;
+    btnArchiveCurrent.textContent = next ? 'archiving…' : 'restoring…';
+    try {
+      await setArchived(kind, key, next);
+      if (next) {
+        if (!DM_MODE && !state.multi) {
+          const params = new URLSearchParams(location.search);
+          params.set('archived', '1'); location.assign('/?' + params.toString());
+        } else {
+          location.assign('/');
+        }
+      } else {
+        const params = new URLSearchParams(location.search);
+        params.delete('archived');
+        location.assign('/?' + params.toString());
+      }
+    } catch (e) {
+      btnArchiveCurrent.textContent = ARCHIVED_MODE ? 'restore' : 'archive';
+      btnArchiveCurrent.title = e.message;
+    }
+  });
 
   const railChannelAdd = document.getElementById('rail-channel-add');
   const railChannelCancel = document.getElementById('rail-channel-cancel');
@@ -9475,7 +9661,7 @@ INDEX_HTML = r"""<!doctype html>
     if (!dmListEl) return;
     dmListEl.textContent = '';
     const apiThreads = state.unifiedDms && state.unifiedDms.your_dms;
-    if (apiThreads && apiThreads.length) {
+    if (Array.isArray(apiThreads)) {
       for (const t of apiThreads) {
         const cp = t.member_ids && t.member_ids[0];
         if (!cp) continue;
@@ -9489,6 +9675,26 @@ INDEX_HTML = r"""<!doctype html>
         const prev = document.createElement('div'); prev.className = 'dm-prev';
         prev.textContent = (t.from ? t.from + ': ' : '') + (t.preview || '');
         meta.appendChild(name); meta.appendChild(prev); row.appendChild(meta);
+        const archive = document.createElement('button'); archive.type = 'button';
+        archive.className = 'dm-archive';
+        archive.textContent = ARCHIVED_MODE ? 'restore' : 'archive';
+        archive.title = (ARCHIVED_MODE ? 'Restore ' : 'Archive ') + t.name;
+        archive.addEventListener('click', async (e) => {
+          e.stopPropagation(); archive.disabled = true;
+          try {
+            await setArchived('dm', t.key || cp, !ARCHIVED_MODE);
+            if (DM_MODE && cp === DM_TARGET_ID) {
+              if (!ARCHIVED_MODE) location.assign('/');
+              else {
+                const params = new URLSearchParams(location.search);
+                params.delete('archived'); location.assign('/?' + params.toString());
+              }
+              return;
+            }
+            await loadUnifiedDms(false); renderDmInbox(); loadWorkspaceRail();
+          } catch (err) { archive.disabled = false; archive.title = err.message; }
+        });
+        row.appendChild(archive);
         const go = () => openDmTab(cp, t.channel);
         row.addEventListener('click', go);
         row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
@@ -9504,6 +9710,11 @@ INDEX_HTML = r"""<!doctype html>
           const prev = document.createElement('div'); prev.className = 'dm-prev'; prev.textContent = t.preview || '';
           meta.appendChild(name); meta.appendChild(prev); row.appendChild(meta); dmListEl.appendChild(row);
         }
+      }
+      if (!apiThreads.length && !(state.unifiedDms.agent_dms || []).length) {
+        const empty = document.createElement('div'); empty.className = 'dm-empty';
+        empty.textContent = ARCHIVED_MODE ? 'No archived direct messages.' : 'No direct messages yet.';
+        dmListEl.appendChild(empty);
       }
       return;
     }
@@ -9648,6 +9859,7 @@ INDEX_HTML = r"""<!doctype html>
     if (show) {
       // Both drawers share the same top-right slot — only one at a time.
       if (typeof toggleSettings === 'function') toggleSettings(false);
+      toggleArchivesPanel(false);
       loadUnifiedDms(false).then(renderDmInbox);
       renderDmInbox(); dmPanel.removeAttribute('hidden'); btnDm.classList.add('on');
     } else { toggleDmPicker(false); dmPanel.setAttribute('hidden', ''); btnDm.classList.remove('on'); }
@@ -9679,6 +9891,7 @@ INDEX_HTML = r"""<!doctype html>
     if (show) {
       if (typeof toggleSettings === 'function') toggleSettings(false);
       toggleDmPanel(false);
+      toggleArchivesPanel(false);
       try { const p = localStorage.getItem('trio.agent.provider');
             if (p && agentProviderSel) agentProviderSel.value = p;
             const ef = localStorage.getItem('trio.agent.effort');
@@ -10187,6 +10400,15 @@ INDEX_HTML = r"""<!doctype html>
     return row;
   }
 
+  // A second, tucked-away entry point keeps archive browsing available when
+  // the desktop workspace rail is collapsed on phones.
+  const archiveSettingsBtn = document.createElement('button');
+  archiveSettingsBtn.className = 'pill'; archiveSettingsBtn.textContent = 'Browse ›';
+  archiveSettingsBtn.title = 'Browse archived channels and direct messages';
+  archiveSettingsBtn.addEventListener('click', () => toggleArchivesPanel(true));
+  const archiveSettingsRow = addSettingRow('Archived conversations', archiveSettingsBtn);
+  archiveSettingsRow.hidden = true;
+
   // Build a <select> preloaded with `options` ([value, label] pairs) and the
   // `current` value pre-selected. Shared by the chime + notification prefs.
   function prefSelect(options, current) {
@@ -10437,6 +10659,7 @@ INDEX_HTML = r"""<!doctype html>
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
     // Both drawers share the same top-right slot — only one at a time.
     if (show && typeof toggleDmPanel === 'function') toggleDmPanel(false);
+    if (show) toggleArchivesPanel(false);
     if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
     else { stopTestRecording(); settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
@@ -10930,6 +11153,14 @@ INDEX_HTML = r"""<!doctype html>
     // Agent control plane is operator-only — reveal it for loopback/tailscale.
     state.isOperator = (op.source === 'loopback' || op.source === 'tailscale');
     if (btnAgents && state.isOperator && state.multi) btnAgents.removeAttribute('hidden');
+    if (archiveSettingsRow) archiveSettingsRow.hidden = !state.isOperator;
+    if (btnArchiveCurrent && state.isOperator && (DM_TARGET_ID || state.channel)) {
+      btnArchiveCurrent.textContent = ARCHIVED_MODE ? 'restore' : 'archive';
+      btnArchiveCurrent.title = ARCHIVED_MODE
+        ? 'restore this conversation to the main workspace'
+        : 'archive this conversation';
+      btnArchiveCurrent.removeAttribute('hidden');
+    }
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
@@ -11012,9 +11243,15 @@ INDEX_HTML = r"""<!doctype html>
       loadDmRead();
       loadPersistedTargets();
       renderComposerTargets();
-      hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + state.channel;
-      state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + state.channel;
+      const archiveTag = ARCHIVED_MODE ? ' (archived)' : '';
+      hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + state.channel + archiveTag;
+      state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + state.channel + archiveTag;
       if (DM_MODE) document.body.classList.add('dm-mode');
+      if (ARCHIVED_MODE) {
+        input.disabled = true; sendBtn.disabled = true;
+        input.placeholder = 'Restore this conversation to reply';
+        preview.textContent = 'Archived — history is read-only until restored';
+      }
       updateTitle();
       if (meta.operator.pending) {
         // Untrusted connection — need a name before anything else

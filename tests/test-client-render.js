@@ -481,6 +481,7 @@ function seedDmState(msgs, members, read) {
   H.state.messages = new Map((msgs || []).map((m) => [m.id, m]));
   H.state.members = new Map(Object.entries(members || {}).map(([id, name]) => [id, { id, name }]));
   H.state.dmRead = new Map(Object.entries(read || {}));
+  H.state.unifiedDms = null;
 }
 
 check('dmCounterparty: broadcast is not a DM', () => {
@@ -554,6 +555,16 @@ check('renderDmInbox: empty state when the operator has no DMs', () => {
   H.renderDmInbox();
   assert.strictEqual(H.dmListEl.querySelectorAll('.dm-thread').length, 0);
   assert.strictEqual(H.dmListEl.querySelectorAll('.dm-empty').length, 1, 'shows empty notice');
+});
+
+check('renderDmInbox: authoritative API empty state does not resurrect archived local DMs', () => {
+  seedDmState([{ id: 1, member_id: 'a', recipients: [OP], content: 'archived' }],
+    { a: 'alice' }, {});
+  H.state.unifiedDms = { your_dms: [], agent_dms: [] };
+  H.renderDmInbox();
+  assert.strictEqual(H.dmListEl.querySelectorAll('.dm-thread').length, 0,
+    'local history must not bypass the API archive filter');
+  assert.strictEqual(H.dmListEl.querySelectorAll('.dm-empty').length, 1);
 });
 
 check('renderDmInbox: rows are keyboard-accessible (role=button, tabindex)', () => {

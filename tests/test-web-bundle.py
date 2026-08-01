@@ -36,6 +36,14 @@ check("served bundle: placeholders all substituted", "/*__" not in served)
 check("served bundle: persistent workspace rail present", 'id="workspace-rail"' in served)
 check("served bundle: channel creation form present", 'id="rail-channel-form"' in served)
 check("served bundle: unified rail loaders present", "loadWorkspaceRail" in served and "loadUnifiedDms" in served)
+check("served bundle: archive browser stays outside the primary rail lists",
+      'id="archives-panel"' in served and 'id="archives-list"' in served
+      and 'id="rail-archives-open"' in served)
+check("served bundle: active and archived conversations have dedicated data paths",
+      "/api/channels?archived=1" in served and "/api/dms?archived=1" in served
+      and "/api/archives" in served)
+check("served bundle: current conversation has reversible archive control",
+      'id="btn-archive-current"' in served and "setArchived" in served)
 check("served bundle: dual-provider agent picker present",
       'id="agent-provider"' in served and '<option value="codex">Codex</option>' in served)
 check("served bundle: Codex project and permissions controls present",
