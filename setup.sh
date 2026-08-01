@@ -111,19 +111,31 @@ mkdir -p "$TRIO_SKILL_DIR" "$QUARTET_SKILL_DIR" "$SERVER_DIR" "$DB_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Copy-deploy must also work after link.sh. macOS cp exits non-zero when the
+# destination symlink resolves to the source itself, which used to abort setup
+# halfway through. Remove only that destination symlink, then write the release
+# copy; ordinary files are overwritten normally.
+copy_release_file() {
+    local source="$1" destination="$2"
+    if [ -L "$destination" ]; then
+        unlink "$destination"
+    fi
+    cp "$source" "$destination"
+}
+
 # Each skill gets its own directory with a SKILL.md plus companion docs.
 # Companion files (REFERENCE, PROTOCOLS) are per-flavor; DESIGN is shared.
 if [ -f "$SCRIPT_DIR/SKILL-trio.md" ]; then
-    cp "$SCRIPT_DIR/SKILL-trio.md" "$TRIO_SKILL_DIR/SKILL.md"
-    [ -f "$SCRIPT_DIR/REFERENCE-trio.md" ] && cp "$SCRIPT_DIR/REFERENCE-trio.md" "$TRIO_SKILL_DIR/REFERENCE.md"
-    [ -f "$SCRIPT_DIR/PROTOCOLS-trio.md" ] && cp "$SCRIPT_DIR/PROTOCOLS-trio.md" "$TRIO_SKILL_DIR/PROTOCOLS.md"
-    [ -f "$SCRIPT_DIR/DESIGN.md" ] && cp "$SCRIPT_DIR/DESIGN.md" "$TRIO_SKILL_DIR/DESIGN.md"
+    copy_release_file "$SCRIPT_DIR/SKILL-trio.md" "$TRIO_SKILL_DIR/SKILL.md"
+    [ -f "$SCRIPT_DIR/REFERENCE-trio.md" ] && copy_release_file "$SCRIPT_DIR/REFERENCE-trio.md" "$TRIO_SKILL_DIR/REFERENCE.md"
+    [ -f "$SCRIPT_DIR/PROTOCOLS-trio.md" ] && copy_release_file "$SCRIPT_DIR/PROTOCOLS-trio.md" "$TRIO_SKILL_DIR/PROTOCOLS.md"
+    [ -f "$SCRIPT_DIR/DESIGN.md" ] && copy_release_file "$SCRIPT_DIR/DESIGN.md" "$TRIO_SKILL_DIR/DESIGN.md"
 fi
 if [ -f "$SCRIPT_DIR/SKILL-quartet.md" ]; then
-    cp "$SCRIPT_DIR/SKILL-quartet.md" "$QUARTET_SKILL_DIR/SKILL.md"
-    [ -f "$SCRIPT_DIR/REFERENCE-quartet.md" ] && cp "$SCRIPT_DIR/REFERENCE-quartet.md" "$QUARTET_SKILL_DIR/REFERENCE.md"
-    [ -f "$SCRIPT_DIR/PROTOCOLS-quartet.md" ] && cp "$SCRIPT_DIR/PROTOCOLS-quartet.md" "$QUARTET_SKILL_DIR/PROTOCOLS.md"
-    [ -f "$SCRIPT_DIR/DESIGN.md" ] && cp "$SCRIPT_DIR/DESIGN.md" "$QUARTET_SKILL_DIR/DESIGN.md"
+    copy_release_file "$SCRIPT_DIR/SKILL-quartet.md" "$QUARTET_SKILL_DIR/SKILL.md"
+    [ -f "$SCRIPT_DIR/REFERENCE-quartet.md" ] && copy_release_file "$SCRIPT_DIR/REFERENCE-quartet.md" "$QUARTET_SKILL_DIR/REFERENCE.md"
+    [ -f "$SCRIPT_DIR/PROTOCOLS-quartet.md" ] && copy_release_file "$SCRIPT_DIR/PROTOCOLS-quartet.md" "$QUARTET_SKILL_DIR/PROTOCOLS.md"
+    [ -f "$SCRIPT_DIR/DESIGN.md" ] && copy_release_file "$SCRIPT_DIR/DESIGN.md" "$QUARTET_SKILL_DIR/DESIGN.md"
 fi
 # Remove old single-skill install
 rm -f "${CLAUDE_DIR}/skills/nth/SKILL.md" 2>/dev/null || true
@@ -132,21 +144,21 @@ rm -f "${CLAUDE_DIR}/skills/nth/SKILL-quartet.md" 2>/dev/null || true
 echo "Skills: /trio -> $TRIO_SKILL_DIR, /quartet -> $QUARTET_SKILL_DIR"
 
 # Copy server files (both modes need them for local /trio)
-cp "$SCRIPT_DIR/server/nth_server.py" "$SERVER_DIR/nth_server.py"
-cp "$SCRIPT_DIR/server/nth_monitor.py" "$SERVER_DIR/nth_monitor.py"
-cp "$SCRIPT_DIR/server/nth_console.py" "$SERVER_DIR/nth_console.py"
-cp "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
-cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
-cp "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
-cp "$SCRIPT_DIR/server/nth_launchd.py" "$SERVER_DIR/nth_launchd.py"
-cp "$SCRIPT_DIR/server/nth_app.py" "$SERVER_DIR/nth_app.py"
-cp "$SCRIPT_DIR/server/nth_ask_client.js" "$SERVER_DIR/nth_ask_client.js"
-cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
-cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
-cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
-cp "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
-cp "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
-cp "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
+copy_release_file "$SCRIPT_DIR/server/nth_server.py" "$SERVER_DIR/nth_server.py"
+copy_release_file "$SCRIPT_DIR/server/nth_monitor.py" "$SERVER_DIR/nth_monitor.py"
+copy_release_file "$SCRIPT_DIR/server/nth_console.py" "$SERVER_DIR/nth_console.py"
+copy_release_file "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
+copy_release_file "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
+copy_release_file "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
+copy_release_file "$SCRIPT_DIR/server/nth_launchd.py" "$SERVER_DIR/nth_launchd.py"
+copy_release_file "$SCRIPT_DIR/server/nth_app.py" "$SERVER_DIR/nth_app.py"
+copy_release_file "$SCRIPT_DIR/server/nth_ask_client.js" "$SERVER_DIR/nth_ask_client.js"
+copy_release_file "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
+copy_release_file "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
+copy_release_file "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+copy_release_file "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
+copy_release_file "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
+copy_release_file "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
