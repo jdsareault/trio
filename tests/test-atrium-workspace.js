@@ -50,6 +50,13 @@ const nav = base.Trio.workspace.groupNavigation([{ code: 'a' }, { code: 'b', arc
 check('navigation grouping', nav.active.length === 1 && nav.archived.length === 1 && nav.yours.length === 1);
 check('attention count', base.Trio.workspace.attentionCount({ approvals: [{}], tasks: [{ status: 'open' }, { status: 'done' }] }) === 2);
 
+const s = base.Trio.workspace.selectors;
+check('selector pending approvals', s.pendingApprovals({ approvals: [{ status: 'open' }, { status: 'resolved' }] }) === 1);
+check('selector open tasks', s.openTasks({ tasks: [{ status: 'open' }, { status: 'blocked' }, { status: 'done' }] }) === 2);
+check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' }, { status: 'working' }] }) === 1);
+check('selector unread dms', s.unreadDms({ dms: { your_dms: [{ unread: 3 }, { unread: 0 }, {} ] } }) === 3);
+check('selector recent channels', s.recentChannels({ channels: [{ code: 'x' }, { code: 'y', archived: true }, { code: 'z' }] }).length === 2);
+
 // URL routing contract tests.
 function routeFor(search) {
   const cx = baseContext(search);

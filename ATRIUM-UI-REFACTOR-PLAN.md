@@ -588,7 +588,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
 **Goal:** answer “what needs me?” without turning the product into a process monitor.  
 **Prerequisite:** Phase 1 store/router/events and Phase 2 workspace components.
 
-- [ ] **4.1 Define shared workspace selectors.**
+- [x] **4.1 Define shared workspace selectors.**
   - Derive unread DMs/mentions, unanswered questions, pending approvals, blocked/errored agents, active agents, recent channels, task counts, and health from normalized slices.
   - Use the same selectors for rail badges, Home cards, and Attention tabs so counts cannot drift.
   - Add fixture tests for zero, one, mixed, resolved, archived, and stale states.

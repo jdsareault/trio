@@ -14,10 +14,16 @@
       agentAudit: dms.agent_dms || [],
     };
   }
-  function attentionCount(meta = state.meta || {}) {
-    return (meta.approvals || []).filter(a => a.status !== 'resolved').length +
-      (meta.tasks || []).filter(t => t.status === 'open' || t.status === 'blocked').length;
-  }
+  const selectors = {
+    pendingApprovals(src = state) { return (src.approvals || []).filter(a => a.status !== 'resolved' && a.status !== 'accepted').length; },
+    openTasks(src = state) { return (src.tasks || []).filter(t => t.status === 'open' || t.status === 'blocked').length; },
+    blockedAgents(src = state) { return (src.agents || []).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
+    activeAgents(src = state) { return (state.agents || []).filter(a => ['working','active','idle'].includes(a.status)).length; },
+    unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
+    recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
+    attention(src = state) { return selectors.pendingApprovals(src) + selectors.openTasks(src) + selectors.blockedAgents(src); },
+  };
+  function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }) + selectors.openTasks({ tasks: meta.tasks }); }
   function openChannel(code, extra = '') {
     const readOnly = extra === 'archived';
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
@@ -104,9 +110,9 @@
     rail.textContent = '';
     const controls = document.createElement('div'); controls.className = 'rail-views';
     [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, view]) =>
-      controls.append(railItem(label, '', () => showView(view), view === 'attention' && attentionCount() ? attentionCount() : '', state.view === view)));
+      controls.append(railItem(label, '', () => showView(view), view === 'attention' ? String(selectors.attention() || '') : '', state.view === view)));
     rail.append(controls, section('Channels', nav.active.map(c => railItem(c.code, c.topic || c.status, () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code))));
-    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d), '', state.view === 'conversation' && state.dmKey === d.key))));
+    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => railItem(d.name || d.key, d.preview || 'Private', () => openDm(d), d.unread ? String(d.unread) : '', state.view === 'conversation' && state.dmKey === d.key))));
     if (nav.agentAudit.length) rail.append(section('Agent activity', nav.agentAudit.map(d => railItem(d.name || d.key, d.preview || 'Agent-to-agent', () => openDm(d, true), '', state.view === 'conversation' && state.dmKey === d.key))));
     const actions = document.createElement('div'); actions.className = 'rail-actions';
     actions.append(railItem('+ New channel', '', createChannel), railItem('Archive browser', '', showArchives), railItem('Agent roster', '', () => { const panel = document.getElementById('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); }), railItem('Preferences', '', () => Trio.preferences?.panel?.())); rail.append(actions);
@@ -185,5 +191,5 @@
   let refreshInterval = null;
   function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); }
   function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, showView, modal, toast};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, selectors, showView, modal, toast};
 })();
