@@ -18,7 +18,17 @@
         <div><div class="brand-name">Atrium</div><div class="brand-sub">your agent workspace</div></div>
         <button class="icon-btn workspace-switch" type="button" aria-label="Switch workspace" title="Switch workspace"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 9 5-5 5 5M7 15l5 5 5-5"/></svg></button>
       </header>
-      <nav class="nav-scroll" id="workspace-rail" aria-label="Channels"></nav>
+      <nav class="nav-scroll" id="workspace-rail" aria-label="Channels">
+        <div class="rail-boot" aria-hidden="true">
+          <section class="nav-section nav-views">
+            <button class="nav-item" type="button"><span class="nav-hash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9"/></svg></span><span class="nav-label">Home</span></button>
+            <button class="nav-item" type="button"><span class="nav-hash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h4l2 3h4l2-3h4"/><path d="M5 13 7 5h10l2 8v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1Z"/></svg></span><span class="nav-label">Attention</span></button>
+            <button class="nav-item" type="button"><span class="nav-hash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m4 6 1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg></span><span class="nav-label">Tasks</span></button>
+          </section>
+          <section class="nav-section"><div class="nav-head"><h3>Channels</h3></div><div class="nav-loading">Loading channels…</div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Workspace</h3></div></section>
+        </div>
+      </nav>
       <footer class="side-foot"><span class="operator-avatar" id="operator-avatar" aria-hidden="true">?</span><div class="who"><div class="n" id="operator-name">Workspace</div><div class="s" id="operator-role">Live agent coordination</div></div><button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle theme" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg></button></footer>
     </aside>
     <main class="conversation-shell">

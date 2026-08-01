@@ -18,8 +18,8 @@
   const selectors = {
     pendingApprovals(src = state) { return (src.approvals || []).filter(a => a.status !== 'resolved' && a.status !== 'accepted').length; },
     openTasks(src = state) { return (src.tasks || []).filter(t => t.status === 'open' || t.status === 'blocked').length; },
-    blockedAgents(src = state) { return (src.agents || []).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
-    activeAgents(src = state) { return (src.agents || []).filter(a => ['working','active','idle'].includes(a.status)).length; },
+    blockedAgents(src = state) { return (Array.isArray(src.agents) ? src.agents : []).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
+    activeAgents(src = state) { return (Array.isArray(src.agents) ? src.agents : []).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     taskItems(src = state) {
@@ -66,6 +66,7 @@
     state.dmError = '';
     if (!isDm) state.dmThread = null;
     state.channel = channel;
+    renderRail();
     document.getElementById('h-channel').textContent = title;
     document.getElementById('h-meta').textContent = subtitle;
     const banner = document.getElementById('private-banner');
@@ -168,7 +169,9 @@
     rail.textContent = '';
     const controls = document.createElement('section'); controls.className = 'nav-section nav-views';
     [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, icon]) => { const view = icon; controls.append(navItem(label, icon, () => showView(view), view === 'attention' ? String(selectors.attention() || '') : '', state.view === view)); });
-    rail.append(controls, section('Channels', nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code)), true));
+    const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code));
+    if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
+    rail.append(controls, section('Channels', channelItems, true));
     if (nav.agentAudit.length) rail.append(section('Agent ↔ Agent · audit', nav.agentAudit.map(d => dmItem(d, true))));
     if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => dmItem(d))));
     const actions = section('Workspace', [navItem('Agent roster', 'roster', () => showView('roster')), navItem('Settings & diagnostics', 'settings', () => showView('prefs'))]);
@@ -209,7 +212,7 @@
       card.innerHTML = `<div class="hc-top"><span class="hc-ic ${tone}"><span aria-hidden="true">${tone === 'warn' ? '!' : tone === 'ok' ? '✓' : '✦'}</span></span><span><span class="hc-title">${esc(title)}</span><span class="hc-sub">${esc(subtitle)}</span></span></div><span class="hc-num">${esc(String(count))}</span><span class="hc-sub">${esc(detail)}</span>`;
       card.addEventListener('click', action); grid.append(card);
     }
-    const agents = (Trio.store?.get('agents.list') || state.agents || []).filter(a => ['working','active'].includes(statusLabel(a))).slice(0, 4);
+    const agents = (Array.isArray(Trio.store?.get('agents.list')) ? Trio.store.get('agents.list') : Array.isArray(state.agents) ? state.agents : []).filter(a => ['working','active'].includes(statusLabel(a))).slice(0, 4);
     const working = document.createElement('section'); working.className = 'home-section';
     working.innerHTML = `<div class="sec-head"><h3>Working right now</h3><span class="count">${agents.length}</span><span class="sh-line"></span></div>`;
     const workingList = document.createElement('div'); workingList.className = 'home-agent-list';
@@ -225,7 +228,8 @@
     recent.append(recentList);
     const health = document.createElement('section'); health.className = 'home-section'; health.innerHTML = '<div class="sec-head"><h3>Runtime health</h3><span class="sh-line"></span></div>';
     const healthRow = document.createElement('div'); healthRow.className = 'health-row';
-    [['Hub', 'ok', 'Live'], ['Agents', 'ok', String((Trio.store?.get('agents.list') || state.agents || []).length) + ' connected'], ['Database', 'ok', 'Ready']].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${tone}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
+    const agentList = Array.isArray(Trio.store?.get('agents.list')) ? Trio.store.get('agents.list') : Array.isArray(state.agents) ? state.agents : [];
+    [['Hub', 'ok', 'Live'], ['Agents', 'ok', String(agentList.length) + ' connected'], ['Database', 'ok', 'Ready']].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${tone}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
     health.append(healthRow);
     panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, recent, health);
   }
@@ -361,19 +365,23 @@
   async function refresh() {
     if (state.workspaceLoading) return;
     state.workspaceLoading = true; state.workspaceError = '';
-    try {
-      const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
-      const [channels, dms, meta, tasks, approvals] = await Promise.all([api.get('/api/channels'), api.get('/api/dms'), api.get('/api/meta' + query), api.get('/api/tasks' + query).catch(() => ({tasks:[]})), api.get('/api/approvals').catch(() => ({approvals:[]}))]);
-      state.channels = channels.channels || []; state.dms = dms; state.meta = {...state.meta, ...meta}; state.tasks=tasks.tasks||[]; state.approvals=approvals.approvals||[];
-      Trio.store.set('workspace.channels', state.channels);
-      Trio.store.set('workspace.dms', state.dms);
-      Trio.store.set('workspace.meta', state.meta);
-      Trio.store.set('workspace.tasks', state.tasks);
-      Trio.store.set('workspace.approvals', state.approvals);
-      renderRail();
-      Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
-    } catch (error) { state.workspaceError = error.message || 'Workspace refresh failed'; console.warn('workspace refresh failed', error); }
-    finally { state.workspaceLoading = false; if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
+    renderRail();
+    const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
+    const requests = [
+      api.get('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); renderRail(); }),
+      api.get('/api/dms').then(data => { state.dms = data; Trio.store.set('workspace.dms', state.dms); renderRail(); }),
+      api.get('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); }),
+      api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); }),
+      api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); }),
+    ];
+    const results = await Promise.allSettled(requests);
+    const failures = results.filter(result => result.status === 'rejected');
+    failures.forEach(result => console.warn('workspace refresh failed', result.reason));
+    if (failures.length === results.length) state.workspaceError = 'Workspace refresh failed';
+    state.workspaceLoading = false;
+    renderRail();
+    Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
+    if (['home','attention','tasks'].includes(state.view)) showView(state.view);
   }
   let searchDialog = null, searchController = null, searchTimer = null, searchKeydown = null, detailsClick = null;
   function onSearchKey(event) { if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); openSearch(); } }

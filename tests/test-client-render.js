@@ -90,6 +90,17 @@ check('task filters default to open and all shows every row', () => {
   H.Trio.workspace.showView('tasks');
   assert.strictEqual(panel.querySelectorAll('.task-row').length, 2);
 });
+check('sidebar paints the selected channel immediately', () => {
+  H.Trio.state.view = 'conversation';
+  H.Trio.state.dmKey = '';
+  H.Trio.state.channel = 'research';
+  H.Trio.state.channels = [{ code: 'general' }, { code: 'research' }];
+  H.Trio.workspace.render();
+  const rail = cx.document.getElementById('workspace-rail');
+  const active = rail.querySelectorAll('.nav-item.active');
+  assert.strictEqual(active.length, 1);
+  assert.strictEqual(active[0].querySelector('.nav-label').textContent, 'research');
+});
 check('agent roster panel is not force-hidden by a later render()', () => {
   H.Trio.agents.render([]);
   const panel = cx.document.getElementById('trio-agents');
