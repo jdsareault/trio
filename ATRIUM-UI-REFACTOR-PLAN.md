@@ -438,13 +438,13 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Preserve per-conversation draft and scroll state while changing routes.
   - Add route parsing, serialization, back/forward, refresh/deep-link, and unknown-route tests.
 
-- [ ] **1.5 Add route-aware loaders with cancellation.**
+- [x] **1.5 Add route-aware loaders with cancellation.**
   - Give each route a monotonically increasing request/version token and abort the previous loader when navigation changes.
   - Prevent a late channel/DM response from replacing the active conversation.
   - Separate initial loading, background refresh, empty, stale, and fatal error state.
   - Test rapid channel → DM → channel transitions with intentionally reordered responses.
 
-- [ ] **1.6 Normalize events exactly once.**
+- [x] **1.6 Normalize events exactly once.**
   - Convert raw SSE payloads into named application actions in one event adapter.
   - Remove the current typed-event plus generic-`sse` double ingestion.
   - Track connection states (`connecting`, `live`, `reconnecting`, `offline`) and last received message ID.
