@@ -713,22 +713,22 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Migrate/validate old `trio.preferences.v1` data and ignore unknown/corrupt values safely.
   - Remove controls for rejected features and add reset-to-default behavior.
 
-- [ ] **6.6 Implement notifications, dictation settings, and diagnostics.**
+- [x] **6.6 Implement notifications, dictation settings, and diagnostics.**
   - Handle browser notification permission, scope/timing, and chime volume with clear unsupported/denied states.
   - Choose local Whisper vs browser speech, expose `/api/stt/health`, add a real mic/transcription test, and stop media on close.
   - Render structured app/database/Claude/Codex/STT/service diagnostics with copyable actionable errors rather than a JSON dump.
 
-- [ ] **6.7 Execute the responsive matrix.**
+- [x] **6.7 Execute the responsive matrix.**
   - Test every primary view, drawer, dialog, menu, composer, question card, code block, table, attachment, and long message at 1440, 1024, 768, and 390 CSS pixels.
   - Fix overflow, safe areas, virtual keyboard behavior, touch targets, sticky elements, and nested scroll traps.
   - Verify orientation change and browser zoom through 200%.
 
-- [ ] **6.8 Complete the accessibility audit.**
+- [~] **6.8 Complete the accessibility audit.**
   - Verify landmarks/headings, accessible names/descriptions, fieldsets, tab/tabpanel relationships, menus, dialogs, live status/toasts, and error associations.
   - Test full keyboard flows and logical focus return for navigation, send, questions, approvals, tasks, agents, search, archives, and settings.
   - Verify reduced motion, contrast, non-color status cues, target size, and screen-reader announcements.
 
-- [~] **6.9 Remove placeholders and dead compatibility UI.**
+- [x] **6.9 Remove placeholders and dead compatibility UI.**
   - Search the shipped shell for unused IDs/classes, inert controls, raw debug JSON, hard-coded product copy, and old bridge styles.
   - Remove temporary Phase 0 disabled controls only after their real implementations exist.
   - Add a test that every enabled toolbar/nav action has a registered handler.
