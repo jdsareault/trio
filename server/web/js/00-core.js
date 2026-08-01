@@ -28,7 +28,11 @@
     root.state.channel = root.state.channel || meta.default_channel || meta.channel || '';
     if (!root.state.channel && meta.multi) {
       const channels = await root.api.get('/api/channels', false);
-      if (channels.channels?.[0]?.code) { location.replace('/?channel=' + encodeURIComponent(channels.channels[0].code)); return false; }
+      if (channels.channels?.[0]?.code) {
+        if (root.router?.replace) { root.router.replace('channel', { code: channels.channels[0].code }); }
+        else { location.replace('/?channel=' + encodeURIComponent(channels.channels[0].code)); }
+        return false;
+      }
     }
     document.getElementById('h-channel').textContent = root.state.channel ? `trio#${root.state.channel}` : 'Atrium';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';

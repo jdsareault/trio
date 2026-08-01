@@ -31,14 +31,19 @@
     const url = serialize(route);
     if (replace) history.replaceState(route, '', url); else history.pushState(route, '', url);
   }
+  let popHandler, clickHandler;
   function init() {
     const route = parse(location.search);
     apply(route);
-    addEventListener('popstate', event => { const r = event.state || parse(location.search); apply(r); });
-    addEventListener('click', event => {
+    popHandler = event => { const r = event.state || parse(location.search); apply(r); };
+    clickHandler = event => {
       const a = event.target.closest('a[data-route]');
       if (a) { event.preventDefault(); const [name, ...rest] = a.dataset.route.split(':'); const params = name === 'channel' ? { code: rest.join(':') } : { key: rest.join(':') }; navigate(name, params); }
-    });
+    };
+    addEventListener('popstate', popHandler);
+    addEventListener('click', clickHandler);
   }
-  Trio.router = { init, navigate, replace: (name, params) => navigate(name, params, { replace: true }), parse, serialize, on: (fn) => { handlers.add(fn); return () => handlers.delete(fn); }, current: () => (store ? store.getState().route : state.route) };
+  function mount() { init(); }
+  function unmount() { if (popHandler) removeEventListener('popstate', popHandler); if (clickHandler) removeEventListener('click', clickHandler); popHandler = clickHandler = null; }
+  Trio.router = { init, mount, unmount, navigate, replace: (name, params) => navigate(name, params, { replace: true }), parse, serialize, on: (fn) => { handlers.add(fn); return () => handlers.delete(fn); }, current: () => (store ? store.getState().route : state.route) };
 })();

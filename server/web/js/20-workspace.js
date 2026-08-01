@@ -150,6 +150,13 @@
     if (state.dmKey) { await archive('dm', state.dmKey, !state.readOnly); state.readOnly = !state.readOnly; }
     else if (state.channel) { await archive('channel', state.channel, !state.readOnly); state.readOnly = !state.readOnly; }
   }
+  let unroute = null;
+  function onRoute(route) {
+    if (!route) return;
+    if (route.name === 'channel' && state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, route.params.archived ? 'Archived channel — read only' : 'Live agent workspace', !!route.params.archived, false);
+    else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key);
+    else if (route.name === 'home') showView('home');
+  }
   async function refresh() {
     try {
       const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
@@ -165,7 +172,7 @@
     } catch (error) { console.warn('workspace refresh failed', error); }
   }
   let refreshInterval = null;
-  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); }
-  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } }
+  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); }
+  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, showView, modal, toast};
 })();

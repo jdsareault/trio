@@ -25,6 +25,14 @@
       return '\u0000I' + (inlines.length - 1) + '\u0000';
     });
 
+    function safeUrl(raw) {
+      let u = raw.replace(/&(?:quot|#39);/g, '').trim();
+      try {
+        const url = new URL(u);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+        return url.href;
+      } catch { return ''; }
+    }
     function inlineFmt(t) {
       t = escapeHtml(t);
       t = humanizeIdSigils(t);
@@ -33,12 +41,12 @@
       t = t.replace(/(^|[\s(\[])_([^_\n]+?)_(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
       t = t.replace(/~~([^~\n]+?)~~/g, '<del>$1</del>');
       t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, txt, url) => {
-        const safeUrl = url.replace(/&(?:quot|#39);/g, '');
-        return '<a href="' + safeUrl + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>';
+        const u = safeUrl(url);
+        return u ? '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>' : txt;
       });
       t = t.replace(/(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, (_m, pre, url) => {
-        const safeUrl = url.replace(/&(?:quot|#39);/g, '');
-        return pre + '<a href="' + safeUrl + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
+        const u = safeUrl(url);
+        return u ? pre + '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + url + '</a>' : pre + url;
       });
       return t;
     }
