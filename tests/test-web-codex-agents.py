@@ -53,12 +53,13 @@ web.NthWebHandler._default_channel = ""
 web.NthWebHandler._agent_control_enabled = True
 web._SUPERVISOR = None
 web._RUNTIME_HEALTH = {}
-json.loads(srv.nth_connect(summary="test", name="Host", channel="codex-room"))
+host = json.loads(srv.nth_connect(summary="test", name="Host", channel="codex-room"))
 
 server = web.QuietThreadingHTTPServer(("127.0.0.1", 0), web.NthWebHandler)
 server.daemon_threads = True
 port = server.server_address[1]
 threading.Thread(target=server.serve_forever, daemon=True).start()
+router = None
 try:
     status, payload = request(port, "/api/agent-models?provider=codex")
     check("Codex models are discovered from App Server",
@@ -110,6 +111,35 @@ try:
         mode = db.execute("SELECT wake_mode FROM agents WHERE id=?", (agent_id,)).fetchone()[0]
     check("wake policy can be changed after creation", status == 200 and mode == "all")
 
+    status, claude_payload = request(port, "/api/agents", "POST", {
+        "provider": "claude", "model": "sonnet", "channels": ["codex-room"],
+        "wake_mode": "at", "name": "ClaudeFriend"})
+    claude_id = claude_payload.get("agent", {}).get("id", "")
+    check("Claude and Codex can coexist in one managed room",
+          status == 200 and claude_id and web.get_supervisor().is_running(claude_id))
+    router = web.AgentRouter(srv.DB_PATH, web.get_supervisor(), interval=0.05)
+    router.start()
+    time.sleep(0.1)
+    with sqlite3.connect(str(srv.DB_PATH)) as db:
+        baseline = db.execute("SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
+    srv.nth_send(channel="codex-room", member_id=host["member_id"],
+                 message=f"@{agent_id} @{claude_id} compare notes")
+    deadline = time.time() + 4
+    responders = set()
+    while time.time() < deadline:
+        with sqlite3.connect(str(srv.DB_PATH)) as db:
+            responders = {row[0] for row in db.execute(
+                "SELECT member_id FROM messages WHERE id>? AND member_id IN (?,?)",
+                (baseline, agent_id, claude_id)).fetchall()}
+        if responders == {agent_id, claude_id}:
+            break
+        time.sleep(0.05)
+    check("one directed room message wakes both providers",
+          responders == {agent_id, claude_id})
+    router.stop()
+    router = None
+    request(port, f"/api/agents/{claude_id}/delete", "POST")
+
     status, _ = request(port, f"/api/agents/{agent_id}/compact", "POST")
     check("Codex compact maps through the common action", status == 200)
     with sqlite3.connect(str(srv.DB_PATH)) as db:
@@ -140,6 +170,8 @@ try:
     check("Codex delete removes provider thread and Trio identity",
           status == 200 and remaining == 0)
 finally:
+    if router is not None:
+        router.stop()
     server.shutdown()
     if web._SUPERVISOR is not None:
         web._SUPERVISOR.shutdown()
