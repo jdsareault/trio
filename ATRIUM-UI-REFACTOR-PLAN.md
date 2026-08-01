@@ -593,7 +593,7 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Use the same selectors for rail badges, Home cards, and Attention tabs so counts cannot drift.
   - Add fixture tests for zero, one, mixed, resolved, archived, and stale states.
 
-- [ ] **4.2 Build the Home summary.**
+- [x] **4.2 Build the Home summary.**
   - Implement greeting/summary, attention, active-agent, task, recent-channel, and runtime-health cards from real data.
   - Make every card route to its filtered destination and retain a calm empty state when nothing needs action.
   - Show partial-data and provider-unavailable states without failing the entire view.

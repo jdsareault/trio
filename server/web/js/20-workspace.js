@@ -122,6 +122,27 @@
     if (h) h.textContent = title || 'Atrium';
     if (m) m.textContent = subtitle || '';
   }
+  function renderHome(panel) {
+    panel.replaceChildren();
+    const grid = document.createElement('div'); grid.className = 'home-grid';
+    const cards = [
+      { title: 'Attention', count: selectors.attention(), subtitle: 'Need action', action: () => showView('attention') },
+      { title: 'Open tasks', count: selectors.openTasks(), subtitle: 'In flight', action: () => showView('tasks') },
+      { title: 'Unread DMs', count: selectors.unreadDms(), subtitle: 'Private messages', action: () => showView('home') },
+      { title: 'Active agents', count: selectors.activeAgents(), subtitle: 'Working now', action: () => { const panel = $('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); } },
+    ];
+    for (const { title, count, subtitle, action } of cards) {
+      const card = document.createElement('button'); card.type = 'button'; card.className = 'home-card';
+      card.innerHTML = `<strong>${esc(title)}</strong><span class="home-count">${esc(String(count))}</span><small>${esc(subtitle)}</small>`;
+      card.addEventListener('click', action); grid.append(card);
+    }
+    const recent = document.createElement('div'); recent.className = 'home-recent';
+    const head = document.createElement('h2'); head.textContent = 'Recent channels'; recent.append(head);
+    const chans = selectors.recentChannels();
+    if (!chans.length) { const p = document.createElement('p'); p.textContent = 'No active channels.'; p.className = 'home-empty'; recent.append(p); }
+    for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.textContent = c.code; b.addEventListener('click', () => openChannel(c.code)); recent.append(b); }
+    panel.append(grid, recent);
+  }
   function showView(view) {
     state.view = view;
     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
@@ -129,7 +150,8 @@
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
     panel.hidden = false;
-    if (view === 'tasks') {
+    if (view === 'home') { renderHome(panel); }
+    else if (view === 'tasks') {
       const filter = state.taskFilter || 'open';
       const tasks = (state.tasks || state.meta?.tasks || []).filter(t => filter === 'all' || (t.status || 'open') === filter);
       panel.innerHTML = `<h2>Tasks</h2><div class="task-filters" id="trio-task-filters"><button data-filter="open" ${filter === 'open' ? 'class="active"' : ''}>Open</button><button data-filter="claimed" ${filter === 'claimed' ? 'class="active"' : ''}>Claimed</button><button data-filter="all" ${filter === 'all' ? 'class="active"' : ''}>All</button></div><div id="trio-task-list">${tasks.map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks match.</p>'}</div>`;
