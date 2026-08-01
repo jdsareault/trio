@@ -1,8 +1,11 @@
 # Codex Runtime Compatibility and Integration Plan
 
-Status: proposed Phase 5 design  
-Date investigated: 2026-08-01  
-Stack: `feat/unified-phase5-codex-design` on Phase 4  
+Status: proposed Phase 5 design
+
+Date investigated: 2026-08-01
+
+Stack: `feat/unified-phase5-codex-design` on Phase 4
+
 Recommended integration surface: Codex App Server over stdio
 
 ## Executive verdict
@@ -348,4 +351,3 @@ into the coordination protocol or normal chat UI.
 - [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp.md)
 - [Codex authentication](https://learn.chatgpt.com/docs/auth.md)
 - [Codex approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security.md)
-

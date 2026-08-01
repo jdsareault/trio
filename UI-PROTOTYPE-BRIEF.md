@@ -1,8 +1,11 @@
 # Trio / nth Polished UI Prototype Brief
 
-Audience: UI-focused product designer or prototyper  
-Product state: Phase 4 works end to end with managed Claude agents  
-Near-term extension: Phase 5 adds managed Codex agents  
+Audience: UI-focused product designer or prototyper
+
+Product state: Phase 4 works end to end with managed Claude agents
+
+Near-term extension: Phase 5 adds managed Codex agents
+
 Prototype target: desktop-first responsive local web app
 
 ## The short version
@@ -607,4 +610,3 @@ The prototype succeeds when a new user can, without reading technical docs:
 Implementation behavior and current acceptance details are documented in
 `QA-unified-interface.md`. The proposed Codex runtime architecture is in
 `proposals/codex-runtime-integration.md`.
-
