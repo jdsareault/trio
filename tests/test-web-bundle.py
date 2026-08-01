@@ -30,6 +30,13 @@ except ValueError:
 else:
     escaped = False
 check("path guard rejects escape", escaped)
+try:
+    web._read_web_source("js/not-a-real-module.js")
+except RuntimeError as e:
+    missing = "required web source missing" in str(e)
+else:
+    missing = False
+check("missing asset fails clearly", missing)
 
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")

@@ -11379,24 +11379,29 @@ def _read_web_source(relative_path: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as e:
-        # During a partial source checkout, serve a useful diagnostic instead
-        # of failing the complete Python web server import.
-        return f"/* unavailable: {relative_path}: {e} */"
+        raise RuntimeError(f"required web source missing: {relative_path}") from e
+
+
+def _render_web_source(relative_path: str) -> str:
+    """Apply the legacy server-side substitutions to a modular asset."""
+    return (_read_web_source(relative_path)
+            .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
+            .replace("/*__ANIMAL_NAMES__*/", json.dumps([n for n, _ in ANIMAL_EMOJIS]))
+            .replace("/*__ASK_HELPERS__*/", _load_ask_helpers()))
 
 
 def _compose_index_html() -> str:
-    template = _read_web_source("index.html")
+    template = _render_web_source("index.html")
     styles = "\n".join(
-        f"<style data-trio-source=\"{name}\">\n{_read_web_source(name)}\n</style>"
+        f"<style data-trio-source=\"{name}\">\n{_render_web_source(name)}\n</style>"
         for name in WEB_CSS_FILES
     )
     scripts = "\n".join(
-        f"<script data-trio-source=\"{name}\">\n{_read_web_source(name)}\n</script>"
+        f"<script data-trio-source=\"{name}\">\n{_render_web_source(name)}\n</script>"
         for name in WEB_JS_FILES
-        if name != "js/99-test-hook.js"
     )
-    return template.replace("<!--__TRIO_STYLES__-->", styles).replace(
-        "<!--__TRIO_SCRIPTS__-->", scripts)
+    return _strip_test_hook(template.replace("<!--__TRIO_STYLES__-->", styles).replace(
+        "<!--__TRIO_SCRIPTS__-->", scripts))
 
 
 # New imports use the modular Atrium shell.  Keep the historical in-source
