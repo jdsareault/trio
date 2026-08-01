@@ -266,20 +266,34 @@
     const messages = Array.isArray(payload) ? payload : (payload.messages || [payload.message || payload]);
     messages.filter(Boolean).forEach(upsert);
   }
+  const listeners = {};
+  function onMessage(event) { ingest(event.detail); }
+  function onRoster(event) { if (Array.isArray(event.detail?.members)) state.members = new Map(event.detail.members.map(m => [m.id, m])); render(); }
+  function onBoot(event) { state.operator = event.detail?.operator || state.operator; }
   function init() {
     state.operator = state.operator || state.meta?.operator;
-    events.addEventListener('boot', event => { state.operator = event.detail?.operator || state.operator; });
-    events.addEventListener('messages', event => ingest(event.detail));
-    events.addEventListener('message', event => ingest(event.detail));
-    events.addEventListener('message_update', event => ingest(event.detail));
-    events.addEventListener('roster', event => { if (Array.isArray(event.detail?.members)) state.members = new Map(event.detail.members.map(m => [m.id, m])); render(); });
+    events.addEventListener('boot', onBoot); listeners.boot = onBoot;
+    events.addEventListener('messages', onMessage); listeners.messages = onMessage;
+    events.addEventListener('message', onMessage); listeners.message = onMessage;
+    events.addEventListener('message_update', onMessage); listeners.message_update = onMessage;
+    events.addEventListener('roster', onRoster); listeners.roster = onRoster;
     render();
     const list = dom(); const jump = document.getElementById('jump-latest');
     if (list && jump) {
-      list.addEventListener('scroll', () => jump.classList.toggle('hidden', nearBottom(list)));
-      jump.addEventListener('click', () => { list.scrollTop = list.scrollHeight; });
+      const onScroll = () => jump.classList.toggle('hidden', nearBottom(list));
+      const onClick = () => { list.scrollTop = list.scrollHeight; };
+      list.addEventListener('scroll', onScroll); listeners.listScroll = [list, onScroll];
+      jump.addEventListener('click', onClick); listeners.jumpClick = [jump, onClick];
     }
   }
+  function unmount() {
+    for (const [type, fn] of Object.entries(listeners)) {
+      if (Array.isArray(fn) && fn[0]?.removeEventListener) { fn[0].removeEventListener(type === 'listScroll' ? 'scroll' : 'click', fn[1]); }
+      else { events?.removeEventListener(type, fn); }
+    }
+    Object.keys(listeners).forEach(k => delete listeners[k]);
+  }
+  function mount() { init(); }
 
-  Trio.conversation = { init, render, ingest, upsert, paintBody, cardFor, answerPayload, isPrivate };
+  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, answerPayload, isPrivate };
 })();

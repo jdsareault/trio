@@ -3,7 +3,6 @@
   const Trio = window.Trio;
   const state = Trio.state;
   const api = Trio.api;
-  let dmPoll = null;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const $ = id => document.getElementById(id);
 
@@ -25,7 +24,6 @@
     location.assign('/?' + query);
   }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false) {
-    if (dmPoll) { clearInterval(dmPoll); dmPoll = null; }
     state.view = 'conversation';
     state.readOnly = !!readOnly;
     state.dmKey = isDm ? (state.dmKey || '') : '';
@@ -48,9 +46,6 @@
     state.dmKey = dm.key;
     state.dmThread = dm;
     loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, readOnly ? 'Archived private conversation' : 'Private conversation', readOnly, true);
-    if (dmPoll) { clearInterval(dmPoll); dmPoll = null; }
-    // Temporary polling for DM freshness; remove once a workspace/DM EventSource lands (task 1.7).
-    if (!readOnly) dmPoll = setInterval(() => refreshDm(dm.key), 5000);
     Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
     const loader = Trio.loader?.load ? Trio.loader : { load: (name, fn) => { const c = { abort() {} }; return fn(c); } };
@@ -63,13 +58,6 @@
       if (error?.name === 'AbortError' || (typeof error === 'string' && error.includes('aborted'))) return;
       state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.();
     });
-  }
-  function refreshDm(key) {
-    if (!key || document.hidden) return;
-    api.get('/api/dms?with=' + encodeURIComponent(key), false).then(data => {
-      if (state.dmKey !== key) return;
-      if (data && Array.isArray(data.messages)) data.messages.forEach(Trio.conversation.upsert);
-    }).catch(error => console.warn('DM refresh failed', error));
   }
   function openDmByKey(key) {
     if (!key) return;
@@ -169,5 +157,8 @@
       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     } catch (error) { console.warn('workspace refresh failed', error); }
   }
-  Trio.workspace = {init() { refresh(); setInterval(refresh, 15000); }, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, refreshDm, groupNavigation, attentionCount, showView, modal, toast};
+  let refreshInterval = null;
+  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); }
+  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } }
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, showView, modal, toast};
 })();

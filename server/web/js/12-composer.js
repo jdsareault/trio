@@ -82,7 +82,6 @@
     try {
       const result = await api.post(apiUrl('/api/send'), body);
       input().value = ''; state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
-      if (state.dmKey) Trio.workspace?.refreshDm?.(state.dmKey);
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
@@ -113,19 +112,26 @@
     recorder.start(); document.body.classList.add('dictating');
   }
   async function toggleDictation() { if (recognition || recorder?.state === 'recording') return stopDictation(); try { return state.sttMode === 'web' ? browserDictation() : localDictation(); } catch (error) { Trio.ui.toast(error.message); } }
+  const domListeners = [];
   function init() {
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
-    text.addEventListener('input', updateSendState);
-    text.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } });
-    sendButton?.addEventListener('click', send);
-    attach?.addEventListener('click', () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => Trio.ui.toast(error.message)); picker.click(); });
+    text.addEventListener('input', updateSendState); domListeners.push([text, 'input', updateSendState]);
+    const onKey = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } };
+    text.addEventListener('keydown', onKey); domListeners.push([text, 'keydown', onKey]);
+    const sendClick = () => send();
+    sendButton?.addEventListener('click', sendClick); if (sendButton) domListeners.push([sendButton, 'click', sendClick]);
+    const onAttach = () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => Trio.ui.toast(error.message)); picker.click(); };
+    attach?.addEventListener('click', onAttach); if (attach) domListeners.push([attach, 'click', onAttach]);
     const dictation = Trio.preferences?.read?.().dictation !== false;
     const dictateBtn = byId('dictate-btn');
     if (dictateBtn) { dictateBtn.hidden = !dictation; }
-    if (dictation && dictateBtn) { dictateBtn.addEventListener('click', () => toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed'))); }
+    const onDictate = () => toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed'));
+    if (dictation && dictateBtn) { dictateBtn.addEventListener('click', onDictate); domListeners.push([dictateBtn, 'click', onDictate]); }
     renderTargets(); renderAttachments(); updateSendState();
   }
+  function unmount() { domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0; if (recorder && recorder.state !== 'inactive') stopDictation(); }
+  function mount() { init(); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload };
+  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload };
 })();
