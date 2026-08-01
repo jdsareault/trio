@@ -2333,8 +2333,14 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     )
                     db.commit()
 
-                # Enrich with mention / reference / bang flags
+                # Enrich with mention / reference / bang flags. These three
+                # aggregate flags are independent (matching nth_monitor.py's
+                # wake-event contract) so a consumer like nth_spoke_monitor.py
+                # can evaluate each filter mode without re-deriving them from
+                # per-message fields.
                 has_mentions = False
+                has_refs = False
+                has_bangs = False
                 msg_list = []
                 image_blocks = []
                 image_budget = MAX_POLL_IMAGE_BYTES
@@ -2357,8 +2363,12 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     mentioned = member_id in mention_list
                     referenced = member_id in ref_list
                     banged = member_id in bang_list
-                    if mentioned or banged:
+                    if mentioned:
                         has_mentions = True
+                    if referenced:
+                        has_refs = True
+                    if banged:
+                        has_bangs = True
                     entry = {
                         "id": m["id"],
                         "from": m["member_name"] or m["member_id"],
@@ -2419,6 +2429,10 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 }
                 if has_mentions:
                     resp["has_mentions"] = True
+                if has_refs:
+                    resp["has_refs"] = True
+                if has_bangs:
+                    resp["has_bangs"] = True
                 if from_name_lower:
                     resp["filtered_by"] = from_name
                 # Text JSON first (backward-compatible), then any image blocks.
