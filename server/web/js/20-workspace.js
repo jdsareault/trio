@@ -19,7 +19,7 @@
     pendingApprovals(src = state) { return (src.approvals || []).filter(a => a.status !== 'resolved' && a.status !== 'accepted').length; },
     openTasks(src = state) { return (src.tasks || []).filter(t => t.status === 'open' || t.status === 'blocked').length; },
     blockedAgents(src = state) { return (src.agents || []).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
-    activeAgents(src = state) { return (state.agents || []).filter(a => ['working','active','idle'].includes(a.status)).length; },
+    activeAgents(src = state) { return (src.agents || []).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     taskItems(src = state) {

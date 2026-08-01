@@ -20,9 +20,9 @@
     warning: { label: 'Warning', cls: 'type-warning' },
     error: { label: 'Error', cls: 'type-error' },
   };
-  function host() { let n = $('trio-agents'); if (!n) { n = document.createElement('aside'); n.id = 'trio-agents'; n.className = 'agent-drawer'; document.body.append(n); } n.hidden = true; return n; }
+  function host() { let n = $('trio-agents'); if (!n) { n = document.createElement('aside'); n.id = 'trio-agents'; n.className = 'agent-drawer'; n.hidden = true; document.body.append(n); } return n; }
   function viewModel(agent = {}) {
-    const lifecycle = agent.state || (agent.live ? (agent.busy ? 'working' : 'idle') : 'offline');
+    const lifecycle = agent.live ? (agent.busy ? 'working' : 'idle') : (agent.state || 'offline');
     return {
       id: agent.id,
       name: agent.name || agent.id,
@@ -32,14 +32,14 @@
       kind: agent.kind || 'agent',
       lifecycle,
       statusText: agent.status_text || '',
-      lastActive: agent.last_active || agent.heartbeat,
+      lastActive: agent.last_active || agent.last_active_at || agent.heartbeat,
       busy: !!agent.busy,
       live: !!agent.live,
       error: agent.error || '',
       placements: Array.isArray(agent.channels) ? agent.channels : (Array.isArray(agent.placements) ? agent.placements : []),
-      wakePolicy: agent.filter_mode || agent.wake_policy || 'all',
+      wakePolicy: agent.wake_mode || agent.filter_mode || 'all',
       cwd: agent.cwd || '',
-      permissions: agent.permissions || '',
+      permissions: agent.permission_profile || agent.permissions || '',
       needsAttention: lifecycle === 'blocked' || lifecycle === 'errored' || lifecycle === 'error' || !!agent.error,
     };
   }
@@ -79,7 +79,7 @@
       row.append(b);
     }
     const msg = document.createElement('button'); msg.type = 'button'; msg.textContent = 'Message'; msg.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); row.append(msg);
-    article.append(row); article.append(row);
+    article.append(row);
     return article;
   }
   function matches(vm) {
@@ -92,13 +92,14 @@
   }
   function render(agents = Trio.store.get('agents.list')) {
     const n = host();
-    const list = (agents || []).map(a => viewModel(a)).filter(matches);
+    let list = (agents || []).map(a => viewModel(a)).filter(matches);
     if (state.agentsSearch) {
       const q = state.agentsSearch.toLowerCase();
       list = list.filter(vm => (vm.name + ' ' + vm.model + ' ' + vm.provider).toLowerCase().includes(q));
     }
-    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}</div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
+    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}<button type="button" class="agent-new">New agent</button></div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
     n.querySelector('.modal-close').onclick = () => n.hidden = true;
+    n.querySelector('.agent-new').onclick = () => create();
     const listNode = n.querySelector('.agent-list');
     list.forEach(vm => listNode.append(agentCard(vm)));
     n.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { state.agentFilter = b.dataset.filter; render(agents); });
@@ -124,14 +125,16 @@
   function editPlacements(vm) {
     const channels = (state.channels || []).filter(c => !c.archived);
     const html = channels.map(c => `<label><input type="checkbox" name="placement" value="${esc(c.code)}" ${(vm.placements || []).includes(c.code) ? 'checked' : ''}> ${esc(c.code)}</label>`).join('');
-    Trio.ui.modal('Placements for ' + vm.name, html || '<p>No channels available.</p>', node => {
-      const selected = [...node.querySelectorAll('input[name="placement"]:checked')].map(cb => cb.value);
-      action(vm.id, 'placements', { placements: selected });
+    Trio.ui.modal('Placements for ' + vm.name, html || '<p>No channels available.</p>', async node => {
+      const selected = new Set([...node.querySelectorAll('input[name="placement"]:checked')].map(cb => cb.value));
+      const before = new Set(vm.placements || []);
+      const changed = channels.map(c => c.code).filter(code => selected.has(code) !== before.has(code));
+      for (const channel of changed) await action(vm.id, 'placement', { channel, present: selected.has(channel) });
     });
   }
   function editWake(vm) {
     const html = '<label>Wake policy <select name="wake"><option value="all" ' + (vm.wakePolicy === 'all' ? 'selected' : '') + '>all</option><option value="about" ' + (vm.wakePolicy === 'about' ? 'selected' : '') + '>about</option><option value="at" ' + (vm.wakePolicy === 'at' ? 'selected' : '') + '>at</option></select></label>';
-    Trio.ui.modal('Wake policy for ' + vm.name, html, node => { const v = node.querySelector('[name="wake"]').value; action(vm.id, 'wake', { filter_mode: v }); });
+    Trio.ui.modal('Wake policy for ' + vm.name, html, node => { const v = node.querySelector('[name="wake"]').value; action(vm.id, 'wake-mode', { mode: v }); });
   }
   async function loadDiscovery() {
     if (state.discoveryLoading) return;
@@ -200,5 +203,5 @@
       finally { pendingAgentActions.delete(key); }
     });
   }
-  Trio.agents = { init, mount, unmount, render, refresh, loadDiscovery, viewModel, actionCaps, statusIcon, action };
+  Trio.agents = { init, mount, unmount, render, refresh, loadDiscovery, viewModel, actionCaps, statusIcon, action, create };
 })();
