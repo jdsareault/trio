@@ -2599,18 +2599,26 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 hub.unsubscribe(q)
 
     def _read_json_body(self, max_bytes: int = 16384) -> Optional[Dict[str, Any]]:
-        length = int(self.headers.get("Content-Length", "0") or 0)
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            self._error(400, "invalid Content-Length")
+            return None
         if length <= 0 or length > max_bytes:
             self._error(400, "missing or oversized body")
             return None
         try:
             raw = self.rfile.read(length)
-            return json.loads(raw.decode("utf-8"))
+            body = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, RecursionError):
             # RecursionError guards against a deeply-nested-JSON DoS (json.loads
             # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
+        if not isinstance(body, dict):
+            self._error(400, "JSON body must be an object")
+            return None
+        return body
 
     def _handle_identify(self) -> None:
         body = self._read_json_body(max_bytes=2048)
@@ -3867,7 +3875,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def _handle_tasks(self, parsed) -> None:
         """Read-only task board: every task in this channel, ordered by status
-        priority (open → claimed → blocked → completed → cancelled) then id.
+        priority (open → claimed → blocked → done → cancelled) then id.
         Additive — no schema changes; the tasks table is already fully
         structured (nth_server.py posts the lifecycle markers into chat, this
         just surfaces the underlying rows). Mirrors _handle_search's identity
@@ -3887,7 +3895,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         # Status sort priority: active work first, terminal states last.
         order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
-                 "WHEN 'blocked' THEN 2 WHEN 'completed' THEN 3 "
+                 "WHEN 'blocked' THEN 2 WHEN 'done' THEN 3 "
                  "WHEN 'cancelled' THEN 4 ELSE 5 END")
         db = None
         try:
