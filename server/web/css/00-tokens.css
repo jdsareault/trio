@@ -1,14 +1,108 @@
+/* ============================================================
+   ATRIUM — design tokens
+   ============================================================ */
 :root {
+  /* type */
   --font-display: "Fraunces", Georgia, serif;
-  --font-body: "Hanken Grotesk", system-ui, sans-serif;
-  --bg: #ece7e1; --surface: #f7f4ef; --sidebar: #efe9e2;
-  --line: #ddd4c9; --ink: #2c2723; --ink-2: #5c554d; --ink-3: #8b8378;
-  --accent: #3d7a63; --accent-strong: #316451; --accent-tint: #e3ede7;
-  --radius: 16px; --shadow: 0 4px 14px rgba(58,48,38,.09);
+  --font-body: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+
+  /* radii */
+  --r-xs: 8px;
+  --r-sm: 12px;
+  --r-md: 16px;
+  --r-lg: 22px;
+  --r-xl: 30px;
+  --r-full: 999px;
+
+  /* spacing rhythm */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+
+  /* motion */
+  --ease: cubic-bezier(.22,.61,.36,1);
+  --ease-soft: cubic-bezier(.34,1.2,.64,1);
+  --dur: .28s;
+
+  /* ---- LIGHT THEME (warm greige / dusty-rose paper) ---- */
+  --bg: #ece7e1;                 /* room */
+  --bg-sink: #e3ddd5;            /* recessed */
+  --surface: #f7f4ef;           /* raised cards */
+  --surface-2: #fbf9f6;         /* highest */
+  --surface-hover: #f0ebe4;
+  --sidebar: #efe9e2;
+  --line: #ddd4c9;              /* hairlines */
+  --line-soft: #e6ded4;
+
+  --ink: #2c2723;               /* primary text */
+  --ink-2: #5c554d;             /* secondary */
+  --ink-3: #8b8378;             /* muted */
+  --ink-inv: #f7f4ef;
+
+  --bubble-me: var(--accent);
+  --bubble-me-ink: #ffffff;
+  --bubble-agent: #ffffff;
+  --bubble-agent-ink: var(--ink);
+
+  --shadow-sm: 0 1px 2px rgba(58,48,38,.06), 0 1px 3px rgba(58,48,38,.05);
+  --shadow-md: 0 4px 14px rgba(58,48,38,.09), 0 2px 6px rgba(58,48,38,.05);
+  --shadow-lg: 0 18px 50px rgba(48,38,28,.18), 0 6px 18px rgba(48,38,28,.10);
+  --shadow-pop: 0 12px 40px rgba(48,38,28,.22);
+
+  --code-bg: #efe9e1;
+  --code-ink: #6b4f66;
+
+  --focus: color-mix(in oklab, var(--accent) 55%, transparent);
+
+  /* warm secondary accent (apricot) shared by both themes, tuned per theme */
+  --warm: #d98a5b;
+  --warm-soft: color-mix(in oklab, var(--warm) 18%, var(--surface));
+
+  /* status */
+  --st-online: #5b9a6f;
+  --st-thinking: #c98a3c;
+  --st-idle: #b0a99d;
+  --st-offline: #b9b1a6;
 }
-:root[data-theme="dark"] { --bg:#1a1714; --surface:#26221e; --sidebar:#201c19; --line:#3a342d; --ink:#f0e9df; --ink-2:#c3b9ab; --ink-3:#8f867a; --accent:#65b090; --accent-strong:#79c1a2; --accent-tint:#26362f; }
-:root[data-accent="indigo"] { --accent:#4b52a8; --accent-strong:#3c4290; --accent-tint:#e6e7f4; }
-:root[data-accent="plum"] { --accent:#8a4f78; --accent-strong:#743f64; --accent-tint:#f1e6ee; }
-* { box-sizing: border-box; }
-body { margin:0; min-height:100vh; font:15px/1.5 var(--font-body); color:var(--ink); background:var(--bg); }
-button, textarea { font:inherit; color:inherit; }
+
+/* accent variants (light) */
+:root[data-accent="eucalyptus"] { --accent:#3d7a63; --accent-strong:#316451; --accent-tint:#e3ede7; }
+:root[data-accent="indigo"]     { --accent:#4b52a8; --accent-strong:#3c4290; --accent-tint:#e6e7f4; }
+:root[data-accent="plum"]       { --accent:#8a4f78; --accent-strong:#743f64; --accent-tint:#f1e6ee; }
+
+/* ---- DARK THEME (deep warm charcoal, not black) ---- */
+:root[data-theme="dark"] {
+  --bg: #1a1714;
+  --bg-sink: #14110f;
+  --surface: #26221e;
+  --surface-2: #2f2a25;
+  --surface-hover: #302b25;
+  --sidebar: #201c19;
+  --line: #3a342d;
+  --line-soft: #322d27;
+
+  --ink: #f0e9df;
+  --ink-2: #c3b9ab;
+  --ink-3: #8f867a;
+  --ink-inv: #1a1714;
+
+  --bubble-me-ink: #ffffff;
+  --bubble-agent: #2f2a25;
+  --bubble-agent-ink: var(--ink);
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.35);
+  --shadow-md: 0 6px 18px rgba(0,0,0,.42);
+  --shadow-lg: 0 22px 60px rgba(0,0,0,.6), 0 8px 22px rgba(0,0,0,.45);
+  --shadow-pop: 0 14px 46px rgba(0,0,0,.6);
+
+  --code-bg: #201c18;
+  --code-ink: #d9a6cd;
+
+  --warm: #e09a6b;
+  --warm-soft: color-mix(in oklab, var(--warm) 16%, var(--surface));
+
+  --st-idle: #6f685d;
+  --st-offline: #58524a;
+}
+:root[data-theme="dark"][data-accent="eucalyptus"] { --accent:#65b090; --accent-strong:#79c1a2; --accent-tint:#26362f; }
+:root[data-theme="dark"][data-accent="indigo"]     { --accent:#8e94e6; --accent-strong:#a4a9ef; --accent-tint:#2a2c44; }
+:root[data-theme="dark"][data-accent="plum"]       { --accent:#c98cb6; --accent-strong:#d6a2c6; --accent-tint:#3a2a36; }
