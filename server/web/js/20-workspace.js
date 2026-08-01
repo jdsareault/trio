@@ -331,7 +331,8 @@
       const ctx = r.dm ? 'DM · ' + r.dm : '#' + (r.channel || 'unknown');
       const author = r.member_name || r.member_id || 'unknown';
       const time = r.created_at ? new Date(r.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-      const text = (r.content || '').toLowerCase().includes(q) ? (r.content || '').replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>') : esc(r.content || '');
+      const escaped = esc(r.content || '');
+      const text = q && escaped.toLowerCase().includes(q.toLowerCase()) ? escaped.replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>') : escaped;
       b.innerHTML = `<span class="search-meta">${esc(ctx)} · ${esc(author)} · ${esc(time)}</span><span class="search-body">${text}</span>`;
       b.addEventListener('click', () => { searchDialog.close(); if (r.dm) openDmByKey(r.dm); else openChannel(r.channel); if (r.id != null) setTimeout(() => { const card = document.querySelector(`[data-message-id="${r.id}"]`); if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.focus(); } }, 200); });
       list.append(b);
