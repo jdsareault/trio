@@ -1677,6 +1677,7 @@ def channel_exists(channel: str, db_path: Optional[Path] = None) -> bool:
 # The hub owns ONE AgentSupervisor. Agent management endpoints are operator-only.
 _SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
+_ROUTER = None
 
 # Auto-assigned friendly agent names (editable later).
 _AGENT_NAMES = ["Aragorn", "Boromir", "Celeborn", "Denethor", "Eomer",
@@ -1711,6 +1712,82 @@ def get_supervisor() -> "nsup.AgentSupervisor":
         if _SUPERVISOR is None:
             _SUPERVISOR = nsup.AgentSupervisor(db_path=_DB_PATH_GLOBAL)
         return _SUPERVISOR
+
+
+class AgentRouter(threading.Thread):
+    """Hub-side inbound routing (hybrid context): watches every channel for
+    messages DIRECTED at a managed agent (@it / !it / DM — via the server-parsed
+    mentions/bangs/recipients columns; member_id == agent_id) and feeds them to
+    the agent's process, `[#channel]`-tagged, waking a sleeping agent first
+    (aggressive-hibernation wake-on-directed). Ambient chatter is ignored, so a
+    busy channel doesn't keep every placed agent hot. One cheap poll loop for
+    all agents — replaces N per-agent monitors."""
+
+    def __init__(self, db_path: Path, supervisor, interval: float = 1.0):
+        super().__init__(daemon=True)
+        self.db_path = db_path
+        self.sup = supervisor
+        self.interval = interval
+        self._stop = threading.Event()
+        self.last_id = 0
+
+    def _conn(self):
+        c = sqlite3.connect(str(self.db_path), timeout=5)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def run(self) -> None:
+        try:
+            db = self._conn()
+            self.last_id = db.execute("SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
+            db.close()
+        except sqlite3.Error:
+            pass
+        while not self._stop.wait(self.interval):
+            try:
+                self.tick()
+            except Exception:
+                pass
+
+    def tick(self) -> None:
+        db = self._conn()
+        try:
+            rows = db.execute(
+                "SELECT id, channel, member_id, member_name, content, mentions, "
+                "bangs, recipients FROM messages WHERE id > ? ORDER BY id LIMIT 200",
+                (self.last_id,)).fetchall()
+            agent_ids = {r[0] for r in db.execute(
+                "SELECT DISTINCT agent_id FROM agent_channels").fetchall()}
+        finally:
+            db.close()
+        for m in rows:
+            self.last_id = max(self.last_id, m["id"])
+            if not agent_ids:
+                continue
+            for aid in self._targets(m, agent_ids):
+                if m["member_id"] == aid:
+                    continue  # never feed an agent its own message
+                if not self.sup.is_running(aid):
+                    self.sup.wake(aid)
+                self.sup.feed(aid, m["channel"], f'{m["member_name"]}: {m["content"]}')
+
+    def _targets(self, m, agent_ids) -> set:
+        out = set()
+        for col in ("mentions", "bangs", "recipients"):
+            try:
+                key = m[col]
+            except (IndexError, KeyError):
+                key = ""
+            try:
+                for i in json.loads(key or "[]"):
+                    if i in agent_ids:
+                        out.add(i)
+            except (ValueError, TypeError):
+                pass
+        return out
+
+    def stop(self) -> None:
+        self._stop.set()
 
 
 def _gen_agent_id() -> str:
@@ -9668,6 +9745,12 @@ def main() -> int:
     if args.channel:
         get_channel_runtime(args.channel)
 
+    # Inbound routing for managed agents (feeds directed messages to their
+    # processes). Cheap single poll loop; harmless when there are no agents.
+    global _ROUTER
+    _ROUTER = AgentRouter(db_path, get_supervisor())
+    _ROUTER.start()
+
     # Let multiple channel dashboards start without manual port coordination.
     requested_port = args.port
     port = requested_port
@@ -9691,6 +9774,8 @@ def main() -> int:
 
     def shutdown(_sig=None, _frm=None):
         stop_all_runtimes()
+        if _ROUTER is not None:
+            _ROUTER.stop()
         if _SUPERVISOR is not None:
             _SUPERVISOR.shutdown()
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -9719,6 +9804,8 @@ def main() -> int:
         pass
     finally:
         stop_all_runtimes()
+        if _ROUTER is not None:
+            _ROUTER.stop()
         if _SUPERVISOR is not None:
             _SUPERVISOR.shutdown()
 
