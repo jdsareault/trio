@@ -165,26 +165,30 @@
     const canAnswer = choices.target === operator().id && !alreadyAnswered && !msg.selection;
     const answers = answerState(msg, questions);
     questions.forEach((q, questionIndex) => {
-      const title = document.createElement('p'); title.className = 'ask-question'; title.textContent = q.question || '';
-      wrap.append(title);
-      const options = document.createElement('div'); options.className = 'ask-options';
+      const fieldset = document.createElement('fieldset'); fieldset.className = 'ask-question-set'; fieldset.disabled = !canAnswer;
+      const legend = document.createElement('legend'); legend.className = 'ask-question'; legend.textContent = q.question || '';
+      fieldset.append(legend);
+      const type = q.mode === 'one' ? 'radio' : 'checkbox';
+      const name = 'ask-' + msg.id + '-' + questionIndex;
+      const picked = answers[questionIndex].picked;
       (q.options || []).forEach((option, optionIndex) => {
-        const row = document.createElement(canAnswer ? 'button' : 'span'); row.className = 'ask-option'; row.textContent = option;
-        if (canAnswer) {
-          row.type = 'button'; row.classList.toggle('selected', answers[questionIndex].picked.has(optionIndex));
-          row.addEventListener('click', () => {
-            const picked = answers[questionIndex].picked;
-            if (q.mode === 'one') { picked.clear(); picked.add(optionIndex); } else if (picked.has(optionIndex)) picked.delete(optionIndex); else picked.add(optionIndex);
-            [...options.children].forEach((child, index) => child.classList.toggle('selected', picked.has(index)));
-          });
-        }
-        options.append(row);
+        const id = name + '-' + optionIndex;
+        const row = document.createElement('label'); row.className = 'ask-option' + (picked.has(optionIndex) ? ' selected' : ''); row.htmlFor = id;
+        const input = document.createElement('input'); input.type = type; input.name = name; input.id = id; input.value = optionIndex;
+        input.checked = picked.has(optionIndex);
+        input.addEventListener('change', () => {
+          if (q.mode === 'one') { picked.clear(); picked.add(optionIndex); }
+          else if (input.checked) { picked.add(optionIndex); } else { picked.delete(optionIndex); }
+          fieldset.querySelectorAll('.ask-option').forEach((label, idx) => label.classList.toggle('selected', picked.has(idx)));
+        });
+        const span = document.createElement('span'); span.textContent = option;
+        row.append(input, span); fieldset.append(row);
       });
-      wrap.append(options);
-      if (canAnswer && q.custom !== false) {
-        const custom = document.createElement('input'); custom.className = 'ask-custom'; custom.placeholder = 'Other answer…'; custom.value = answers[questionIndex].custom;
-        custom.addEventListener('input', () => { answers[questionIndex].custom = custom.value; }); wrap.append(custom);
+      if (q.custom !== false) {
+        const custom = document.createElement('input'); custom.className = 'ask-custom'; custom.placeholder = 'Other answer…'; custom.disabled = !canAnswer; custom.value = answers[questionIndex].custom;
+        custom.addEventListener('input', () => { answers[questionIndex].custom = custom.value; }); fieldset.append(custom);
       }
+      wrap.append(fieldset);
     });
     if (canAnswer) { const send = document.createElement('button'); send.type = 'button'; send.className = 'ask-send'; send.textContent = 'Send answer'; send.addEventListener('click', () => submitAnswer(msg, questions, send)); wrap.append(send); }
     else if (choices.target) { const note = document.createElement('small'); note.className = 'ask-note'; note.textContent = 'Awaiting @' + nameFor(choices.target, choices.target); wrap.append(note); }

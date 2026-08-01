@@ -562,22 +562,22 @@ Tasks are ordered within each phase. A task is complete only when its implementa
   - Show exactly who will receive/wake before send and require confirmation only for the approved broadcast-risk case.
   - Make privacy/reach derive from route and payload state, not CSS alone.
 
-- [ ] **3.9 Finish composer interaction polish.**
+- [~] **3.9 Finish composer interaction polish.**
   - Add textarea auto-grow, Shift+Enter newline, composition-event safety, attachment preview/removal, upload progress, and send retry.
   - Keep dictation start/stop/fallback mutually exclusive and stop media tracks on route change/unmount.
   - Provide visible keyboard hints without overriding platform conventions.
 
-- [ ] **3.10 Rebuild structured questions accessibly.**
+- [x] **3.10 Rebuild structured questions accessibly.**
   - Render each question as a `fieldset`/`legend`; use radio semantics for one and checkbox semantics for many.
   - Show batch position, current selections, custom-answer rules, finality, sent/answered/read-only states, and recover from lost SSE echo by ingesting the POST response.
   - Cover leading-`[` question text and all deferred selectable-answer issues in `TODO.md`.
 
-- [ ] **3.11 Implement approved display preferences.**
+- [x] **3.11 Implement approved display preferences.**
   - Make compact mode alter spacing/clamping with per-message expand.
   - Make message numbers render real IDs, and make font choice affect only message content where intended.
   - Remove any display preference that is not approved or testable.
 
-- [ ] **3.12 Decide prototype-only chat features.**
+- [x] **3.12 Decide prototype-only chat features.**
   - Make an explicit product decision for reactions, typing indicators, and read acknowledgements.
   - If approved, define server schema/events/privacy and tests before UI work; otherwise remove their unused prototype CSS.
 

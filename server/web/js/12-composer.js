@@ -12,15 +12,17 @@
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   function inputValue(newValue) { const el = input(); if (!el) return ''; if (newValue !== undefined) el.value = newValue; return el.value; }
+  function resize() { const el = input(); if (!el) return; el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
 
   function targetName(id) { return state.members?.get(id)?.name || id; }
   function conversationId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
   function saveDraft() { const el = input(); if (!el) return; state.drafts[conversationId()] = el.value; }
   function loadDraft() {
     const el = input(); if (!el) return;
+    stopDictation();
     const key = conversationId();
     el.value = state.drafts[key] || '';
-    updateSendState();
+    resize(); updateSendState();
   }
   function apiUrl(path) {
     if (typeof api.url === 'function') return api.url(path);
@@ -66,20 +68,30 @@
     if (!file) return;
     if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type || '')) throw new Error('Choose a PNG, JPEG, GIF, or WebP image');
     if (file.size > 10 * 1024 * 1024) throw new Error('Image must be 10 MB or smaller');
-    const response = await fetch(apiUrl('/api/upload'), {
-      method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
-    });
-    if (!response.ok) throw new Error('upload failed (' + response.status + ')');
-    const attachment = await response.json();
-    if (!attachment.ok || !Number.isInteger(attachment.id)) throw new Error('Upload did not return an attachment id');
-    state.pendingAttachments.push(attachment); renderAttachments(); updateSendState();
+    const placeholder = { id: 0, filename: 'Uploading…', loading: true };
+    state.pendingAttachments.push(placeholder); renderAttachments(); updateSendState();
+    try {
+      const response = await fetch(apiUrl('/api/upload'), {
+        method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
+      });
+      if (!response.ok) throw new Error('upload failed (' + response.status + ')');
+      const attachment = await response.json();
+      if (!attachment.ok || !Number.isInteger(attachment.id)) throw new Error('Upload did not return an attachment id');
+      Object.assign(placeholder, attachment, { name: attachment.filename, loading: false });
+    } catch (error) {
+      const index = state.pendingAttachments.indexOf(placeholder);
+      if (index >= 0) { state.pendingAttachments.splice(index, 1); }
+      throw error;
+    }
+    renderAttachments(); updateSendState();
   }
   function renderAttachments() {
     const strip = byId('attachment-strip'); if (!strip) return;
     strip.replaceChildren();
     state.pendingAttachments.forEach((attachment, index) => {
-      const pill = document.createElement('button'); pill.type = 'button'; pill.className = 'attachment-pill';
-      pill.textContent = (attachment.name || attachment.filename || 'attachment') + ' ×';
+      const pill = document.createElement('button'); pill.type = 'button'; pill.className = 'attachment-pill' + (attachment.loading ? ' loading' : '');
+      pill.textContent = (attachment.name || attachment.filename || 'attachment') + (attachment.loading ? ' …' : ' ×');
+      pill.disabled = attachment.loading;
       pill.onclick = () => { state.pendingAttachments.splice(index, 1); renderAttachments(); updateSendState(); };
       strip.append(pill);
     });
@@ -128,6 +140,7 @@
   let modeTabs = null;
   let reachPreview = null;
   let ac = null;
+  let isComposing = false;
   let acIndex = -1;
   let acMatches = [];
   let acToken = null;
@@ -152,6 +165,7 @@
     acContainer().append(ac);
   }
   function updateAutocomplete() {
+    if (isComposing) return;
     const el = input(); if (!el) return;
     const token = findToken(el.value, el.selectionStart);
     if (!token || token.query.includes(',')) { closeAutocomplete(); return; }
@@ -221,7 +235,11 @@
     setInputState(text);
     renderModeTabs(text.parentElement);
     renderTargets(); renderAttachments(); renderReach();
-    const onInput = () => { updateSendState(); saveDraft(); updateAutocomplete(); };
+    const onInput = () => { updateSendState(); saveDraft(); updateAutocomplete(); resize(); };
+    const onCompositionStart = () => { isComposing = true; };
+    const onCompositionEnd = () => { isComposing = false; updateAutocomplete(); resize(); };
+    text.addEventListener('compositionstart', onCompositionStart); domListeners.push([text, 'compositionstart', onCompositionStart]);
+    text.addEventListener('compositionend', onCompositionEnd); domListeners.push([text, 'compositionend', onCompositionEnd]);
     text.addEventListener('input', onInput); domListeners.push([text, 'input', onInput]);
     const onKey = event => {
       if (ac) {
