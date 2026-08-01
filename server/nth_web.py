@@ -1714,6 +1714,35 @@ def get_supervisor() -> "nsup.AgentSupervisor":
         return _SUPERVISOR
 
 
+def wake_agent(agent_id: str, supervisor, db_path: Path):
+    """Wake a hibernated agent, RE-INJECTING its Trio MCP config + reclaim
+    preamble. supervisor.wake() alone would resume with an empty mcp_config and
+    only the base prompt, so the woken agent would come back deaf-mute (no
+    trio_* tools, no reclaim instruction) — Sauron/Ents. Rebuild both from the
+    agents row + its placements."""
+    db = sqlite3.connect(str(db_path), timeout=5)
+    db.row_factory = sqlite3.Row
+    try:
+        row = db.execute("SELECT name, base_prompt FROM agents WHERE id = ?",
+                         (agent_id,)).fetchone()
+        if row is None:
+            return None
+        channels = [r[0] for r in db.execute(
+            "SELECT channel FROM agent_channels WHERE agent_id = ? ORDER BY channel",
+            (agent_id,)).fetchall()]
+    finally:
+        db.close()
+    base = (row["base_prompt"] or "").strip()
+    preamble = (base + "\n\n" if base else "") + \
+        build_agent_preamble(row["name"], channels, member_id=agent_id)
+    return supervisor.wake(agent_id, system_prompt=preamble,
+                           mcp_config=build_mcp_config_for_hub())
+
+
+def build_mcp_config_for_hub() -> str:
+    return nsup.build_mcp_config(NTH_SERVER_PATH)
+
+
 class AgentRouter(threading.Thread):
     """Hub-side inbound routing (hybrid context): watches every channel for
     messages DIRECTED at a managed agent (@it / !it / DM — via the server-parsed
@@ -1730,48 +1759,70 @@ class AgentRouter(threading.Thread):
         self.interval = interval
         self._stop = threading.Event()
         self.last_id = 0
+        # Wake+feed happens on a worker, NOT the poll loop — a cold-start wake
+        # blocks for up to ~10s and must not stall message DETECTION across all
+        # channels (Legolas). One worker keeps per-agent message order.
+        self._q: "queue.Queue" = queue.Queue()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
 
-    def _conn(self):
-        c = sqlite3.connect(str(self.db_path), timeout=5)
-        c.row_factory = sqlite3.Row
-        return c
+    def start(self) -> None:
+        self._worker.start()
+        super().start()
 
     def run(self) -> None:
+        # One long-lived connection for the poll loop (matches EventHub /
+        # StallWatchdog; avoids per-tick connect/close churn — Legolas).
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
         try:
-            db = self._conn()
             self.last_id = db.execute("SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
+            while not self._stop.wait(self.interval):
+                try:
+                    self.tick(db)
+                except Exception:
+                    pass
+        finally:
             db.close()
-        except sqlite3.Error:
-            pass
-        while not self._stop.wait(self.interval):
+
+    def tick(self, db) -> None:
+        rows = db.execute(
+            "SELECT id, channel, member_id, member_name, content, mentions, "
+            "bangs, recipients FROM messages WHERE id > ? ORDER BY id LIMIT 200",
+            (self.last_id,)).fetchall()
+        if not rows:
+            return
+        # Placement map: which agents are actually IN each channel. Targeting is
+        # membership-scoped so an agent mentioned in a channel it isn't placed in
+        # is never fed (Sauron/Ents).
+        placements: Dict[str, set] = {}
+        for r in db.execute("SELECT agent_id, channel FROM agent_channels").fetchall():
+            placements.setdefault(r["channel"], set()).add(r["agent_id"])
+        for m in rows:
+            self.last_id = max(self.last_id, m["id"])
+            chan_agents = placements.get(m["channel"])
+            if not chan_agents:
+                continue
+            for aid in self._targets(m, chan_agents):
+                if m["member_id"] == aid:
+                    continue  # never feed an agent its own message
+                # Hand off to the worker (wake if needed, then feed) — the row is
+                # queued, not dropped, so a wake failure doesn't silently lose it.
+                self._q.put((aid, m["channel"], f'{m["member_name"]}: {m["content"]}'))
+
+    def _worker_loop(self) -> None:
+        while not self._stop.is_set():
             try:
-                self.tick()
+                aid, chan, text = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if not self.sup.is_running(aid):
+                    wake_agent(aid, self.sup, self.db_path)  # re-injects mcp+preamble
+                self.sup.feed(aid, chan, text)
             except Exception:
                 pass
 
-    def tick(self) -> None:
-        db = self._conn()
-        try:
-            rows = db.execute(
-                "SELECT id, channel, member_id, member_name, content, mentions, "
-                "bangs, recipients FROM messages WHERE id > ? ORDER BY id LIMIT 200",
-                (self.last_id,)).fetchall()
-            agent_ids = {r[0] for r in db.execute(
-                "SELECT DISTINCT agent_id FROM agent_channels").fetchall()}
-        finally:
-            db.close()
-        for m in rows:
-            self.last_id = max(self.last_id, m["id"])
-            if not agent_ids:
-                continue
-            for aid in self._targets(m, agent_ids):
-                if m["member_id"] == aid:
-                    continue  # never feed an agent its own message
-                if not self.sup.is_running(aid):
-                    self.sup.wake(aid)
-                self.sup.feed(aid, m["channel"], f'{m["member_name"]}: {m["content"]}')
-
-    def _targets(self, m, agent_ids) -> set:
+    def _targets(self, m, chan_agents) -> set:
         out = set()
         for col in ("mentions", "bangs", "recipients"):
             try:
@@ -1780,7 +1831,7 @@ class AgentRouter(threading.Thread):
                 key = ""
             try:
                 for i in json.loads(key or "[]"):
-                    if i in agent_ids:
+                    if i in chan_agents:  # membership-scoped
                         out.add(i)
             except (ValueError, TypeError):
                 pass
@@ -2800,33 +2851,40 @@ class NthWebHandler(BaseHTTPRequestHandler):
         model = (body.get("model") or "").strip()
         prompt = (body.get("prompt") or "").strip()
         desired = (body.get("name") or "").strip()
-        channels = [c.strip() for c in (body.get("channels") or []) if c.strip()]
+        raw_channels = body.get("channels") or []
+        if not isinstance(raw_channels, list):
+            self._error(400, "channels must be a list of channel codes")
+            return
+        channels = [str(c).strip() for c in raw_channels if str(c).strip()]
         for c in channels:
             if not channel_exists(c, self.db_path):
                 self._error(400, f"unknown channel: {c}")
                 return
         db = None
+        agent_id = _gen_agent_id()
         try:
-            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
             name = pick_agent_name(db, desired)
-            agent_id = _gen_agent_id()
             now = now_iso()
-            db.execute(
-                "INSERT INTO agents (id, name, model, base_prompt, state, "
-                "managed, created_at) VALUES (?,?,?,?,?,1,?)",
-                (agent_id, name, model, prompt, nsup.ST_SPAWNING, now))
-            for c in channels:
+            # One transaction: agents row + all placements commit or roll back
+            # together, so a mid-loop failure can't leave a half-placed orphan.
+            with db:
                 db.execute(
-                    "INSERT OR IGNORE INTO members (id, channel, name, summary, "
-                    "skills, last_seen, last_read, joined_at, active, kind, model) "
-                    "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
-                    (agent_id, c, name, prompt[:200], "", now, now, model))
-                db.execute(
-                    "INSERT OR IGNORE INTO agent_channels "
-                    "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
-                    (agent_id, c, agent_id, now))
+                    "INSERT INTO agents (id, name, model, base_prompt, state, "
+                    "managed, created_at) VALUES (?,?,?,?,?,1,?)",
+                    (agent_id, name, model, prompt, nsup.ST_SPAWNING, now))
+                for c in channels:
+                    db.execute(
+                        "INSERT OR IGNORE INTO members (id, channel, name, summary, "
+                        "skills, last_seen, last_read, joined_at, active, kind, model) "
+                        "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+                        (agent_id, c, name, prompt[:200], "", now, now, model))
+                    db.execute(
+                        "INSERT OR IGNORE INTO agent_channels "
+                        "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+                        (agent_id, c, agent_id, now))
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
             return
@@ -2839,8 +2897,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
         preamble = (prompt + "\n\n" if prompt else "") + \
             build_agent_preamble(name, channels, member_id=agent_id)
         mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
-        proc = get_supervisor().spawn(agent_id, model=model, system_prompt=preamble,
-                                      mcp_config=mcp_config)
+        try:
+            proc = get_supervisor().spawn(agent_id, model=model,
+                                          system_prompt=preamble, mcp_config=mcp_config)
+        except Exception as e:
+            # Spawn threw — don't leave the row stuck at 'spawning'.
+            try:
+                d = sqlite3.connect(str(self.db_path), timeout=5)
+                d.execute("UPDATE agents SET state=? WHERE id=?",
+                          (nsup.ST_ERRORED, agent_id))
+                d.commit(); d.close()
+            except sqlite3.Error:
+                pass
+            self._error(500, f"spawn failed: {e}")
+            return
         # Nudge the agent to connect + participate on startup (a stream-json
         # agent is request/response, so it needs a first message to act on).
         if channels:
@@ -2860,7 +2930,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if action == "stop":
             ok = sup.stop(agent_id)
         elif action == "wake":
-            ok = sup.wake(agent_id) is not None
+            ok = wake_agent(agent_id, sup, self.db_path) is not None
         elif action == "delete":
             sup.stop(agent_id)
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)

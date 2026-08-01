@@ -80,6 +80,33 @@ def main() -> int:
     check("directed @agent message is routed + [#channel]-tagged",
           any("[#rt]" in e and "please help" in e for e in echoes))
 
+    # Membership scope: a message mentioning the agent in a channel it is NOT
+    # placed in must NOT be fed (inject mentions directly, bypassing sigil parse).
+    d = srv.get_db()
+    d.execute("INSERT INTO channels (code,status,created_at,updated_at) "
+              "VALUES ('other','active',?,?)", (srv.now_iso(), srv.now_iso()))
+    d.execute("INSERT INTO messages (channel,member_id,member_name,content,mentions,created_at) "
+              "VALUES ('other',?,?,?,?,?)",
+              (host["member_id"], "Host", "hello elsewhere",
+               json.dumps([aid]), srv.now_iso()))
+    d.commit(); d.close()
+    echoes.clear(); time.sleep(0.8)
+    check("agent mentioned in a channel it is NOT placed in is NOT fed",
+          not any("hello elsewhere" in e for e in echoes))
+
+    # Wake path: hibernate, then a directed message must wake + feed, and the
+    # woken agent must be re-launched WITH its Trio MCP (Sauron/Ents crit).
+    sup.hibernate(aid)
+    time.sleep(0.3)
+    check("agent hibernated (not running)", not sup.is_running(aid))
+    got.clear(); echoes.clear()
+    srv.nth_send(channel="rt", member_id=host["member_id"], message=f"@{aid} wake up please")
+    got.wait(8.0)
+    check("router wakes a hibernated agent and feeds the message",
+          any("wake up please" in e for e in echoes) and sup.is_running(aid))
+    check("woken agent re-launched WITH --mcp-config (not deaf-mute)",
+          "--mcp-config" in (sup._procs.get(aid).argv if sup._procs.get(aid) else []))
+
     router.stop()
     sup.shutdown()
     shutil.rmtree(tmp, ignore_errors=True)

@@ -123,6 +123,34 @@ try:
     db.close()
     check("delete: placements removed, member deactivated", left == 0 and active and active[0] == 0)
 
+    # ── input validation: channels must be a list (Uruk-Hai) ──
+    st, _ = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": "chan-x"})
+    check("create with channels as a STRING -> 400 (not a crash)", st == 400)
+    st, _ = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": 123})
+    check("create with channels as an INT -> 400 (not a 500)", st == 400)
+
+    # ── create with NO channels (abandoned agent) ──
+    st, d = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": []})
+    ab = d.get("agent", {})
+    check("create with no channels -> 200, empty channels", st == 200 and ab.get("channels") == [])
+    st, d = http(port, "/api/agents")
+    match = [a for a in d.get("agents", []) if a["id"] == ab.get("id")]
+    check("abandoned agent flagged in roster", match and match[0]["abandoned"] is True)
+    http(port, f"/api/agents/{ab.get('id')}/delete", "POST")
+
+    # ── wake endpoint ──
+    st, d = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": ["chan-x"]})
+    wid = d["agent"]["id"]
+    http(port, f"/api/agents/{wid}/stop", "POST")
+    time.sleep(0.2)
+    st, _ = http(port, f"/api/agents/{wid}/wake", "POST")
+    time.sleep(0.3)
+    check("wake endpoint -> 200 + agent live again",
+          st == 200 and web.get_supervisor().is_running(wid))
+    st, _ = http(port, "/api/agents/nope/wake", "POST")
+    check("wake bogus agent -> 404", st == 404)
+    http(port, f"/api/agents/{wid}/delete", "POST")
+
     # ── operator-only ──
     _orig = web.is_all_seeing
     web.is_all_seeing = lambda mid: False
