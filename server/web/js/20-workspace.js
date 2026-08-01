@@ -157,45 +157,69 @@
     if (h) h.textContent = title || 'Atrium';
     if (m) m.textContent = subtitle || '';
   }
+  function viewHeader(title, subtitle) {
+    const header = document.createElement('div'); header.className = 'view-hero';
+    header.innerHTML = `<h2>${esc(title)}</h2><p>${esc(subtitle)}</p>`;
+    return header;
+  }
+  function statusLabel(agent) {
+    const status = String(agent.status || agent.state || (agent.busy ? 'working' : agent.live ? 'active' : 'offline')).toLowerCase();
+    return status === 'working' || status === 'active' ? status : status === 'error' || status === 'errored' ? 'errored' : status;
+  }
   function renderHome(panel) {
     panel.replaceChildren();
     if (state.workspaceLoading) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Loading workspace…'; panel.append(p); return; }
-    if (state.workspaceError) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = state.workspaceError; const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Retry'; b.addEventListener('click', refresh); p.append(b); panel.append(p); return; }
+    if (state.workspaceError) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = state.workspaceError; const b = document.createElement('button'); b.type = 'button'; b.className = 'btn primary'; b.textContent = 'Retry'; b.addEventListener('click', refresh); p.append(b); panel.append(p); return; }
+    const operatorName = state.operator?.name || state.meta?.operator?.name || 'there';
+    const intro = document.createElement('div'); intro.className = 'hello';
+    intro.innerHTML = `<div class="greet">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc(operatorName)}.</div><div class="sub">Here’s what’s happening across your workspace.</div>`;
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
-      { title: 'Attention', count: selectors.attention(), subtitle: 'Need action', action: () => showView('attention') },
-      { title: 'Open tasks', count: selectors.openTasks(), subtitle: 'In flight', action: () => showView('tasks') },
-      { title: 'Unread DMs', count: selectors.unreadDms(), subtitle: 'Private messages', action: () => showView('home') },
-      { title: 'Active agents', count: selectors.activeAgents(), subtitle: 'Working now', action: () => { const panel = $('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); } },
+      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
+      { title: 'Messages for you', count: selectors.unreadDms(), subtitle: 'Unread & mentions', tone: 'accent', detail: 'Private messages and direct pings', action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
+      { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${(state.tasks || []).filter(t => t.status === 'claimed').length} claimed · ${(state.tasks || []).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
     ];
-    for (const { title, count, subtitle, action } of cards) {
-      const card = document.createElement('button'); card.type = 'button'; card.className = 'home-card';
-      card.innerHTML = `<strong>${esc(title)}</strong><span class="home-count">${esc(String(count))}</span><small>${esc(subtitle)}</small>`;
+    for (const { title, count, subtitle, tone, detail, action } of cards) {
+      const card = document.createElement('button'); card.type = 'button'; card.className = 'hcard';
+      card.innerHTML = `<div class="hc-top"><span class="hc-ic ${tone}"><span aria-hidden="true">${tone === 'warn' ? '!' : tone === 'ok' ? '✓' : '✦'}</span></span><span><span class="hc-title">${esc(title)}</span><span class="hc-sub">${esc(subtitle)}</span></span></div><span class="hc-num">${esc(String(count))}</span><span class="hc-sub">${esc(detail)}</span>`;
       card.addEventListener('click', action); grid.append(card);
     }
-    const recent = document.createElement('div'); recent.className = 'home-recent';
-    const head = document.createElement('h2'); head.textContent = 'Recent channels'; recent.append(head);
+    const agents = (Trio.store?.get('agents.list') || state.agents || []).filter(a => ['working','active'].includes(statusLabel(a))).slice(0, 4);
+    const working = document.createElement('section'); working.className = 'home-section';
+    working.innerHTML = `<div class="sec-head"><h3>Working right now</h3><span class="count">${agents.length}</span><span class="sh-line"></span></div>`;
+    const workingList = document.createElement('div'); workingList.className = 'home-agent-list';
+    if (!agents.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No agents are active right now.'; workingList.append(p); }
+    agents.forEach(agent => { const row = document.createElement('div'); row.className = 'hc-row'; row.innerHTML = `<span class="dotm" style="background:var(--ok)"></span><span class="grow"><b>${esc(agent.name || agent.id || 'Agent')}</b> · ${esc(agent.status_text || agent.status || 'Active')}</span><span class="t">${esc(agent.provider || 'agent')}</span>`; workingList.append(row); });
+    working.append(workingList);
+    const recent = document.createElement('section'); recent.className = 'home-section';
+    recent.innerHTML = `<div class="sec-head"><h3>Recently active channels</h3><span class="sh-line"></span></div>`;
+    const recentList = document.createElement('div'); recentList.className = 'home-channel-list';
     const chans = selectors.recentChannels();
-    if (!chans.length) { const p = document.createElement('p'); p.textContent = 'No active channels.'; p.className = 'home-empty'; recent.append(p); }
-    for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.textContent = c.code; b.addEventListener('click', () => openChannel(c.code)); recent.append(b); }
-    panel.append(grid, recent);
+    if (!chans.length) { const p = document.createElement('p'); p.textContent = 'No active channels.'; p.className = 'home-empty'; recentList.append(p); }
+    for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.innerHTML = `<strong>#${esc(c.code)}</strong><span>${esc(c.topic || 'No topic')}</span><small>${esc(String(c.members?.length || 0))} members${c.unread ? ` · ${esc(String(c.unread))} unread` : ''}</small>`; b.addEventListener('click', () => openChannel(c.code)); recentList.append(b); }
+    recent.append(recentList);
+    const health = document.createElement('section'); health.className = 'home-section'; health.innerHTML = '<div class="sec-head"><h3>Runtime health</h3><span class="sh-line"></span></div>';
+    const healthRow = document.createElement('div'); healthRow.className = 'health-row';
+    [['Hub', 'ok', 'Live'], ['Agents', 'ok', String((Trio.store?.get('agents.list') || state.agents || []).length) + ' connected'], ['Database', 'ok', 'Ready']].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${tone}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
+    health.append(healthRow);
+    panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, recent, health);
   }
   function renderAttention(panel) {
-    panel.replaceChildren();
-    const heading = document.createElement('h2'); heading.textContent = 'Attention'; panel.append(heading);
+    panel.replaceChildren(); panel.append(viewHeader('Attention', 'Everything waiting for you, in one calm place'));
+    const tabs = document.createElement('div'); tabs.className = 'att-tabs';
+    [['all','All'],['approval','Approvals'],['task','Tasks'],['agent','Agents']].forEach(([key,label]) => { const b = document.createElement('button'); b.type = 'button'; b.className = (state.attentionFilter || 'all') === key ? 'on' : ''; b.textContent = label; b.addEventListener('click', () => { state.attentionFilter = key; showView('attention'); }); tabs.append(b); });
+    panel.append(tabs);
     const items = selectors.attentionItems();
-    if (!items.length) { const p = document.createElement('p'); p.textContent = 'Nothing needs attention.'; p.className = 'home-empty'; panel.append(p); return; }
+    const filtered = (state.attentionFilter && state.attentionFilter !== 'all') ? items.filter(item => item.kind === state.attentionFilter) : items;
+    if (!filtered.length) { const p = document.createElement('p'); p.textContent = 'Nothing needs attention.'; p.className = 'home-empty'; panel.append(p); return; }
     const list = document.createElement('section'); list.className = 'attention-list';
-    for (const item of items) {
-      const article = document.createElement('article'); article.className = 'attention-item severity-' + item.severity;
-      const title = document.createElement('b'); title.textContent = item.title;
-      const meta = document.createElement('small'); meta.textContent = [item.kind, item.source, timeAgo(item.timestamp)].filter(Boolean).join(' · ');
-      const body = document.createElement('p'); body.textContent = item.body;
-      article.append(title, meta, body);
+    for (const item of filtered) {
+      const article = document.createElement('article'); article.className = 'att-card k-' + item.kind;
+      article.innerHTML = `<div class="ac-h"><span class="avatar-fallback">${esc((item.source || '?').slice(0,2).toUpperCase())}</span><span><span class="who">${esc(item.source || 'Workspace')}</span><span class="sub">${esc(item.kind)} · ${esc(timeAgo(item.timestamp) || 'now')}</span></span><span class="waiting"><span class="p"></span>waiting for you</span></div><div class="reason">${esc(item.title)}</div>${item.body ? `<div class="att-detail"><div class="r"><span class="k">Details</span><span class="v">${esc(item.body)}</span></div></div>` : ''}`;
       if (item.actions.length) {
-        const row = document.createElement('div'); row.className = 'attention-actions';
+        const row = document.createElement('div'); row.className = 'att-actions';
         for (const d of item.actions) {
-          const b = document.createElement('button'); b.type = 'button'; b.textContent = d === 'acceptForSession' ? 'Allow this session' : d;
+          const b = document.createElement('button'); b.type = 'button'; b.className = d === 'decline' || d === 'cancel' ? 'abtn danger' : d === 'acceptForSession' ? 'abtn soft' : 'abtn ok'; b.textContent = d === 'accept' ? 'Allow once' : d === 'acceptForSession' ? 'Allow for session' : d[0].toUpperCase() + d.slice(1);
           b.disabled = pendingDecisions.has(item.id + ':' + d);
           b.addEventListener('click', () => resolveApproval(item.id, d));
           row.append(b);
@@ -208,14 +232,13 @@
   }
   function timeAgo(iso) { if (!iso) return ''; try { const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; return Math.floor(h / 24) + 'd'; } catch { return ''; } }
   function renderTasks(panel) {
-    panel.replaceChildren();
-    const heading = document.createElement('h2'); heading.textContent = 'Tasks'; panel.append(heading);
+    panel.replaceChildren(); panel.append(viewHeader('Tasks', 'Claimable work across every channel'));
     const filters = ['open', 'claimed', 'blocked', 'done', 'all'];
     const filter = filters.includes(state.taskFilter) ? state.taskFilter : 'open';
-    const filterBar = document.createElement('div'); filterBar.className = 'task-filters';
+    const filterBar = document.createElement('div'); filterBar.className = 'att-tabs';
     for (const f of filters) {
-      const b = document.createElement('button'); b.type = 'button'; b.textContent = f;
-      b.className = f === filter ? 'active' : '';
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = f[0].toUpperCase() + f.slice(1);
+      b.className = f === filter ? 'on' : '';
       b.addEventListener('click', () => { state.taskFilter = f; showView('tasks'); });
       filterBar.append(b);
     }
@@ -228,9 +251,8 @@
     if (!rows.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No ' + (filter === 'all' ? '' : filter + ' ') + 'tasks.'; list.append(p); }
     for (const t of rows) {
       const row = document.createElement('article'); row.className = 'task-row';
-      row.innerHTML = `<b>#${esc(t.id)}</b><span>${esc(t.title)}</span><small>${esc(t.status)}</small>`;
-      if (t.owner) { const owner = document.createElement('small'); owner.textContent = 'claimed by ' + t.owner; row.append(owner); }
-      if (t.blockers.length) { const b = document.createElement('small'); b.textContent = 'blocked: ' + t.blockers.join(', '); b.style.color = 'var(--warm)'; row.append(b); }
+      const stateClass = ['open','claimed','blocked','done'].includes(t.status) ? t.status : 'cancelled';
+      row.innerHTML = `<span class="tnum">#${esc(t.id)}</span><span class="tmain"><span class="tdesc">${esc(t.title)}</span><span class="tmeta"><span class="tstate ${stateClass}"><span class="d"></span>${esc(t.status)}</span>${t.channel ? `<span>#${esc(t.channel)}</span>` : ''}${t.owner ? `<span>· ${esc(t.owner)}</span>` : ''}${t.blockers.length ? `<span class="dep-chip">depends on ${esc(t.blockers.join(', '))}</span>` : ''}</span></span>`;
       list.append(row);
     }
     panel.append(list);
