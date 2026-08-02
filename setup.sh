@@ -150,6 +150,11 @@ copy_release_file "$SCRIPT_DIR/server/nth_console.py" "$SERVER_DIR/nth_console.p
 copy_release_file "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
 copy_release_file "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
 copy_release_file "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
+# nth_web.py imports nth_agent_manager, which imports nth_codex_runtime. A clean
+# install used to copy nth_web.py without these two, so the unified app failed
+# at import time with ModuleNotFoundError.
+copy_release_file "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
+copy_release_file "$SCRIPT_DIR/server/nth_codex_runtime.py" "$SERVER_DIR/nth_codex_runtime.py"
 copy_release_file "$SCRIPT_DIR/server/nth_launchd.py" "$SERVER_DIR/nth_launchd.py"
 copy_release_file "$SCRIPT_DIR/server/nth_app.py" "$SERVER_DIR/nth_app.py"
 copy_release_file "$SCRIPT_DIR/server/nth_ask_client.js" "$SERVER_DIR/nth_ask_client.js"
@@ -161,6 +166,12 @@ copy_release_file "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_ho
 copy_release_file "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
 # Phase 7 browser sources are composed by nth_web.py at import time, so copy
 # them as a tree alongside the server module for a portable no-build install.
+# link.sh makes $SERVER_DIR/web a symlink to the source tree; copying into that
+# symlink reproduces as "are identical (not copied)." Remove the symlink first,
+# mirroring copy_release_file, so a real directory is written.
+if [ -L "$SERVER_DIR/web" ]; then
+    unlink "$SERVER_DIR/web"
+fi
 mkdir -p "$SERVER_DIR/web"
 cp -R "$SCRIPT_DIR/server/web/." "$SERVER_DIR/web/"
 
@@ -172,6 +183,20 @@ rm -f "$SERVER_DIR/nth_sentinel.py" \
 rm -f "${CLAUDE_DIR}/agents/trio-sentinel.md" 2>/dev/null || true
 
 echo "Server files: $SERVER_DIR"
+
+# Clean-room import smoke test: verify the copied server tree imports without
+# ModuleNotFoundError (catches a missing runtime module, as happened when
+# nth_agent_manager/nth_codex_runtime were omitted). Runs from $SERVER_DIR so
+# it resolves sibling modules the way the installed server would.
+if ( cd "$SERVER_DIR" && "$PYTHON_CMD" -c "import nth_web" ) 2>/tmp/nth_setup_smoke.err; then
+    echo "Smoke test: nth_web imports OK"
+else
+    echo "ERROR: nth_web import smoke test failed. The installed server is likely broken."
+    echo "  stderr:"; sed 's/^/    /' /tmp/nth_setup_smoke.err 2>/dev/null || true
+    rm -f /tmp/nth_setup_smoke.err
+    exit 1
+fi
+rm -f /tmp/nth_setup_smoke.err
 
 # ---------- 4. Data migration ----------
 
