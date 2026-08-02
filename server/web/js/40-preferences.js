@@ -54,7 +54,7 @@
     return next;
   }
   function save(change) {
-    const current = readFromStorage(); const next = { ...current };
+    const current = read(); const next = { ...current };
     for (const k of Object.keys(schema)) if (change[k] !== undefined) next[k] = cast(k, change[k]);
     localStorage.setItem(KEY, JSON.stringify(next));
     apply(next);
@@ -83,8 +83,9 @@
     Trio.ui.configureDialog(n);
     const p = read();
     const rows = Object.entries(diagnostics()).map(([k, v]) => `<div class="diagnostic-row"><b>${esc(k)}</b><span id="diag-${esc(k)}">${esc(v)}</span></div>`).join('');
-    n.innerHTML = `<form method="dialog" class="control-modal"><button type="submit" formnovalidate class="modal-close">×</button><h2>Settings & diagnostics</h2><label>Theme <select data-key="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label><label>Accent <select data-key="accent"><option>eucalyptus</option><option>indigo</option><option>plum</option></select></label><label>Font <select data-key="font"><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label>${['compact','messageNumbers','notifications','chime','dictation'].map(k=>`<label><input type="checkbox" data-key="${k}" ${p[k]?'checked':''}> ${k.replace(/([A-Z])/g,' $1').toLowerCase()}</label>`).join('')}<div class="diagnostics-list">${rows}</div><button type="button" class="reset-prefs">Reset to defaults</button></form>`;
-    n.querySelectorAll('[data-key]:not([disabled])').forEach(el => { if (el.type === 'checkbox') el.checked = !!p[el.dataset.key]; else el.value = p[el.dataset.key]; el.onchange = () => save({ [el.dataset.key]: el.type === 'checkbox' ? el.checked : el.value }); });
+    const themeOptions = group => group.map(theme => `<option value="${theme.id}">${theme.label}</option>`).join('');
+    n.innerHTML = `<form method="dialog" class="control-modal"><button type="submit" formnovalidate class="modal-close">×</button><h2>Settings & diagnostics</h2><label>Default light theme <select data-key="lightTheme">${themeOptions(lightThemes)}</select></label><label>Default dark theme <select data-key="darkTheme">${themeOptions(darkThemes)}</select></label><label>Accent <select data-key="accent"><option>eucalyptus</option><option>indigo</option><option>plum</option></select></label><label>Font <select data-key="font"><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label>${['compact','messageNumbers','notifications','chime','dictation'].map(k=>`<label><input type="checkbox" data-key="${k}" ${p[k]?'checked':''}> ${k.replace(/([A-Z])/g,' $1').toLowerCase()}</label>`).join('')}<div class="diagnostics-list">${rows}</div><button type="button" class="reset-prefs">Reset to defaults</button></form>`;
+    n.querySelectorAll('[data-key]:not([disabled])').forEach(el => { if (el.type === 'checkbox') el.checked = !!p[el.dataset.key]; else el.value = p[el.dataset.key]; el.onchange = () => { const value = el.type === 'checkbox' ? el.checked : el.value; if (el.dataset.key === 'lightTheme' || el.dataset.key === 'darkTheme') save({ [el.dataset.key]: value, theme: value }); else save({ [el.dataset.key]: value }); }; });
     n.querySelector('.reset-prefs')?.addEventListener('click', () => { reset(); panel(); });
     n.showModal();
     checkStt().then(() => { const v = document.getElementById('diag-stt'); if (v) v.textContent = Trio.state.sttHealth; });
@@ -94,9 +95,16 @@
     const p = read();
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Settings & diagnostics</h2><p>Shape how Atrium looks, sounds, and keeps you informed.</p>';
     const appearance = document.createElement('section'); appearance.className = 'pref-group'; appearance.innerHTML = '<h3>Appearance</h3>';
-    const themeRow = document.createElement('div'); themeRow.className = 'pref-row'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme</div><div class="d">A warm light room or deep charcoal after dark.</div></div>';
-    const theme = document.createElement('div'); theme.className = 'theme-choice';
-    [['light','Light'],['dark','Dark']].forEach(([value,label]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p.theme === value ? ' on' : ''); b.innerHTML = `<span class="swatch ${value}"><span class="a"></span><span class="b"></span></span><span class="tl">${label}</span>`; b.addEventListener('click', () => { save({theme:value}); renderPage(panel); }); theme.append(b); }); themeRow.append(theme); appearance.append(themeRow);
+    const themeRow = document.createElement('div'); themeRow.className = 'pref-row'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose the light and dark themes used by the toggle.</div></div>';
+    const themeChoices = document.createElement('div'); themeChoices.className = 'theme-choice';
+    [['lightTheme', 'Light default', lightThemes], ['darkTheme', 'Dark default', darkThemes]].forEach(([key, label, options]) => {
+      const group = document.createElement('div'); group.className = 'theme-choice-group';
+      group.innerHTML = `<div class="tl">${label}</div>`;
+      const choices = document.createElement('div'); choices.className = 'theme-choice';
+      options.forEach(option => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p[key] === option.id ? ' on' : ''); b.setAttribute('aria-pressed', p[key] === option.id ? 'true' : 'false'); b.innerHTML = `<span class="swatch ${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
+      group.append(choices); themeChoices.append(group);
+    });
+    themeRow.append(themeChoices); appearance.append(themeRow);
     const accentRow = document.createElement('div'); accentRow.className = 'pref-row'; accentRow.innerHTML = '<div class="pr-txt"><div class="l">Accent color</div><div class="d">A little personality for buttons and highlights.</div></div>';
     const accents = document.createElement('div'); accents.className = 'accent-dots'; [['eucalyptus','#3d7a63'],['indigo','#4b52a8'],['plum','#8a4f78']].forEach(([value,color]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'accent-dot' + (p.accent === value ? ' on' : ''); b.setAttribute('aria-label', value); b.innerHTML = `<span class="in" style="background:${color}"></span>`; b.addEventListener('click', () => { save({accent:value}); renderPage(panel); }); accents.append(b); }); accentRow.append(accents); appearance.append(accentRow);
     const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
