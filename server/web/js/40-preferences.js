@@ -13,11 +13,17 @@
     { id: 'light-birch', mode: 'light', label: 'Birch' },
     { id: 'light-mist', mode: 'light', label: 'Mist' },
     { id: 'light-dune', mode: 'light', label: 'Dune' },
+    { id: 'light-linen', mode: 'light', label: 'Linen' },
+    { id: 'light-frost', mode: 'light', label: 'Frost' },
+    { id: 'light-sage', mode: 'light', label: 'Sage' },
     { id: 'dark-graphite', mode: 'dark', label: 'Graphite' },
     { id: 'dark-midnight', mode: 'dark', label: 'Midnight' },
     { id: 'dark-slate', mode: 'dark', label: 'Slate' },
-    { id: 'dark-espresso', mode: 'dark', label: 'Espresso' },
-    { id: 'dark-moss', mode: 'dark', label: 'Moss' },
+    { id: 'dark-obsidian', mode: 'dark', label: 'Obsidian' },
+    { id: 'dark-carbon', mode: 'dark', label: 'Carbon' },
+    { id: 'dark-onyx', mode: 'dark', label: 'Onyx' },
+    { id: 'dark-cobalt', mode: 'dark', label: 'Cobalt' },
+    { id: 'dark-ember', mode: 'dark', label: 'Ember' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
