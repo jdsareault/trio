@@ -84,9 +84,9 @@
     const detailsBtn = $('details-btn');
     const moreBtn = $('channel-more-btn');
     const conn = $('h-conn');
-    if (detailsBtn) detailsBtn.hidden = false;
-    if (moreBtn) moreBtn.hidden = false;
-    if (conn) conn.hidden = false;
+    if (detailsBtn) detailsBtn.classList.remove('hidden');
+    if (moreBtn) moreBtn.classList.remove('hidden');
+    if (conn) conn.classList.remove('hidden');
     const banner = document.getElementById('private-banner');
     if (banner) { banner.classList.toggle('hidden', !isDm); banner.classList.toggle('audit', !!isAudit); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
@@ -181,7 +181,8 @@
   function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
   function renderFacePile() {
     const pile = $('face-pile'); if (!pile) return;
-    if (!state.channel) { pile.hidden = true; return; }
+    if (!state.channel) { pile.classList.add('hidden'); return; }
+    pile.classList.remove('hidden');
     pile.replaceChildren();
     const members = [...(state.members?.values?.() || [])];
     const operator = state.operator || state.meta?.operator;
@@ -201,7 +202,7 @@
       more.setAttribute('aria-label', `${members.length - visible.length} more channel members`);
       pile.append(more);
     }
-    pile.hidden = !members.length;
+    pile.classList.toggle('hidden', !members.length);
   }
   function navItem(label, icon, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
@@ -374,9 +375,9 @@
     const detailsBtn = $('details-btn');
     const moreBtn = $('channel-more-btn');
     const conn = $('h-conn');
-    if (detailsBtn) detailsBtn.hidden = true;
-    if (moreBtn) moreBtn.hidden = true;
-    if (conn) conn.hidden = true;
+    if (detailsBtn) detailsBtn.classList.add('hidden');
+    if (moreBtn) moreBtn.classList.add('hidden');
+    if (conn) conn.classList.add('hidden');
     const shell = document.querySelector('.conversation-shell');
     shell?.classList.add('workspace-page');
     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
