@@ -78,18 +78,19 @@
     Trio.composer?.syncReadOnly?.();
     Trio.startEvents?.(state.channel);
   }
-  function openDm(dm, readOnly = false) {
+  function openDm(dm, readOnly = false, audit = false) {
+    const auditReadOnly = !!audit;
     state.dmMemberIds = (dm.member_ids || []).slice();
     state.dmTargetId = state.dmMemberIds[0] || '';
     state.dmName = dm.name || dm.key;
     state.dmKey = dm.key;
     state.dmThread = dm;
-    loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, readOnly ? 'Archived private conversation' : 'Private conversation', readOnly, true);
-    if (Trio.router?.navigate) Trio.router.navigate('dm', { key: dm.key, archived: readOnly });
+    loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, auditReadOnly ? 'Agent-to-agent audit' : readOnly ? 'Archived private conversation' : 'Private conversation', readOnly || auditReadOnly, true);
+    if (Trio.router?.navigate) Trio.router.navigate(auditReadOnly ? 'audit' : 'dm', { key: dm.key, ...(readOnly && !auditReadOnly ? { archived: true } : {}) });
     Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
     const loader = Trio.loader?.load ? Trio.loader : { load: (name, fn) => { const c = { abort() {} }; return fn(c); } };
-    loader.load('dm:' + dm.key, signal => api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly ? '&archived=1' : ''), false, { signal })).then(data => {
+    loader.load('dm:' + dm.key, signal => api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly && !auditReadOnly ? '&archived=1' : ''), false, { signal })).then(data => {
       state.dmLoading = false; state.dmError = '';
       if (data && Array.isArray(data.messages)) { data.messages.forEach(Trio.conversation.upsert); }
       if (data && data.ok === false) { state.dmError = data.error || 'Could not load DM'; }
@@ -99,11 +100,14 @@
       state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.();
     });
   }
-  function openDmByKey(key) {
+  function openDmByKey(key, audit = false) {
     if (!key) return;
     api.get('/api/dms?with=' + encodeURIComponent(key)).then(data => {
-      const dm = (data.your_dms || []).find(d => d.key === key) || (data.agent_dms || []).find(d => d.key === key);
-      if (dm) return openDm(dm, false);
+      const auditThread = (data.agent_dms || []).find(d => d.key === key);
+      if (audit && auditThread) return openDm(auditThread, false, true);
+      const yours = (data.your_dms || []).find(d => d.key === key);
+      if (yours) return openDm(yours, false, false);
+      if (auditThread) return openDm(auditThread, false, true);
       return api.get('/api/dms?archived=1&with=' + encodeURIComponent(key));
     }).then(data => {
       if (data) { const dm = (data.your_dms || []).find(d => d.key === key); if (dm) openDm(dm, true); }
@@ -163,7 +167,7 @@
     const visual = audit && people.length > 1 ? `<span class="dm-pair">${avatar(people[0], avatarTone(people[0]))}${avatar(people[1], avatarTone(people[1]))}</span>` : avatar(people[0] || label, avatarTone(label), dm.unread ? 'online' : 'idle');
     const button = document.createElement('button'); button.type = 'button'; button.className = 'dm-item'; button.classList.toggle('active', state.view === 'conversation' && state.dmKey === dm.key);
     button.innerHTML = `${visual}<span class="dm-copy"><span class="dm-name">${esc(label)}</span></span>${dm.unread ? '<span class="unread-dot" aria-label="Unread"></span>' : ''}`;
-    button.addEventListener('click', () => openDm(dm, audit)); return button;
+    button.addEventListener('click', () => openDm(dm, false, audit)); return button;
   }
   function renderRail() {
     const rail = $('workspace-rail'); if (!rail) return;
@@ -373,7 +377,7 @@
       if (state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, subtitle, !!route.params.archived, false);
       else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; showConversationPage(); updateTopbar('trio#' + route.params.code, subtitle); renderRail(); }
     }
-    else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key);
+    else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
     else if (route.name === 'home') showView('home');
   }
   async function refresh() {

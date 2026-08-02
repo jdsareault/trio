@@ -57,6 +57,26 @@ check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' },
 check('selector unread dms', s.unreadDms({ dms: { your_dms: [{ unread: 3 }, { unread: 0 }, {} ] } }) === 3);
 check('selector recent channels', s.recentChannels({ channels: [{ code: 'x' }, { code: 'y', archived: true }, { code: 'z' }] }).length === 2);
 
+// Agent-audit clicks are read-only, but they are not archived threads. The
+// client must preserve that distinction in the history request.
+base.document.querySelector = () => null;
+const auditElements = new Map(['h-channel', 'h-meta', 'private-banner'].map(id => [id, {
+  classList: { toggle() {} },
+  set textContent(value) { this._textContent = value; },
+  get textContent() { return this._textContent || ''; },
+} ]));
+base.document.getElementById = id => auditElements.get(id) || null;
+base.Trio.startEvents = () => {};
+base.Trio.conversation = { render() {}, upsert() {} };
+base.Trio.loader = { cancel() {}, load(_name, fn) { return fn({}); } };
+let auditRoute = null;
+const auditRequests = [];
+base.Trio.router = { navigate(name, params) { auditRoute = { name, params }; } };
+base.Trio.api.get = path => { auditRequests.push(path); return Promise.resolve({ messages: [] }); };
+base.Trio.workspace.openDm({ key: 'ag_a,ag_b', member_ids: ['ag_a', 'ag_b'], name: 'A ↔ B' }, false, true);
+check('agent audit requests active history', auditRequests[0] === '/api/dms?with=ag_a%2Cag_b');
+check('agent audit uses audit route', auditRoute?.name === 'audit' && !auditRoute.params.archived);
+
 // URL routing contract tests.
 function routeFor(search) {
   const cx = baseContext(search);
