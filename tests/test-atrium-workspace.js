@@ -1,10 +1,10 @@
 const fs = require('fs');
 const vm = require('vm');
 
-function baseContext(search = '') {
+function baseContext(search = '', pathname = '/') {
   const context = {
     window: {},
-    location: { search, href: 'http://localhost/?' + search },
+    location: { search, pathname, href: 'http://localhost' + pathname + search },
     URLSearchParams,
     document: {
       getElementById: () => null,
@@ -71,6 +71,16 @@ check('theme toggle returns to the saved light preset', base.Trio.preferences.re
 
 base.Trio.state.dms = { targets: [{ id: 'z', name: 'Zed' }, { id: 'a', name: 'Ada' }] };
 check('direct-message targets are sorted by display name', base.Trio.workspace.dmTargets().map(target => target.id).join(',') === 'a,z');
+
+const routerContext = baseContext('', '/tasks');
+loadModule('01-store.js', routerContext);
+loadModule('03-router.js', routerContext);
+check('page path parses as tasks route', routerContext.Trio.router.parse('', '/tasks').name === 'tasks');
+check('page route serializes to tasks path', routerContext.Trio.router.serialize({ name: 'tasks', params: {} }) === '/tasks');
+check('inbox path maps to attention route', routerContext.Trio.router.parse('', '/inbox').name === 'attention');
+check('agent path maps to roster route', routerContext.Trio.router.parse('', '/agents').name === 'roster');
+check('settings path maps to preferences route', routerContext.Trio.router.parse('', '/settings').name === 'prefs');
+check('conversation query takes precedence over page path', routerContext.Trio.router.parse('?channel=general', '/tasks').name === 'channel');
 
 // Agent-audit clicks are read-only, but they are not archived threads. The
 // client must preserve that distinction in the history request.

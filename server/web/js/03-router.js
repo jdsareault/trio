@@ -4,24 +4,43 @@
   const store = Trio.store;
   const state = Trio.state;
   const handlers = new Set();
-  function parse(search) {
+  const pageRoutes = {
+    '/': 'home',
+    '/inbox': 'attention',
+    '/attention': 'attention',
+    '/tasks': 'tasks',
+    '/agents': 'roster',
+    '/roster': 'roster',
+    '/settings': 'prefs',
+    '/preferences': 'prefs',
+  };
+  const pagePaths = {
+    home: '/',
+    attention: '/inbox',
+    tasks: '/tasks',
+    roster: '/agents',
+    prefs: '/settings',
+  };
+  function parse(search = location.search, pathname = location.pathname || '/') {
     const q = new URLSearchParams(search);
     const dm = q.get('dm') || '';
     const channel = q.get('channel') || '';
     const archived = q.get('archived') === '1';
     if (dm) return { name: archived ? 'audit' : 'dm', params: { key: dm }, title: 'DM ' + dm, readOnly: archived };
     if (channel) return { name: 'channel', params: { code: channel, archived }, title: 'trio#' + channel, readOnly: archived };
-    return { name: 'home', params: {}, title: 'Atrium', readOnly: false };
+    const name = pageRoutes[pathname] || 'home';
+    return { name, params: {}, title: name === 'home' ? 'Atrium' : name, readOnly: false };
   }
   function serialize(route) {
-    const extra = route.params.archived ? '&archived=1' : '';
+    const params = route.params || {};
+    const extra = params.archived ? '&archived=1' : '';
     if (route.name === 'dm' || route.name === 'audit') {
-      return '/?dm=' + encodeURIComponent(route.params.key) + extra;
+      return '/?dm=' + encodeURIComponent(params.key) + extra;
     }
     if (route.name === 'channel') {
-      return '/?channel=' + encodeURIComponent(route.params.code) + extra;
+      return '/?channel=' + encodeURIComponent(params.code) + extra;
     }
-    return '/';
+    return pagePaths[route.name] || '/';
   }
   function apply(route) {
     const current = store ? store.getState() : state;
@@ -37,9 +56,9 @@
   }
   let popHandler, clickHandler;
   function init() {
-    const route = parse(location.search);
+    const route = parse(location.search, location.pathname || '/');
     apply(route);
-    popHandler = event => { const r = event.state || parse(location.search); apply(r); };
+    popHandler = event => { const r = event.state || parse(location.search, location.pathname || '/'); apply(r); };
     clickHandler = event => {
       const a = event.target.closest('a[data-route]');
       if (a) { event.preventDefault(); const [name, ...rest] = a.dataset.route.split(':'); const params = name === 'channel' ? { code: rest.join(':') } : { key: rest.join(':') }; navigate(name, params); }

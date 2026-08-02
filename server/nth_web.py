@@ -68,6 +68,10 @@ DEFAULT_PORT = 8765
 DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+UI_PATHS = frozenset((
+    "/", "/index.html", "/inbox", "/attention", "/tasks",
+    "/agents", "/roster", "/settings", "/preferences",
+))
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # ── Image attachments (Phase-1 prototype) ──
 ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
@@ -2457,7 +2461,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self._resolved_channel = None
         parsed = urlparse(self.path)
         path = parsed.path
-        if path == "/" or path == "/index.html":
+        if path in UI_PATHS:
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
             self._serve_html(INDEX_HTML, set_cookie_token=token if is_new else None)

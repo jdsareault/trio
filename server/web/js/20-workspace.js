@@ -206,6 +206,11 @@
     }
     pile.classList.toggle('hidden', !members.length);
   }
+  function navigateView(view) {
+    const route = { home: 'home', attention: 'attention', tasks: 'tasks', roster: 'roster', prefs: 'prefs' }[view] || 'home';
+    if (Trio.router?.navigate) Trio.router.navigate(route);
+    else showView(view);
+  }
   function navItem(label, icon, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
     button.innerHTML = `<span class="nav-hash">${icon === 'hash' ? '#' : navIcon(icon)}</span><span class="nav-label">${esc(label)}</span>${badge ? `<span class="nav-meta"><span class="badge">${esc(badge)}</span></span>` : ''}`;
@@ -235,11 +240,11 @@
     const nav = groupNavigation(state.channels || [], state.dms || {});
     rail.textContent = '';
     const workspaceItems = [
-      navItem('Home', 'home', () => { if (Trio.router?.navigate) Trio.router.navigate('home'); else showView('home'); }, '', state.view === 'home'),
-      navItem('Attention', 'attention', () => showView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
-      itemWithAdd(navItem('Agent roster', 'roster', () => showView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
-      navItem('Tasks', 'tasks', () => showView('tasks'), '', state.view === 'tasks'),
-      navItem('Preferences', 'settings', () => showView('prefs'), '', state.view === 'prefs'),
+      navItem('Home', 'home', () => navigateView('home'), '', state.view === 'home'),
+      navItem('Attention', 'attention', () => navigateView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
+      itemWithAdd(navItem('Agent roster', 'roster', () => navigateView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
+      navItem('Tasks', 'tasks', () => navigateView('tasks'), '', state.view === 'tasks'),
+      navItem('Preferences', 'settings', () => navigateView('prefs'), '', state.view === 'prefs'),
     ];
     const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code));
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
@@ -279,9 +284,9 @@
     intro.innerHTML = `<div class="greet">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc(operatorName)}.</div><div class="sub">Here’s what’s happening across your workspace.</div>`;
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
-      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.pendingQuestions()} questions`, action: () => showView('attention') },
+      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.pendingQuestions()} questions`, action: () => navigateView('attention') },
       { title: 'Messages for you', count: selectors.unreadDms() + selectors.unreadMentions(), subtitle: 'Unread & mentions', tone: 'accent', detail: `${selectors.unreadDms()} DMs · ${selectors.unreadMentions()} mentions`, action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
-      { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
+      { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => navigateView('tasks') },
     ];
     for (const { title, count, subtitle, tone, detail, action } of cards) {
       const card = document.createElement('button'); card.type = 'button'; card.className = 'hcard';
@@ -533,6 +538,10 @@
     }
     else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
     else if (route.name === 'home') showView('home');
+    else if (route.name === 'attention') showView('attention');
+    else if (route.name === 'tasks') showView('tasks');
+    else if (route.name === 'roster') showView('roster');
+    else if (route.name === 'prefs') showView('prefs');
   }
   async function refresh() {
     if (state.workspaceLoading) return;
@@ -653,7 +662,7 @@
     body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v">${state.messages?.size || 0}</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="end-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : 'End channel'}</button>` : ''}</div></section>`;
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
     $('channel-drawer-close')?.focus();
-    $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); showView('tasks'); });
+    $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });
     $('edit-channel-objective')?.addEventListener('click', () => toast('Objective editing is coming soon'));
     $('end-channel-drawer')?.addEventListener('click', () => { closeDetails(); if (dm) archiveCurrent(); else endCurrentChannel(); });
   }

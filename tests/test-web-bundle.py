@@ -25,6 +25,7 @@ check("served bundle: source JS inlined", 'data-trio-source="js/00-core.js"' in 
 check("served bundle: test hook excluded", "__TRIO_TEST__" not in served)
 check("module lists are ordered", web.WEB_JS_FILES[0] == "js/01-store.js" and web.WEB_JS_FILES[-2] == "js/90-boot.js")
 check("boot mounts the composer feature", "'composer'" in boot_source)
+check("deep-link page paths serve the app shell", {"/", "/inbox", "/tasks", "/agents", "/settings"}.issubset(web.UI_PATHS))
 try:
     web._read_web_source("../nth_web.py")
 except ValueError:
