@@ -2024,10 +2024,10 @@ class AgentIdleReaper(threading.Thread):
         self.sup = supervisor
         self.idle_seconds = max(0.0, idle_seconds)
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.wait(self.interval):
+        while not self._stop_event.wait(self.interval):
             try:
                 self.sup.reconcile()
             except Exception:
@@ -2061,7 +2061,7 @@ class AgentIdleReaper(threading.Thread):
         return slept
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 def build_mcp_config_for_hub() -> str:
@@ -2081,7 +2081,7 @@ class AgentRouter(threading.Thread):
         self.db_path = db_path
         self.sup = supervisor
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.last_id = 0
         # Wake+feed happens on a worker, NOT the poll loop — a cold-start wake
         # blocks for up to ~10s and must not stall message DETECTION across all
@@ -2100,7 +2100,7 @@ class AgentRouter(threading.Thread):
         db.row_factory = sqlite3.Row
         try:
             self.last_id = db.execute("SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
-            while not self._stop.wait(self.interval):
+            while not self._stop_event.wait(self.interval):
                 try:
                     self.tick(db)
                 except Exception as e:
@@ -2157,7 +2157,7 @@ class AgentRouter(threading.Thread):
                         f"[nth_web] AgentRouter queue full after 1s — dropping message for agent {aid}\n")
 
     def _worker_loop(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 aid, chan, text, attachments, source_message_id, source_sender = \
                     self._q.get(timeout=0.5)
@@ -2211,7 +2211,7 @@ class AgentRouter(threading.Thread):
         return out
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 def _gen_agent_id() -> str:
