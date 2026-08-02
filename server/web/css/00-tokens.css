@@ -98,13 +98,6 @@
   --ink:#262320; --ink-2:#58524a; --ink-3:#8a8378; --bubble-agent:#ffffff; --code-bg:#f2eee7; --code-ink:#8a5a2e;
   --accent:#b0632f; --accent-strong:#93501f; --accent-tint:#f3e4d5;
 }
-[data-theme="light-mist"] {
-  /* cool blue-gray whisper, teal accent */
-  --bg:#ecf0f0; --bg-sink:#e1e7e7; --surface:#f8fbfb; --surface-2:#fcfefe; --surface-hover:#eff3f3;
-  --sidebar:#eff3f3; --sidebar-hover:#f5f8f8; --line:#d4dede; --line-soft:#e2e9e9;
-  --ink:#202b2b; --ink-2:#4f6362; --ink-3:#7f918f; --bubble-agent:#ffffff; --code-bg:#eaf2f1; --code-ink:#2c7a74;
-  --accent:#2b7f78; --accent-strong:#1f6660; --accent-tint:#e0efee;
-}
 [data-theme="light-dune"] {
   /* warm sand whisper, plum accent */
   --bg:#f2ede2; --bg-sink:#e8e1d2; --surface:#fbf9f3; --surface-2:#fdfcf9; --surface-hover:#f5f1e7;
@@ -125,13 +118,6 @@
   --sidebar:#eff2f5; --sidebar-hover:#f5f7f9; --line:#dde3e9; --line-soft:#e8edf2;
   --ink:#1a222b; --ink-2:#4a5662; --ink-3:#7a8692; --bubble-agent:#ffffff; --code-bg:#eff3f6; --code-ink:#2c7ab8;
   --accent:#2c8fd6; --accent-strong:#1f74b8; --accent-tint:#dcebf7;
-}
-[data-theme="light-sage"] {
-  /* near-white, barely green, forest green accent */
-  --bg:#f5f7f4; --bg-sink:#ecefec; --surface:#fcfdfb; --surface-2:#fefefe; --surface-hover:#eff2ed;
-  --sidebar:#eff2ed; --sidebar-hover:#f5f7f4; --line:#dde3da; --line-soft:#e8ede5;
-  --ink:#1c2418; --ink-2:#4a5640; --ink-3:#788470; --bubble-agent:#ffffff; --code-bg:#eff3ec; --code-ink:#3a7a2c;
-  --accent:#3a8a4a; --accent-strong:#2c7038; --accent-tint:#dcebe0;
 }
 
 /* ---- DARK presets ----
@@ -175,13 +161,6 @@
   --ink:#e9eff2; --ink-2:#b9c7cd; --ink-3:#85959d; --bubble-agent:#2e3841; --code-bg:#1e252b; --code-ink:#7fd0c9;
   --accent:#4fb3ac; --accent-strong:#6ec4bd; --accent-tint:#1f322f;
 }
-[data-theme="dark-obsidian"] {
-  /* warm near-black, rose accent */
-  --bg:#161318; --bg-sink:#100d12; --surface:#221e26; --surface-2:#2b2630; --surface-hover:#322d38;
-  --sidebar:#1b1720; --sidebar-hover:#322d38; --line:#3a3441; --line-soft:#2d2832;
-  --ink:#f0edf1; --ink-2:#c2bcc6; --ink-3:#8d8693; --bubble-agent:#2b2630; --code-bg:#1a1620; --code-ink:#e8a0a8;
-  --accent:#e8767a; --accent-strong:#f08a8e; --accent-tint:#3a2228;
-}
 [data-theme="dark-carbon"] {
   /* true near-black, clean blue accent (GitHub Dark / VS Code family) */
   --bg:#0d0d0f; --bg-sink:#08080a; --surface:#161618; --surface-2:#1d1d20; --surface-hover:#242427;
@@ -203,10 +182,4 @@
   --ink:#e8eaee; --ink-2:#b0b6c0; --ink-3:#767d88; --bubble-agent:#22262c; --code-bg:#16191d; --code-ink:#56d4e0;
   --accent:#3dd0e0; --accent-strong:#5fdcec; --accent-tint:#103038;
 }
-[data-theme="dark-ember"] {
-  /* near-black, barely warm, orange accent */
-  --bg:#131210; --bg-sink:#0e0d0b; --surface:#1d1b18; --surface-2:#252320; --surface-hover:#2c2a26;
-  --sidebar:#181614; --sidebar-hover:#2c2a26; --line:#2e2a25; --line-soft:#242120;
-  --ink:#eeeae5; --ink-2:#c0b8ad; --ink-3:#7e7669; --bubble-agent:#252320; --code-bg:#191714; --code-ink:#f0a050;
-  --accent:#f0893c; --accent-strong:#f59f5a; --accent-tint:#3a2418;
-}
+
