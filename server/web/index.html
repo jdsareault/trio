@@ -39,6 +39,10 @@
   <div class="sr-only" id="trio-aria-live" aria-live="polite" aria-atomic="true"></div>
   <div class="toast-wrap" id="trio-toasts"></div>
   <div class="channel-menu" id="channel-menu" role="menu" aria-label="Channel actions" hidden></div>
+  <aside class="channel-drawer" id="channel-drawer" role="dialog" aria-labelledby="channel-drawer-title" aria-hidden="true">
+    <header class="channel-drawer-head"><h2 id="channel-drawer-title">Channel details</h2><button class="icon-btn" id="channel-drawer-close" type="button" aria-label="Close channel details" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+    <div class="channel-drawer-body" id="channel-drawer-body"></div>
+  </aside>
   <aside class="agent-drawer" id="trio-agents" hidden></aside>
   <dialog id="trio-control-modal"></dialog>
   <dialog id="trio-preferences"></dialog>

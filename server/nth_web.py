@@ -3222,6 +3222,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
             for r in rows:
                 last_at = r["last_at"]
                 preview = ""
+                topic = ""
+                if r["pinned_message_id"] is not None:
+                    pinned = db.execute(
+                        "SELECT content FROM messages WHERE id = ?",
+                        (r["pinned_message_id"],),
+                    ).fetchone()
+                    if pinned is not None:
+                        topic = (pinned["content"] or "").strip()
+                        if topic.startswith("[channel created]"):
+                            topic = topic[len("[channel created]"):].strip()
                 if last_at is not None:
                     prow = db.execute(
                         "SELECT member_name, content FROM messages "
@@ -3235,6 +3245,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 channels.append({
                     "code": r["code"],
                     "status": r["status"],
+                    "topic": topic,
                     "members": r["members"],
                     "last_at": last_at,
                     "preview": preview,
