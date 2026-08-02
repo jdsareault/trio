@@ -91,6 +91,11 @@ check('DM send payload includes the conversation recipients, not just a single t
   delete H.Trio.state.dmKey;
   delete H.Trio.state.dmMemberIds;
 });
+check('dictation control disables itself when no speech engine is available', () => {
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(button.disabled, true);
+  assert.strictEqual(button.title, 'Dictation is unavailable in this browser');
+});
 check('task filters default to open and all shows every row', () => {
   H.Trio.state.tasks = [{ id: 1, message: 'Open task', status: 'open' }, { id: 2, message: 'Claimed task', status: 'claimed' }];
   H.Trio.workspace.showView('tasks');
