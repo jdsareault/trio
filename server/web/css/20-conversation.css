@@ -13,9 +13,9 @@
 .message-head time { margin-left:auto; white-space:nowrap; }
 .message-id { display:none; }
 body.message-numbers .message-id { display:inline; }
-.message-controls { display:flex; gap:6px; margin-top:6px; }
-.message-controls button { padding:3px 8px; border:0; border-radius:6px; background:var(--bg-sink); color:var(--ink-3); font-size:11px; cursor:pointer; }
-.message-controls button:hover { background:var(--surface-hover); color:var(--ink); }
+.message-actions-menu { display:flex; gap:6px; justify-content:flex-end; margin-top:6px; }
+.message-actions-menu button { padding:4px 10px; border:0; border-radius:999px; background:var(--bg-sink); color:var(--ink-3); font-size:11px; cursor:pointer; }
+.message-actions-menu button:hover { background:var(--surface-hover); color:var(--ink); }
 .message-body { overflow-wrap:anywhere; line-height:1.55; }
 .message-body p:first-child { margin-top:0; }.message-body p:last-child { margin-bottom:0; }
 .message-body pre,.message-body code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code-bg); color:var(--code-ink); border-radius:6px; }.message-body pre { overflow:auto; padding:10px; }

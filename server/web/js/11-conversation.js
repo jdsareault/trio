@@ -13,6 +13,7 @@
   state.scrollPositions = state.scrollPositions || {};
   state.lastSeenId = state.lastSeenId || 0;
   state.jumpUnread = state.jumpUnread || 0;
+  state.activeMessageActions = state.activeMessageActions || null;
 
   function member(id) { return state.members.get(id) || {}; }
   function nameFor(id, fallback) { return member(id).name || fallback || id || 'unknown'; }
@@ -238,6 +239,53 @@
     });
   }
 
+  function closeMessageActions() {
+    const menu = state.activeMessageActions;
+    if (!menu) return;
+    menu.classList.add('hidden');
+    state.activeMessageActions = null;
+  }
+  function interactiveMessageTarget(target) {
+    return !!target?.closest?.('a,button,input,textarea,select,fieldset');
+  }
+  function showMessageActions(card, content, msg, body) {
+    if (!isOwn(msg) || msg.retracted_at || state.readOnly) return;
+    closeMessageActions();
+    let menu = content.querySelector('.message-actions-menu');
+    if (!menu) {
+      menu = document.createElement('div'); menu.className = 'message-actions-menu hidden';
+      for (const [label, fn] of [['Edit', () => edit(msg, body)], ['Delete', () => retract(msg)]]) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+        button.addEventListener('click', () => { closeMessageActions(); fn(); });
+        menu.append(button);
+      }
+      content.append(menu);
+    }
+    menu.classList.remove('hidden');
+    state.activeMessageActions = menu;
+  }
+  function bindMessageActions(card, content, msg, body) {
+    let pressTimer = null;
+    const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+    const startPress = event => {
+      if (event.isPrimary === false || (event.button != null && event.button !== 0) || interactiveMessageTarget(event.target)) return;
+      clearPress();
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        showMessageActions(card, content, msg, body);
+      }, 500);
+    };
+    card.addEventListener('pointerdown', startPress);
+    card.addEventListener('pointerup', clearPress);
+    card.addEventListener('pointercancel', clearPress);
+    card.addEventListener('pointerleave', clearPress);
+    card.addEventListener('contextmenu', event => {
+      if (interactiveMessageTarget(event.target)) return;
+      event.preventDefault(); clearPress();
+      showMessageActions(card, content, msg, body);
+    });
+  }
+
   function showLightbox(url, alt) {
     let dialog = document.getElementById('trio-lightbox');
     if (!dialog) { dialog = document.createElement('dialog'); dialog.id = 'trio-lightbox'; dialog.className = 'lightbox'; document.body.append(dialog); }
@@ -294,14 +342,7 @@
       if (attachments.children.length) content.append(attachments);
     }
     const ask = askCard(msg); if (ask) content.append(ask);
-    if (isOwn(msg) && !msg.retracted_at && !state.readOnly) {
-      const controls = document.createElement('div'); controls.className = 'message-controls';
-      for (const [label, fn] of [['edit', () => edit(msg, body)], ['delete', () => retract(msg)]]) {
-        const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
-        button.addEventListener('click', () => fn()); controls.append(button);
-      }
-      content.append(controls);
-    }
+    if (isOwn(msg) && !msg.retracted_at && !state.readOnly) bindMessageActions(card, content, msg, body);
     card.append(avatar, content);
     return card;
   }
