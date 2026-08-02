@@ -187,6 +187,21 @@ check('agent compaction status outranks the ordinary live state', () => {
   assert.strictEqual(vm.compacting, true);
   assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['stop', 'delete']);
 });
+check('clicking a roster tile opens that agent’s management dialog', () => {
+  const originalModal = H.Trio.ui.modal;
+  let opened = null;
+  H.Trio.ui.modal = (title, body) => { opened = { title, body }; };
+  H.Trio.store.set('agents.list', [{ id: 'ag_tile', name: 'Tile Agent', live: true, busy: false, state: 'idle' }]);
+  const panel = new FakeElement('section');
+  H.Trio.agents.renderPage(panel);
+  const card = panel.querySelector('.agent-card');
+  assert.ok(card);
+  card._listeners.click[0]({ target: card });
+  H.Trio.ui.modal = originalModal;
+  assert.ok(opened);
+  assert.strictEqual(opened.title, 'Manage agent: Tile Agent');
+  assert.ok(opened.body.includes('Compact context'));
+});
 check('agent model options normalize provider model records', () => {
   const models = H.Trio.agents.normalizeModels([
     { id: 'sonnet', name: 'Claude Sonnet' },

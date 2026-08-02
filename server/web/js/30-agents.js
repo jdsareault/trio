@@ -120,19 +120,7 @@
     if (agent?.state === 'compacting') compactionPolls.set(id, setTimeout(poll, 1500));
   }
   function agentCard(vm) {
-    const article = document.createElement('article'); article.className = 'agent-card agent-card-openable' + (vm.needsAttention ? ' needs-attention' : '');
-    article.tabIndex = 0;
-    article.setAttribute('aria-label', 'Manage agent ' + vm.name);
-    const openDetails = event => {
-      if (event?.target?.closest?.('button')) return;
-      showDetail(vm);
-    };
-    article.addEventListener('click', openDetails);
-    article.addEventListener('keydown', event => {
-      if ((event.key === 'Enter' || event.key === ' ') && !event.target?.closest?.('button')) {
-        event.preventDefault(); showDetail(vm);
-      }
-    });
+    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '');
     article.innerHTML = `<b>${esc(vm.name)} ${esc(statusIcon(vm))}</b><small>${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''} · ${esc(vm.lifecycle)}</small><p>${esc((vm.placements || []).join(', ') || 'No public rooms')}</p>`;
     const row = document.createElement('div'); row.className = 'agent-actions';
     const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); row.append(detail);
@@ -155,7 +143,19 @@
     return true;
   }
   function directoryCard(vm) {
-    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '');
+    const article = document.createElement('article'); article.className = 'agent-card agent-card-openable' + (vm.needsAttention ? ' needs-attention' : '');
+    article.tabIndex = 0;
+    article.setAttribute('aria-label', 'Manage agent ' + vm.name);
+    const openDetails = event => {
+      if (event?.target?.closest?.('button')) return;
+      showDetail(vm);
+    };
+    article.addEventListener('click', openDetails);
+    article.addEventListener('keydown', event => {
+      if ((event.key === 'Enter' || event.key === ' ') && !event.target?.closest?.('button')) {
+        event.preventDefault(); showDetail(vm);
+      }
+    });
     const initials = (vm.name || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     const tone = vm.needsAttention ? 'var(--danger)' : vm.busy ? 'var(--warn)' : vm.live ? 'var(--ok)' : 'var(--accent)';
     article.style.setProperty('--card-accent', tone);
