@@ -173,15 +173,18 @@
     const rail = $('workspace-rail'); if (!rail) return;
     const nav = groupNavigation(state.channels || [], state.dms || {});
     rail.textContent = '';
-    const controls = document.createElement('section'); controls.className = 'nav-section nav-views';
-    [['Home', 'home'], ['Attention', 'attention'], ['Tasks', 'tasks']].forEach(([label, icon]) => { const view = icon; controls.append(navItem(label, icon, () => showView(view), view === 'attention' ? String(selectors.attention() || '') : '', state.view === view)); });
+    const workspaceItems = [
+      navItem('Home', 'home', () => showView('home'), '', state.view === 'home'),
+      navItem('Attention', 'attention', () => showView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
+      navItem('Agent roster', 'roster', () => showView('roster'), '', state.view === 'roster'),
+      navItem('Preferences', 'settings', () => showView('prefs'), '', state.view === 'prefs'),
+    ];
     const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code));
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
-    rail.append(controls, section('Channels', channelItems, true));
-    if (nav.agentAudit.length) rail.append(section('Agent ↔ Agent · audit', nav.agentAudit.map(d => dmItem(d, true))));
-    if (nav.yours.length) rail.append(section('Direct messages', nav.yours.map(d => dmItem(d))));
-    const actions = section('Workspace', [navItem('Agent roster', 'roster', () => showView('roster')), navItem('Settings & diagnostics', 'settings', () => showView('prefs'))]);
-    const newAgent = navItem('New agent', 'plus', () => Trio.agents?.create?.()); newAgent.classList.add('new-agent'); actions.append(newAgent); rail.append(actions);
+    rail.append(section('Workspace', workspaceItems));
+    rail.append(section('Channels', channelItems, true));
+    if (nav.yours.length) rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d))));
+    if (nav.agentAudit.length) rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true))));
     const operator = state.operator || state.meta?.operator || {}; const opName = operator.name || 'Workspace'; const opAvatar = $('operator-avatar'); const opLabel = $('operator-name'); const opRole = $('operator-role');
     if (opAvatar) { opAvatar.textContent = initials(opName); opAvatar.className = 'operator-avatar tone-' + avatarTone(opName); }
     if (opLabel) opLabel.textContent = opName; if (opRole) opRole.textContent = operator.name ? 'Workspace owner' : 'Live agent coordination';
