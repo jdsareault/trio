@@ -3,25 +3,34 @@
   const Trio = window.Trio;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const KEY = 'trio.preferences.v1';
+  // Each preset pairs a background family with an accent that reads clearly
+  // against it (cool bg -> warm accent, warm bg -> cool accent) instead of
+  // leaving every theme stuck on whichever accent was picked last.
   const themes = [
-    { id: 'light-porcelain', mode: 'light', label: 'Porcelain' },
-    { id: 'light-meadow', mode: 'light', label: 'Meadow' },
-    { id: 'light-sand', mode: 'light', label: 'Sand' },
-    { id: 'light-lilac', mode: 'light', label: 'Lilac' },
-    { id: 'light-solar', mode: 'light', label: 'Solar' },
-    { id: 'dark-charcoal', mode: 'dark', label: 'Charcoal' },
-    { id: 'dark-midnight', mode: 'dark', label: 'Midnight' },
-    { id: 'dark-forest', mode: 'dark', label: 'Forest' },
-    { id: 'dark-plum', mode: 'dark', label: 'Plum' },
-    { id: 'dark-slate', mode: 'dark', label: 'Slate' },
+    { id: 'light-porcelain', mode: 'light', label: 'Porcelain', accent: 'eucalyptus' },
+    { id: 'light-meadow', mode: 'light', label: 'Meadow', accent: 'plum' },
+    { id: 'light-sand', mode: 'light', label: 'Sand', accent: 'indigo' },
+    { id: 'light-lilac', mode: 'light', label: 'Lilac', accent: 'eucalyptus' },
+    { id: 'light-solar', mode: 'light', label: 'Solar', accent: 'indigo' },
+    { id: 'dark-charcoal', mode: 'dark', label: 'Charcoal', accent: 'eucalyptus' },
+    { id: 'dark-midnight', mode: 'dark', label: 'Midnight', accent: 'plum' },
+    { id: 'dark-forest', mode: 'dark', label: 'Forest', accent: 'plum' },
+    { id: 'dark-plum', mode: 'dark', label: 'Plum', accent: 'eucalyptus' },
+    { id: 'dark-slate', mode: 'dark', label: 'Slate', accent: 'indigo' },
+  ];
+  const accents = [
+    { id: 'eucalyptus', label: 'Eucalyptus' },
+    { id: 'indigo', label: 'Indigo' },
+    { id: 'plum', label: 'Plum' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
-  const defaults = { theme: 'light-porcelain', lightTheme: 'light-porcelain', darkTheme: 'dark-charcoal', accent: 'eucalyptus', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, accent: ['eucalyptus','indigo','plum'], font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
+  const accentIds = accents.map(a => a.id);
+  const defaults = { theme: 'light-porcelain', lightTheme: 'light-porcelain', darkTheme: 'dark-charcoal', accent: 'eucalyptus', lightAccent: 'eucalyptus', darkAccent: 'eucalyptus', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, accent: accentIds, lightAccent: accentIds, darkAccent: accentIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
     if (Array.isArray(schema[key])) return schema[key].includes(value) ? value : defaults[key];
@@ -35,6 +44,12 @@
       if (legacyTheme) next.theme = legacyTheme;
       if (!raw.lightTheme) next.lightTheme = raw.theme && raw.theme.startsWith('light-') ? raw.theme : defaults.lightTheme;
       if (!raw.darkTheme) next.darkTheme = raw.theme && raw.theme.startsWith('dark-') ? raw.theme : defaults.darkTheme;
+      // Migrate prefs saved before per-theme accent pairing existed: give
+      // each mode the accent its preset was designed with, not a stale
+      // single global accent that may clash with the current theme.
+      if (!raw.lightAccent) next.lightAccent = (themes.find(t => t.id === next.lightTheme) || {}).accent || defaults.lightAccent;
+      if (!raw.darkAccent) next.darkAccent = (themes.find(t => t.id === next.darkTheme) || {}).accent || defaults.darkAccent;
+      if (!raw.accent) next.accent = next.theme && next.theme.startsWith('dark-') ? next.darkAccent : next.lightAccent;
       for (const k of Object.keys(schema)) next[k] = cast(k, next[k]);
       return next;
     } catch { return { ...defaults }; }
@@ -64,12 +79,22 @@
   function selectTheme(theme) {
     const selected = themes.find(option => option.id === theme);
     if (!selected) return read();
-    return save(selected.mode === 'light' ? { theme, lightTheme: theme } : { theme, darkTheme: theme });
+    return save(selected.mode === 'light'
+      ? { theme, lightTheme: theme, accent: selected.accent, lightAccent: selected.accent }
+      : { theme, darkTheme: theme, accent: selected.accent, darkAccent: selected.accent });
+  }
+  function selectAccent(accent) {
+    if (!accentIds.includes(accent)) return read();
+    const current = read();
+    const currentTheme = themes.find(theme => theme.id === current.theme);
+    return save(currentTheme?.mode === 'dark' ? { accent, darkAccent: accent } : { accent, lightAccent: accent });
   }
   function toggle() {
     const current = read();
     const currentTheme = themes.find(theme => theme.id === current.theme);
-    return save({ theme: currentTheme?.mode === 'dark' ? current.lightTheme : current.darkTheme });
+    return save(currentTheme?.mode === 'dark'
+      ? { theme: current.lightTheme, accent: current.lightAccent }
+      : { theme: current.darkTheme, accent: current.darkAccent });
   }
   function reset() {
     localStorage.removeItem(KEY);
@@ -86,19 +111,6 @@
     try { const h = await Trio.api.get('/api/stt/health'); Trio.state.sttHealth = h && h.ok ? 'ready' : 'unavailable'; }
     catch { Trio.state.sttHealth = 'unavailable'; }
   }
-  async function panel() {
-    let n = document.getElementById('trio-preferences');
-    if (!n) { n = document.createElement('dialog'); n.id = 'trio-preferences'; document.body.append(n); }
-    Trio.ui.configureDialog(n);
-    const p = read();
-    const rows = Object.entries(diagnostics()).map(([k, v]) => `<div class="diagnostic-row"><b>${esc(k)}</b><span id="diag-${esc(k)}">${esc(v)}</span></div>`).join('');
-    const themeOptions = group => group.map(theme => `<option value="${theme.id}">${theme.label}</option>`).join('');
-    n.innerHTML = `<form method="dialog" class="control-modal"><button type="submit" formnovalidate class="modal-close">×</button><h2>Settings & diagnostics</h2><label>Default light theme <select data-key="lightTheme">${themeOptions(lightThemes)}</select></label><label>Default dark theme <select data-key="darkTheme">${themeOptions(darkThemes)}</select></label><label>Accent <select data-key="accent"><option>eucalyptus</option><option>indigo</option><option>plum</option></select></label><label>Font <select data-key="font"><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label>${['compact','messageNumbers','notifications','chime','dictation'].map(k=>`<label><input type="checkbox" data-key="${k}" ${p[k]?'checked':''}> ${k.replace(/([A-Z])/g,' $1').toLowerCase()}</label>`).join('')}<div class="diagnostics-list">${rows}</div><button type="button" class="reset-prefs">Reset to defaults</button></form>`;
-    n.querySelectorAll('[data-key]:not([disabled])').forEach(el => { if (el.type === 'checkbox') el.checked = !!p[el.dataset.key]; else el.value = p[el.dataset.key]; el.onchange = () => { const value = el.type === 'checkbox' ? el.checked : el.value; if (el.dataset.key === 'lightTheme' || el.dataset.key === 'darkTheme') save({ [el.dataset.key]: value, theme: value }); else save({ [el.dataset.key]: value }); }; });
-    n.querySelector('.reset-prefs')?.addEventListener('click', () => { reset(); panel(); });
-    n.showModal();
-    checkStt().then(() => { const v = document.getElementById('diag-stt'); if (v) v.textContent = Trio.state.sttHealth; });
-  }
   function renderPage(panel) {
     panel.replaceChildren();
     const p = read();
@@ -110,10 +122,21 @@
       const group = document.createElement('div'); group.className = 'theme-choice-group';
       group.innerHTML = `<div class="theme-group-label">${label}</div>`;
       const choices = document.createElement('div'); choices.className = 'theme-choice';
-      options.forEach(option => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p[key] === option.id ? ' on' : ''); b.setAttribute('aria-pressed', p[key] === option.id ? 'true' : 'false'); b.innerHTML = `<span class="swatch ${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
+      options.forEach(option => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p[key] === option.id ? ' on' : ''); b.setAttribute('aria-pressed', p[key] === option.id ? 'true' : 'false'); b.innerHTML = `<span class="swatch" data-theme="${option.id}" data-accent="${option.accent}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
       group.append(choices); themeChoices.append(group);
     });
     themeRow.append(themeChoices); appearance.append(themeRow);
+    const currentMode = (themes.find(theme => theme.id === p.theme) || {}).mode === 'dark' ? 'dark' : 'light';
+    const accentRow = document.createElement('div'); accentRow.className = 'pref-row pref-row-accent'; accentRow.innerHTML = '<div class="pr-txt"><div class="l">Accent</div><div class="d">Overrides the accent that the current theme preset picked for you.</div></div>';
+    const accentDots = document.createElement('div'); accentDots.className = 'accent-dots';
+    accents.forEach(a => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'accent-dot' + (p.accent === a.id ? ' on' : ''); b.setAttribute('aria-pressed', p.accent === a.id ? 'true' : 'false'); b.setAttribute('aria-label', a.label); b.title = a.label;
+      b.dataset.accent = a.id; if (currentMode === 'dark') b.dataset.theme = 'dark';
+      b.innerHTML = '<span class="in"></span>';
+      b.addEventListener('click', () => { selectAccent(a.id); renderPage(panel); });
+      accentDots.append(b);
+    });
+    accentRow.append(accentDots); appearance.append(accentRow);
     const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
     const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Notify me when an agent mentions me or finishes a task.'],['chime','Notification chime','Play a short sound with desktop notifications.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
     behaviors.forEach(([key,label,description]) => { const row = document.createElement('div'); row.className = 'pref-row'; const text = document.createElement('div'); text.className = 'pr-txt'; text.innerHTML = `<div class="l">${esc(label)}</div><div class="d">${esc(description)}</div>`; const toggle = document.createElement('label'); toggle.className = 'switch'; toggle.innerHTML = `<input type="checkbox" ${p[key] ? 'checked' : ''} aria-label="${esc(label)}"><span class="track"></span><span class="knob"></span>`; toggle.querySelector('input').addEventListener('change', event => save({[key]:event.target.checked})); row.append(text, toggle); behavior.append(row); });
@@ -125,5 +148,5 @@
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, panel, renderPage, themes, lightThemes, darkThemes };
+  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, selectAccent, toggle, reset, read, diagnostics, renderPage, themes, lightThemes, darkThemes, accents };
 })();
