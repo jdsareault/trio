@@ -3,14 +3,42 @@
   const Trio = window.Trio;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const KEY = 'trio.preferences.v1';
-  const defaults = { theme: 'light', accent: 'eucalyptus', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
-  const schema = { theme: ['light','dark'], accent: ['eucalyptus','indigo','plum'], font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
+  const themes = [
+    { id: 'light-porcelain', mode: 'light', label: 'Porcelain' },
+    { id: 'light-meadow', mode: 'light', label: 'Meadow' },
+    { id: 'light-sand', mode: 'light', label: 'Sand' },
+    { id: 'light-lilac', mode: 'light', label: 'Lilac' },
+    { id: 'light-solar', mode: 'light', label: 'Solar' },
+    { id: 'dark-charcoal', mode: 'dark', label: 'Charcoal' },
+    { id: 'dark-midnight', mode: 'dark', label: 'Midnight' },
+    { id: 'dark-forest', mode: 'dark', label: 'Forest' },
+    { id: 'dark-plum', mode: 'dark', label: 'Plum' },
+    { id: 'dark-slate', mode: 'dark', label: 'Slate' },
+  ];
+  const lightThemes = themes.filter(theme => theme.mode === 'light');
+  const darkThemes = themes.filter(theme => theme.mode === 'dark');
+  const themeIds = themes.map(theme => theme.id);
+  const lightThemeIds = lightThemes.map(theme => theme.id);
+  const darkThemeIds = darkThemes.map(theme => theme.id);
+  const defaults = { theme: 'light-porcelain', lightTheme: 'light-porcelain', darkTheme: 'dark-charcoal', accent: 'eucalyptus', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, accent: ['eucalyptus','indigo','plum'], font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
     if (Array.isArray(schema[key])) return schema[key].includes(value) ? value : defaults[key];
     return value ?? defaults[key];
   }
-  function readFromStorage() { try { const raw = JSON.parse(localStorage.getItem(KEY) || '{}'); const next = {}; for (const k of Object.keys(schema)) next[k] = cast(k, raw[k]); return { ...defaults, ...next }; } catch { return { ...defaults }; } }
+  function readFromStorage() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
+      const legacyTheme = raw.theme === 'dark' ? defaults.darkTheme : raw.theme === 'light' ? defaults.lightTheme : null;
+      const next = { ...defaults, ...raw };
+      if (legacyTheme) next.theme = legacyTheme;
+      if (!raw.lightTheme) next.lightTheme = raw.theme && raw.theme.startsWith('light-') ? raw.theme : defaults.lightTheme;
+      if (!raw.darkTheme) next.darkTheme = raw.theme && raw.theme.startsWith('dark-') ? raw.theme : defaults.darkTheme;
+      for (const k of Object.keys(schema)) next[k] = cast(k, next[k]);
+      return next;
+    } catch { return { ...defaults }; }
+  }
   function read() { return Trio.store ? Trio.store.get('preferences') : (Trio.state.preferences || readFromStorage()); }
   function requestNotifications() { if (typeof Notification !== 'undefined' && Notification.permission === 'default') { Notification.requestPermission().then(p => { if (p !== 'granted') save({ notifications: false }); }); } }
   function apply(next = readFromStorage()) {
@@ -32,6 +60,16 @@
     apply(next);
     Trio.events.dispatchEvent(new CustomEvent('preferences:changed', { detail: next }));
     return next;
+  }
+  function selectTheme(theme) {
+    const selected = themes.find(option => option.id === theme);
+    if (!selected) return read();
+    return save(selected.mode === 'light' ? { theme, lightTheme: theme } : { theme, darkTheme: theme });
+  }
+  function toggle() {
+    const current = read();
+    const currentTheme = themes.find(theme => theme.id === current.theme);
+    return save({ theme: currentTheme?.mode === 'dark' ? current.lightTheme : current.darkTheme });
   }
   function reset() { localStorage.removeItem(KEY); const next = { ...defaults }; apply(next); return next; }
   function diagnostics() { const note = typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'; return { online: navigator.onLine ? 'yes' : 'no', channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length, notifications: note, stt: Trio.state.sttHealth || 'checking' }; }
@@ -72,5 +110,5 @@
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, reset, read, diagnostics, panel, renderPage };
+  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, panel, renderPage, themes, lightThemes, darkThemes };
 })();

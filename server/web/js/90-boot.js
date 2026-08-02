@@ -16,11 +16,7 @@
     nav?.addEventListener('click', () => { app?.classList.add('nav-open'); if (scrim) scrim.hidden = false; });
     scrim?.addEventListener('click', closeNav);
     const themeToggle = document.getElementById('theme-toggle');
-    themeToggle?.addEventListener('click', () => {
-      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-      document.documentElement.dataset.theme = next;
-      Trio.preferences?.save?.({ theme: next });
-    });
+    themeToggle?.addEventListener('click', () => Trio.preferences?.toggle?.());
     ['search-btn', 'details-btn'].forEach(id => { const btn = document.getElementById(id); if (btn) { btn.disabled = false; btn.title = id === 'search-btn' ? 'Search (Ctrl/Cmd+K)' : 'Conversation details'; } });
     const archiveBtn = document.getElementById('archive-btn');
     archiveBtn?.addEventListener('click', () => Trio.workspace?.archiveCurrent?.());
