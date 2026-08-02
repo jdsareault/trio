@@ -61,13 +61,13 @@ check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' },
 check('selector unread dms', s.unreadDms({ dms: { your_dms: [{ unread: 3 }, { unread: 0 }, {} ] } }) === 3);
 check('selector recent channels', s.recentChannels({ channels: [{ code: 'x' }, { code: 'y', archived: true }, { code: 'z' }] }).length === 2);
 
-base.Trio.preferences.selectTheme('light-lilac');
+base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
-check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-lilac' && base.Trio.preferences.read().theme === 'light-lilac');
+check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');
 base.Trio.preferences.selectTheme('dark-midnight');
 check('selecting a dark preset saves it as the dark default', base.Trio.preferences.read().darkTheme === 'dark-midnight' && base.Trio.preferences.read().theme === 'dark-midnight');
 base.Trio.preferences.toggle();
-check('theme toggle returns to the saved light preset', base.Trio.preferences.read().theme === 'light-lilac');
+check('theme toggle returns to the saved light preset', base.Trio.preferences.read().theme === 'light-mist');
 
 base.Trio.state.dms = { targets: [{ id: 'z', name: 'Zed' }, { id: 'a', name: 'Ada' }] };
 check('direct-message targets are sorted by display name', base.Trio.workspace.dmTargets().map(target => target.id).join(',') === 'a,z');

@@ -380,20 +380,13 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 }
 .theme-opt:hover{ border-color:var(--accent); }
 .theme-opt.on{ border-color:var(--accent); box-shadow:0 0 0 3px var(--focus); }
-/* Swatches carry their own data-theme/data-accent so they pull the *real*
-   tokens via the cascade above — the preview can never drift from the
-   theme it's previewing. */
+/* Swatches carry their own data-theme so they pull the *real* tokens via
+   the cascade above — the preview can never drift from the theme it's
+   previewing. */
 .theme-opt .swatch{ height:36px; border-radius:8px; margin-bottom:8px; display:flex; overflow:hidden; box-shadow:var(--shadow-sm); background:var(--bg); }
 .theme-opt .swatch .a{ flex:2; background:var(--surface); }
 .theme-opt .swatch .b{ flex:1; background:var(--accent); }
 .theme-opt .tl{ font-weight:600; font-size:13px; }
-
-.accent-dots{ display:flex; gap:10px; }
-.accent-dot{ width:34px; height:34px; border-radius:50%; border:3px solid transparent; transition:transform .14s var(--ease-soft); position:relative; background:none; }
-.accent-dot:hover{ transform:scale(1.08); }
-.accent-dot.on{ border-color:var(--ink-3); }
-.accent-dot .in{ position:absolute; inset:3px; border-radius:50%; background:var(--accent); }
-.accent-dot.on .in{ box-shadow:inset 0 0 0 2px var(--surface); }
 
 /* ============================================================
    modal

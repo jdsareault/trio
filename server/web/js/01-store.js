@@ -11,7 +11,7 @@
     agents: { list: [], selected: null, loading: false },
     tasks: { filter: 'open', list: [] },
     attention: { list: [] },
-    preferences: { theme: 'light-porcelain', lightTheme: 'light-porcelain', darkTheme: 'dark-charcoal', accent: 'eucalyptus', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true },
+    preferences: { theme: 'light-bone', lightTheme: 'light-bone', darkTheme: 'dark-graphite', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true },
   };
   const state = Trio.state = Trio.state || initial;
   const subs = new Map();
