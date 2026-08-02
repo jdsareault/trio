@@ -16,6 +16,7 @@ def check(name, cond):
 
 
 served = web.INDEX_HTML
+boot_source = web._read_web_source("js/90-boot.js")
 check("served bundle: still a complete page", served.rstrip().endswith("</html>"))
 check("served bundle: template placeholders substituted", "__TRIO_" not in served)
 check("served bundle: Atrium shell present", 'class="app"' in served and 'id="workspace-rail"' in served)
@@ -23,6 +24,7 @@ check("served bundle: source CSS inlined", 'data-trio-source="css/00-tokens.css"
 check("served bundle: source JS inlined", 'data-trio-source="js/00-core.js"' in served)
 check("served bundle: test hook excluded", "__TRIO_TEST__" not in served)
 check("module lists are ordered", web.WEB_JS_FILES[0] == "js/01-store.js" and web.WEB_JS_FILES[-2] == "js/90-boot.js")
+check("boot mounts the composer feature", "'composer'" in boot_source)
 try:
     web._read_web_source("../nth_web.py")
 except ValueError:
