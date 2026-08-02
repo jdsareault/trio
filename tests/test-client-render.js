@@ -55,6 +55,16 @@ check('private state derives from the server recipients field', () => {
   assert.strictEqual(H.isPrivate({ recipients: ['ag_1'] }), true);
   assert.strictEqual(H.isPrivate({ recipients: [] }), false);
 });
+check('agent audit history accepts messages without the operator', () => {
+  H.Trio.state.dmKey = 'ag_1,ag_2';
+  H.Trio.state.dmAudit = true;
+  H.Trio.state.dmMemberIds = ['ag_1', 'ag_2'];
+  H.upsert({ id: 101, member_id: 'ag_1', recipients: ['ag_2'], content: 'agent-only' });
+  assert.strictEqual(H.Trio.state.messages.get(101).content, 'agent-only');
+  delete H.Trio.state.dmKey;
+  delete H.Trio.state.dmAudit;
+  delete H.Trio.state.dmMemberIds;
+});
 check('composer send payload keeps integer attachment ids and channel targets', () => {
   H.state.selectedTargets = new Set(['ag_1']);
   H.state.pendingAttachments = [{ id: 4 }, { id: 'bad' }, { id: 8 }];

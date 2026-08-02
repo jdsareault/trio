@@ -4,6 +4,7 @@
   const initial = {
     route: { name: 'home', params: {}, title: 'Atrium', subtitle: '' },
     session: { operator: null, token: '', channel: '', dmKey: '', dmName: '', dmMemberIds: [], readOnly: false, focused: true },
+    dmAudit: false,
     workspace: { channels: [], dms: { your_dms: [], agent_dms: [] }, meta: {}, approvals: [], tasks: [], attention: 0 },
     conversation: { messages: new Map(), messageDomById: new Map(), members: new Map(), answers: new Map(), loading: false, error: '', dm: null, scroll: 0 },
     composer: { selectedTargets: new Set(), pendingAttachments: [], reply: null, draft: '', sttMode: 'local', recording: false, disabled: false },

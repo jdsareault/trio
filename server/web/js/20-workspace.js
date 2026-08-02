@@ -58,11 +58,12 @@
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
     loadConversation(code, 'trio#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
   }
-  function loadConversation(channel, title, subtitle, readOnly = false, isDm = false) {
+  function loadConversation(channel, title, subtitle, readOnly = false, isDm = false, isAudit = false) {
     if (Trio.store) Trio.store.set('session.channel', channel);
     state.view = 'conversation';
     showConversationPage();
     state.readOnly = !!readOnly;
+    state.dmAudit = !!isAudit;
     state.dmKey = isDm ? (state.dmKey || '') : '';
     state.dmLoading = false;
     state.dmError = '';
@@ -72,7 +73,7 @@
     document.getElementById('h-channel').textContent = title;
     document.getElementById('h-meta').textContent = subtitle;
     const banner = document.getElementById('private-banner');
-    if (banner) { banner.classList.toggle('hidden', !isDm); banner.textContent = isDm ? (readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
+    if (banner) { banner.classList.toggle('hidden', !isDm); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
     Trio.conversation?.render?.();
     Trio.composer?.syncReadOnly?.();
@@ -85,7 +86,7 @@
     state.dmName = dm.name || dm.key;
     state.dmKey = dm.key;
     state.dmThread = dm;
-    loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, auditReadOnly ? 'Agent-to-agent audit' : readOnly ? 'Archived private conversation' : 'Private conversation', readOnly || auditReadOnly, true);
+    loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, auditReadOnly ? 'Agent-to-agent audit' : readOnly ? 'Archived private conversation' : 'Private conversation', readOnly || auditReadOnly, true, auditReadOnly);
     if (Trio.router?.navigate) Trio.router.navigate(auditReadOnly ? 'audit' : 'dm', { key: dm.key, ...(readOnly && !auditReadOnly ? { archived: true } : {}) });
     Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();

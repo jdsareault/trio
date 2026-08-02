@@ -335,12 +335,16 @@
   function upsert(msg) {
     if (!msg || msg.id == null) return;
     if (state.dmKey) {
-      const op = state.operator?.id;
       const recips = new Set([...(msg.recipients || []), msg.member_id].filter(Boolean));
-      if (!op || !recips.has(op)) return;
-      const others = [...recips].filter(id => id !== op);
       const expected = state.dmMemberIds || [];
-      if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
+      if (state.dmAudit) {
+        if (expected.length && (recips.size !== expected.length || [...recips].some(id => !expected.includes(id)))) return;
+      } else {
+        const op = state.operator?.id;
+        if (!op || !recips.has(op)) return;
+        const others = [...recips].filter(id => id !== op);
+        if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
+      }
     }
     const wasNear = nearBottom(dom()); const previous = state.messages.get(msg.id) || {};
     state.messages.set(msg.id, Object.assign({}, previous, msg));
