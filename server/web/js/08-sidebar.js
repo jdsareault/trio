@@ -12,11 +12,10 @@
   const SNAP_THRESHOLD = 200; // release below this → collapse
   const DEFAULTS = { width: 300, collapsed: false };
 
-  // Panel-with-chevron icons. Shown icon previews the action: collapse (chevron
-  // points left, into the narrow column) when expanded; expand (chevron right)
-  // when collapsed.
-  const COLLAPSE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14"/><path d="m15 9-3 3 3 3"/></svg>';
-  const EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14"/><path d="m12 9 3 3-3 3"/></svg>';
+  // Double-chevron icons — « collapses (points left, into the rail), » expands
+  // (points right, back out). Cleaner than the panel+chevron it replaced.
+  const COLLAPSE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m11 9-3 3 3 3M17 9l-3 3 3 3"/></svg>';
+  const EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m13 9 3 3-3 3M7 9l3 3-3 3"/></svg>';
 
   function read() {
     try {

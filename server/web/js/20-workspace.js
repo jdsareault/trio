@@ -214,6 +214,7 @@
   }
   function navItem(label, icon, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
+    button.setAttribute('data-tip', label);
     button.innerHTML = `<span class="nav-hash">${icon === 'hash' ? '#' : navIcon(icon)}</span><span class="nav-label">${esc(label)}</span>${badge ? `<span class="nav-meta"><span class="badge">${esc(badge)}</span></span>` : ''}`;
     button.addEventListener('click', onClick); return button;
   }
@@ -233,6 +234,7 @@
     const people = label.split(/\s*[↔·,]\s*/).filter(Boolean);
     const visual = audit && people.length > 1 ? `<span class="dm-pair">${avatar(people[0], avatarTone(people[0]))}${avatar(people[1], avatarTone(people[1]))}</span>` : avatar(people[0] || label, avatarTone(label), dm.unread ? 'online' : 'idle');
     const button = document.createElement('button'); button.type = 'button'; button.className = 'dm-item'; button.classList.toggle('active', state.view === 'conversation' && state.dmKey === dm.key);
+    button.setAttribute('data-tip', label);
     button.innerHTML = `${visual}<span class="dm-copy"><span class="dm-name">${esc(label)}</span></span>${dm.unread ? '<span class="unread-dot" aria-label="Unread"></span>' : ''}`;
     button.addEventListener('click', () => openDm(dm, false, audit)); return button;
   }
