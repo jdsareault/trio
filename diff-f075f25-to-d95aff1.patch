@@ -1,0 +1,1218 @@
+diff --git a/ATRIUM-UI-REFACTOR-PLAN.md b/ATRIUM-UI-REFACTOR-PLAN.md
+index 88b77ff..450f99e 100644
+--- a/ATRIUM-UI-REFACTOR-PLAN.md
++++ b/ATRIUM-UI-REFACTOR-PLAN.md
+@@ -593,36 +593,36 @@ Tasks are ordered within each phase. A task is complete only when its implementa
+   - Use the same selectors for rail badges, Home cards, and Attention tabs so counts cannot drift.
+   - Add fixture tests for zero, one, mixed, resolved, archived, and stale states.
+ 
+-- [x] **4.2 Build the Home summary.**
++- [ ] **4.2 Build the Home summary.**
+   - Implement greeting/summary, attention, active-agent, task, recent-channel, and runtime-health cards from real data.
+   - Make every card route to its filtered destination and retain a calm empty state when nothing needs action.
+   - Show partial-data and provider-unavailable states without failing the entire view.
+ 
+-- [x] **4.3 Define the Attention item model.**
++- [ ] **4.3 Define the Attention item model.**
+   - Normalize approvals, unanswered questions, agent errors/blocks, usage warnings, and lock conflicts into common identity, severity, source, timestamp, status, and action fields.
+   - Separate active and resolved/history items and define stable ordering/deduplication.
+ 
+-- [x] **4.4 Complete approval interaction.**
++- [ ] **4.4 Complete approval interaction.**
+   - Render risk/context details from the real approval payload.
+   - Support `accept`, `acceptForSession`, `decline`, and `cancel` only where valid; disable duplicate submissions and reconcile server conflicts.
+   - Move resolved items to history and update all counts without waiting for the 15-second refresh.
+ 
+-- [x] **4.5 Decide and implement the operator task contract.**
++- [ ] **4.5 Decide and implement the operator task contract.**
+   - Confirm whether humans may create, claim, release, complete, cancel, and edit dependencies from the UI.
+   - If yes, add authenticated HTTP handlers in `server/nth_web.py` that reuse task validation/transactions from `nth_server.py`; add authorization and conflict tests.
+   - If no, remove mutation affordances and label the board read-only.
+ 
+-- [x] **4.6 Build the task board.**
++- [ ] **4.6 Build the task board.**
+   - Render status chips, owner, blockers/dependencies, result, timestamps, and channel context.
+   - Implement All/Open/Claimed/Blocked/Done filters, stable counts, empty states, and the approved inline/detail actions.
+   - Route task-origin links back to the relevant channel/message.
+ 
+-- [x] **4.7 Replace interval-only refresh with store updates.**
++- [ ] **4.7 Replace interval-only refresh with store updates.**
+   - Route task, approval, agent, and message events into workspace selectors immediately.
+   - Retain a low-frequency reconciliation fetch for missed events and visibility resume.
+   - Ensure reconciliation never reopens resolved items or overwrites an optimistic pending state with older data.
+ 
+-- [~] **4.8 Add complete workspace states and tests.**
++- [ ] **4.8 Add complete workspace states and tests.**
+   - Implement skeleton/loading, all-clear, first-run, partial failure, stale, offline, forbidden, and retry states for Home/Attention/Tasks.
+   - Add DOM/browser tests for card routing, count agreement, approval success/conflict/failure, task filters/actions, and live updates while a view is open.
+ 
+@@ -633,51 +633,51 @@ Tasks are ordered within each phase. A task is complete only when its implementa
+ **Goal:** expose the mature backend without provider-specific clutter.  
+ **Prerequisite:** Phase 1 feature/store/dialog foundations and Phase 2/4 status/card components.
+ 
+-- [x] **5.1 Define a provider-neutral agent view model.**
++- [ ] **5.1 Define a provider-neutral agent view model.**
+   - Normalize durable identity, provider, model, effort, lifecycle state, busy/queue state, last activity, status text, placements, wake policy, cwd, permission profile, context/session data, and error.
+   - Define labels/icons and valid action capabilities for spawning, working, active, idle, sleeping, stopped, blocked, errored, stale, and external agents.
+ 
+-- [x] **5.2 Build the agent directory.**
++- [ ] **5.2 Build the agent directory.**
+   - Replace the fixed boot-time drawer with the prototype roster view.
+   - Add All/Active/Working/Resting/Needs attention filters, count, search, responsive cards, empty state, and keyboard card activation.
+   - Show status, provider/model, current work, last active, placements, and queued/unread indicators without exposing raw runtime noise.
+ 
+-- [x] **5.3 Build the agent detail drawer.**
++- [ ] **5.3 Build the agent detail drawer.**
+   - Show identity/bio, runtime configuration, listening mode, placements, current state/error, context/session information, and DM entry.
+   - Deep-link selected agent state so refresh/back closes or restores the drawer predictably.
+   - Load expensive activity only when its section opens.
+ 
+-- [x] **5.4 Render structured runtime activity.**
++- [ ] **5.4 Render structured runtime activity.**
+   - Map plans, commands/tools, diffs/files, approvals, warnings, errors, queue transitions, and usage to a typed timeline.
+   - Paginate/load more instead of truncating silently to 20 raw JSON lines.
+   - Keep operator-only authorization and avoid rendering raw unsafe tool input.
+ 
+-- [x] **5.5 Implement a lifecycle action matrix.**
++- [ ] **5.5 Implement a lifecycle action matrix.**
+   - Map stop, interrupt, wake, hibernate, compact, clear, and delete visibility/enabled state to lifecycle/provider capabilities.
+   - Add pending state, success reconciliation, provider-specific error copy, and duplicate-click protection.
+   - Require explicit confirmation for context-destructive clear and permanent delete; state exactly what is preserved or lost.
+ 
+-- [x] **5.6 Implement placement and wake-policy editing.**
++- [ ] **5.6 Implement placement and wake-policy editing.**
+   - Load public channels, prevent use of the hidden inbox, and support add/remove with rollback on failure.
+   - Explain `at`, `about`, and `all`; update cards/details immediately after success.
+   - Test zero-placement agents and removal from the currently viewed channel.
+ 
+-- [x] **5.7 Rebuild agent creation from discovery APIs.**
++- [ ] **5.7 Rebuild agent creation from discovery APIs.**
+   - Load `/api/health` and `/api/agent-models` before enabling create.
+   - Implement provider, model, effort/reasoning, name, role/prompt, working directory, permission profile, wake policy, placements, and color/avatar inputs where supported.
+   - Show provider-specific fields conditionally while preserving one shared form model.
+ 
+-- [x] **5.8 Add validation and spawn progress.**
++- [ ] **5.8 Add validation and spawn progress.**
+   - Validate required fields, names, cwd, provider readiness, model/effort combinations, permissions, and placements before POST.
+   - Show creating → starting runtime → connecting → ready stages from real response/state where possible; do not simulate success timers.
+   - Preserve form input on failure and offer retry/cancel without duplicate durable rows.
+ 
+-- [x] **5.9 Connect agent messaging.**
++- [ ] **5.9 Connect agent messaging.**
+   - Make every Message action open the agent's unified DM route, including zero-placement agents.
+   - After successful creation, offer/open the new DM without requiring a public placement.
+   - Test privacy, hidden-inbox suppression, and back navigation to the originating agent view.
+ 
+-- [x] **5.10 Add agent workflow coverage.**
++- [ ] **5.10 Add agent workflow coverage.**
+   - Extend deterministic tests for capability-state rendering, all lifecycle actions, placements, wake policies, provider discovery, invalid forms, spawn failure/retry, delete confirmation, and Message routing.
+   - Keep `tests/test-web-agents.py`, `tests/test-web-codex-agents.py`, supervisor/runtime suites, and mixed-provider routing green.
+ 
+@@ -688,47 +688,47 @@ Tasks are ordered within each phase. A task is complete only when its implementa
+ **Goal:** finish secondary workflows and remove placeholders.  
+ **Prerequisite:** primary routing, conversation, workspace, and agent flows are complete.
+ 
+-- [x] **6.1 Implement global search.**
++- [ ] **6.1 Implement global search.**
+   - Open from the header and `Cmd/Ctrl+K`; debounce/cancel requests to `/api/search`.
+   - Render query highlighting, channel/DM context, author/time, loading/empty/error states, and keyboard selection.
+   - Route a result to its conversation and target message, loading history around it if it is outside the current window.
+ 
+-- [x] **6.2 Define conversation-details data.**
++- [ ] **6.2 Define conversation-details data.**
+   - Add or compose a stable contract for objective/topic, status/archive state, members, task summary, message/activity stats, and allowed management actions.
+   - Avoid one request per member/task and preserve operator/guest authorization boundaries.
+ 
+-- [x] **6.3 Build the Details drawer and overflow menu.**
++- [ ] **6.3 Build the Details drawer and overflow menu.**
+   - Render members/status, objective, task summary, activity stats, notification state, and management actions.
+   - Implement archive/restore, end/leave where approved, and destructive confirmations.
+   - Support responsive full-width drawer behavior, focus return, Escape, and route changes.
+ 
+-- [x] **6.4 Complete archive navigation.**
++- [ ] **6.4 Complete archive navigation.**
+   - Separate archived channels and DMs, with search/filter if lists are nontrivial.
+   - Deep-link View into read-only history and preserve archive context on Back.
+   - Restore in place, update rail/archive counts immediately, and redirect an open restored conversation to its active route.
+   - Verify newer DMs automatically resurface and archived channels preserve tasks/membership/runtime state.
+ 
+-- [x] **6.5 Finalize the supported preference schema.**
++- [ ] **6.5 Finalize the supported preference schema.**
+   - List every preference, default, persistence key, affected component, and platform capability.
+   - Migrate/validate old `trio.preferences.v1` data and ignore unknown/corrupt values safely.
+   - Remove controls for rejected features and add reset-to-default behavior.
+ 
+-- [x] **6.6 Implement notifications, dictation settings, and diagnostics.**
++- [ ] **6.6 Implement notifications, dictation settings, and diagnostics.**
+   - Handle browser notification permission, scope/timing, and chime volume with clear unsupported/denied states.
+   - Choose local Whisper vs browser speech, expose `/api/stt/health`, add a real mic/transcription test, and stop media on close.
+   - Render structured app/database/Claude/Codex/STT/service diagnostics with copyable actionable errors rather than a JSON dump.
+ 
+-- [x] **6.7 Execute the responsive matrix.**
++- [ ] **6.7 Execute the responsive matrix.**
+   - Test every primary view, drawer, dialog, menu, composer, question card, code block, table, attachment, and long message at 1440, 1024, 768, and 390 CSS pixels.
+   - Fix overflow, safe areas, virtual keyboard behavior, touch targets, sticky elements, and nested scroll traps.
+   - Verify orientation change and browser zoom through 200%.
+ 
+-- [~] **6.8 Complete the accessibility audit.**
++- [ ] **6.8 Complete the accessibility audit.**
+   - Verify landmarks/headings, accessible names/descriptions, fieldsets, tab/tabpanel relationships, menus, dialogs, live status/toasts, and error associations.
+   - Test full keyboard flows and logical focus return for navigation, send, questions, approvals, tasks, agents, search, archives, and settings.
+   - Verify reduced motion, contrast, non-color status cues, target size, and screen-reader announcements.
+ 
+-- [x] **6.9 Remove placeholders and dead compatibility UI.**
++- [ ] **6.9 Remove placeholders and dead compatibility UI.**
+   - Search the shipped shell for unused IDs/classes, inert controls, raw debug JSON, hard-coded product copy, and old bridge styles.
+   - Remove temporary Phase 0 disabled controls only after their real implementations exist.
+   - Add a test that every enabled toolbar/nav action has a registered handler.
+diff --git a/bugs/2026-08-01-archive-toggle-does-not-refresh-conversation.md b/bugs/2026-08-01-archive-toggle-does-not-refresh-conversation.md
+deleted file mode 100644
+index 2014324..0000000
+--- a/bugs/2026-08-01-archive-toggle-does-not-refresh-conversation.md
++++ /dev/null
+@@ -1,94 +0,0 @@
+-# Bug: Archive/unarchive toggle does not refresh the conversation read-only UI
+-
+-**Date:** 2026-08-01
+-**Severity:** Warning — archived conversations still show edit/delete/send controls
+-**Discovered during:** LOTC review of `phase-7-ui-updates` (Frodo, UX; Sauron, correctness)
+-**Branch:** `phase-7-ui-updates` at `a27d0ac`
+-
+----
+-
+-## Symptom
+-
+-Clicking the archive/restore button in the topbar (or the details dialog)
+-toggles the channel's archived state, but the conversation view does not
+-refresh. The composer textarea remains enabled-looking, the topbar still says
+-"Live agent workspace" or "Private conversation", and the message edit/delete
+-controls remain visible. The user can attempt edits or new messages until they
+-refresh or navigate away.
+-
+-## Root cause
+-
+-`server/web/js/20-workspace.js:286-292` archives or restores and flips
+-`state.readOnly`:
+-
+-```js
+-async function archiveCurrent() {
+-  const target = state.dmKey ? 'this DM' : (state.channel ? 'this channel' : '');
+-  if (!target) { Trio.ui.toast('No conversation to archive'); return; }
+-  Trio.ui.confirmAction(`Archive ${target}?`, () => {
+-    if (state.dmKey) { archive('dm', state.dmKey, !state.readOnly).then(() => state.readOnly = !state.readOnly); }
+-    else if (state.channel) { archive('channel', state.channel, !state.readOnly).then(() => state.readOnly = !state.readOnly); }
+-  });
+-}
+-```
+-
+-After `state.readOnly` changes, no code calls `Trio.conversation.render()`,
+-`Trio.composer` update, or `loadConversation()` again. The UI is left in the old
+-state.
+-
+-Additionally, `server/web/js/11-conversation.js:273-279` renders message
+-controls without checking `state.readOnly`:
+-
+-```js
+-if (isOwn(msg) && !msg.retracted_at) {
+-  const controls = document.createElement('div'); controls.className = 'message-controls';
+-  for (const [label, fn] of [['edit', () => edit(msg, body)], ['delete', () => retract(msg)]]) {
+-    const button = document.createElement('button'); ...
+-  }
+-  card.append(controls);
+-}
+-```
+-
+-Even when an archived conversation is loaded through `openChannel(...,
+-'archived')` or after the archive toggle, those buttons remain. The composer does
+-check `state.readOnly` in `validate()`, so sending fails, but the textarea is not
+-visually disabled.
+-
+-## Fix
+-
+-In `archiveCurrent`, after `state.readOnly` flips, re-render the conversation:
+-
+-```js
+-archive(...).then(() => {
+-  state.readOnly = !state.readOnly;
+-  const title = state.dmKey ? 'DM ' + state.dmName : 'trio#' + state.channel;
+-  const subtitle = state.readOnly
+-    ? (state.dmKey ? 'Archived private conversation' : 'Archived channel — read only')
+-    : (state.dmKey ? 'Private conversation' : 'Live agent workspace');
+-  updateTopbar(title, subtitle);
+-  loadConversation(state.channel, title, subtitle, state.readOnly, !!state.dmKey);
+-});
+-```
+-
+-Also guard `cardFor` so edit/delete controls only appear when `!state.readOnly`:
+-
+-```js
+-if (isOwn(msg) && !msg.retracted_at && !state.readOnly) { ... }
+-```
+-
+-## Verification
+-
+-1. Open a live channel with a message you authored.
+-2. Click the archive button and confirm.
+-3. The topbar should change to "Archived channel — read only".
+-4. The composer textarea should become disabled or show the archived
+-   placeholder.
+-5. The edit/delete buttons on existing messages should disappear.
+-6. Unarchiving should restore all of the above.
+-
+-## Reviewer notes
+-
+-Frodo flagged the UX (the app looks editable after archive), and Sauron traced
+-it to the missing re-render and the `cardFor` control guard. The new
+-`Trio.ui.confirmAction` path is an improvement over the old native dialog, but
+-the confirmation callback still needs to drive the view update.
+diff --git a/bugs/2026-08-01-multi-channel-default-redirect-aborts-boot.md b/bugs/2026-08-01-multi-channel-default-redirect-aborts-boot.md
+deleted file mode 100644
+index 9a491f9..0000000
+--- a/bugs/2026-08-01-multi-channel-default-redirect-aborts-boot.md
++++ /dev/null
+@@ -1,73 +0,0 @@
+-# Bug: Multi-channel default redirect aborts boot when the router is present
+-
+-**Date:** 2026-08-01
+-**Severity:** Warning — first visit to multi-channel hub renders no UI
+-**Discovered during:** LOTC review of `phase-7-ui-updates` (Sauron, correctness)
+-**Branch:** `phase-7-ui-updates` at `a27d0ac`
+-
+----
+-
+-## Symptom
+-
+-On a fresh load of `/` when no channel is selected and the hub is in
+-multi-channel mode, the browser URL is rewritten to `/?channel=<first-channel>`
+-but the Atrium UI is never mounted. The page shows the static shell with
+-"Connecting…" and no rail, conversation, or composer. A manual refresh is
+-required before the app starts.
+-
+-## Root cause
+-
+-`server/web/js/00-core.js:31-36` handles the empty-channel, multi-channel case:
+-
+-```js
+-if (!root.state.channel && meta.multi) {
+-  const channels = await root.api.get('/api/channels', false);
+-  if (channels.channels?.[0]?.code) {
+-    if (root.router?.replace) { root.router.replace('channel', { code: channels.channels[0].code }); }
+-    else { location.replace('/?channel=' + encodeURIComponent(channels.channels[0].code)); }
+-    return false;
+-  }
+-}
+-```
+-
+-When the router module is loaded, `root.router?.replace` is present, so the code
+-calls `history.replaceState` and returns `false`. `server/web/js/90-boot.js:4-5`
+-then aborts:
+-
+-```js
+-async function boot() {
+-  if (!(await Trio.boot())) return;
+-  ...
+-}
+-```
+-
+-Unlike the `location.replace` branch, the `router.replace` branch does not
+-reload the page, so `90-boot.js` must continue and mount the features. Returning
+-`false` leaves the user on a page with no mounted UI.
+-
+-## Fix
+-
+-The two simplest options:
+-
+-1. Always use `location.replace` for this redirect so the browser reloads with
+-   the selected channel. This is consistent with the no-router branch.
+-2. Continue the boot after `router.replace`. Since `state.channel` is already
+-   populated, the rest of `boot()` can call `startEvents` and return `true`, and
+-   `90-boot.js` will mount the features.
+-
+-Option 1 is the safest minimal change because the app is already designed around
+-booting from a concrete channel URL.
+-
+-## Verification
+-
+-1. Start the hub in multi-channel mode with at least one channel.
+-2. Open `http://127.0.0.1:8000/` with no `?channel=` parameter.
+-3. The URL should change to `/?channel=<first-channel>`.
+-4. The rail, conversation, and composer should appear immediately.
+-5. Currently the URL changes but the page remains an unmounted shell.
+-
+-## Reviewer notes
+-
+-Sauron found this by tracing `00-core.js::boot()` against the `90-boot.js`
+-control flow. The router branch was added to avoid a full page reload, but it
+-fails to continue mounting, so the redirect effectively dead-ends.
+diff --git a/bugs/2026-08-01-router-archived-url-flag-lost.md b/bugs/2026-08-01-router-archived-url-flag-lost.md
+deleted file mode 100644
+index 6d133c6..0000000
+--- a/bugs/2026-08-01-router-archived-url-flag-lost.md
++++ /dev/null
+@@ -1,78 +0,0 @@
+-# Bug: Router serializes archived channel/DM URLs without the archived flag
+-
+-**Date:** 2026-08-01
+-**Severity:** Warning — archived state is lost on refresh/share
+-**Discovered during:** LOTC review of `phase-7-ui-updates` (Sauron, correctness)
+-**Branch:** `phase-7-ui-updates` at `a27d0ac`
+-
+----
+-
+-## Symptom
+-
+-Navigating to an archived channel or DM and then refreshing the page loads the
+-conversation in live (read/write) mode. The `archived=1` query parameter is
+-dropped by client-side navigation, so archived URLs cannot be shared or
+-bookmarked.
+-
+-## Root cause
+-
+-`server/web/js/03-router.js:16-20` serializes routes like this:
+-
+-```js
+-function serialize(route) {
+-  if (route.name === 'dm') return '/?dm=' + encodeURIComponent(route.params.key);
+-  if (route.name === 'audit') return '/?dm=' + encodeURIComponent(route.params.key) + '&archived=1';
+-  if (route.name === 'channel') return '/?channel=' + encodeURIComponent(route.params.code);
+-  return '/';
+-}
+-```
+-
+-The `channel` and `dm` branches ignore `route.params.archived`. `parse()` reads
+-`archived` from the query string, but `serialize()` never writes it for those
+-routes.
+-
+-`20-workspace.js:57` and `:84` call `Trio.router.navigate` with `archived` set
+-for archived views:
+-
+-```js
+-Trio.router.navigate('channel', { code, archived: readOnly });
+-Trio.router.navigate('dm', { key: dm.key, archived: readOnly });
+-```
+-
+-The resulting URL is `/?channel=foo` or `/?dm=foo` even when `archived` is
+-`true`. A refresh drops the archived state.
+-
+-## Fix
+-
+-Include the `archived` flag in `serialize()`:
+-
+-```js
+-function serialize(route) {
+-  const extra = route.params.archived ? '&archived=1' : '';
+-  if (route.name === 'dm' || route.name === 'audit') {
+-    return '/?dm=' + encodeURIComponent(route.params.key) + extra;
+-  }
+-  if (route.name === 'channel') {
+-    return '/?channel=' + encodeURIComponent(route.params.code) + extra;
+-  }
+-  return '/';
+-}
+-```
+-
+-`parse()` already turns `?dm=foo&archived=1` into the `audit` route, so DM
+-archives will round-trip correctly.
+-
+-## Verification
+-
+-1. Open an archived channel or archived DM.
+-2. Copy the URL from the address bar.
+-3. Paste the URL into a new tab and load it.
+-4. The conversation should still render as archived (read-only subtitle,
+-   disabled composer, archive button labeled "Restore").
+-5. Currently it renders as live.
+-
+-## Reviewer notes
+-
+-Sauron traced this from the route-handling path. `20-workspace.js` correctly
+-passes the `archived` flag into `navigate`, but `03-router.js` drops it before
+-writing history, so the store and the URL disagree.
+diff --git a/bugs/2026-08-01-search-results-raw-content-xss.md b/bugs/2026-08-01-search-results-raw-content-xss.md
+deleted file mode 100644
+index bf1f8f8..0000000
+--- a/bugs/2026-08-01-search-results-raw-content-xss.md
++++ /dev/null
+@@ -1,64 +0,0 @@
+-# Bug: Search results inject raw message HTML
+-
+-**Date:** 2026-08-01
+-**Severity:** Critical — stored XSS via search results
+-**Discovered during:** LOTC review of `phase-7-ui-updates` (Aragorn, security)
+-**Branch:** `phase-7-ui-updates` at `a27d0ac`
+-
+----
+-
+-## Symptom
+-
+-The global message search results render the matched message body as raw HTML
+-when the query matches a substring of the content. If an agent has posted a
+-message containing HTML/JS, the operator can execute it by searching for a term
+-inside it.
+-
+-## Root cause
+-
+-`server/web/js/20-workspace.js:334-335` builds the highlighted search result
+-body like this:
+-
+-```js
+-const text = (r.content || '').toLowerCase().includes(q)
+-  ? (r.content || '').replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>')
+-  : esc(r.content || '');
+-b.innerHTML = `<span class="search-meta">...</span><span class="search-body">${text}</span>`;
+-```
+-
+-When the query matches, the entire `r.content` is inserted into the DOM without
+-HTML escaping. Only the non-matching branch uses `esc()`. A message such as
+-`<img src=x onerror=alert(1)>` can therefore inject a live element into the
+-search results.
+-
+-The `$1` back-reference is also unescaped, but the larger issue is that the rest
+-of `r.content` remains raw. The highlighter needs to work on escaped text.
+-
+-## Fix
+-
+-HTML-escape `r.content` before highlighting, then apply the `<mark>` wrapper to
+-the escaped query match:
+-
+-```js
+-const escaped = esc(r.content || '');
+-const text = q && escaped.toLowerCase().includes(q.toLowerCase())
+-  ? escaped.replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>')
+-  : escaped;
+-```
+-
+-This keeps the highlight while ensuring no attacker-controlled markup reaches
+-the DOM.
+-
+-## Verification
+-
+-1. Post a message containing `<img src=x onerror=alert(1)>`.
+-2. Open the search dialog (Ctrl/Cmd+K) and search for `img`.
+-3. Inspect the rendered `.search-body` for that result.
+-4. The text should appear as escaped entities, not a live `<img>` tag.
+-5. No `alert()` should fire.
+-
+-## Reviewer notes
+-
+-Aragorn caught this during the security pass. The rest of the Atrium client has
+-moved to explicit escaping, but the search result path was missed because the
+-highlighting path uses a string `replace` before the `esc()` call.
+diff --git a/server/web/css/10-shell.css b/server/web/css/10-shell.css
+index 2263a2e..569c949 100644
+--- a/server/web/css/10-shell.css
++++ b/server/web/css/10-shell.css
+@@ -887,30 +887,4 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
+ .composer-shell{padding:12px max(20px,7vw) 20px;border-top:1px solid var(--line);background:var(--surface-2)}
+ .composer-shell textarea{display:block;width:100%;min-height:54px;resize:vertical;border:1px solid var(--line);border-radius:var(--r-md);padding:14px;background:var(--surface);outline:none}.composer-shell textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint)}
+ .composer-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}.send-btn{border:0;border-radius:var(--r-full);padding:9px 17px;color:#fff;background:var(--accent);font-weight:700}.send-btn:disabled{opacity:.45;cursor:not-allowed}
+-.rail-item{display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;padding:9px 10px;border:0;border-radius:var(--r-sm);background:none;color:var(--ink);text-align:left}.rail-item:hover{background:var(--surface-hover)}.rail-copy{display:grid;gap:1px;min-width:0}.rail-copy strong{font-weight:600;overflow:hidden;text-overflow:ellipsis}.rail-copy small{color:var(--ink-3);overflow:hidden;text-overflow:ellipsis}.rail-badge{border-radius:var(--r-full);padding:1px 7px;background:var(--warm);color:#fff;font-size:11px}.rail-section{margin:14px 0}.rail-section h2{padding:0 10px 6px;color:var(--ink-3);font-size:11px;letter-spacing:.09em;text-transform:uppercase}.workspace-view{padding:24px;margin:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface)}.agent-drawer{position:fixed;z-index:20;right:18px;top:18px;bottom:18px;width:min(360px,calc(100vw - 36px));overflow:auto;padding:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-2);box-shadow:var(--shadow-lg)}.agent-card,.task-row{display:grid;gap:6px;padding:12px 0;border-bottom:1px solid var(--line-soft)}
+-.agent-filters { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }
+-.agent-filters button { padding:5px 10px; border:0; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:12px; font-weight:700; }
+-.agent-filters button.active { background:var(--accent); color:#fff; }
+-.agent-search { width:100%; padding:8px 12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); color:var(--ink); }
+-.agent-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+-.agent-actions button { padding:4px 10px; border:0; border-radius:8px; background:var(--bg-sink); color:var(--ink); font-size:12px; }
+-.agent-actions button.danger { background:var(--warm-soft); color:var(--warm); }
+-.agent-card.needs-attention { border-left:3px solid var(--warm); }
+-.detail-row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line-soft); }
+-.detail-row b { color:var(--ink-3); }
+-.activity-panel { max-width:min(720px,calc(100vw - 48px)); max-height:calc(100vh - 48px); border:0; padding:0; background:var(--surface-2); border-radius:var(--r-lg); }
+-.activity-panel::backdrop { background:rgba(0,0,0,.7); }
+-.activity-panel form { padding:20px; }
+-.activity-list { display:grid; gap:8px; max-height:calc(100vh - 180px); overflow-y:auto; }
+-.activity-event { padding:10px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); }
+-.activity-event time { display:block; font-size:11px; color:var(--ink-3); margin-bottom:4px; }
+-.activity-event b { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }
+-.activity-event pre { margin:0; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--ink-2); }
+-.activity-more { margin-top:12px; padding:6px 12px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-weight:700; }
+-.type-error { border-left:3px solid var(--warm); }
+-.type-warning { border-left:3px solid var(--warn); }
+-.diagnostics-list { margin:12px 0; border:1px solid var(--line); border-radius:var(--r-md); overflow:hidden; }
+-.diagnostic-row { display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--line-soft); font-size:13px; }
+-.diagnostic-row:last-child { border-bottom:0; }
+-.diagnostic-row b { color:var(--ink-3); font-weight:600; }
+-.reset-prefs { margin-top:10px; padding:6px 12px; border:0; border-radius:8px; background:var(--bg-sink); color:var(--ink); font-weight:700; }.target-chip,.attachment-pill{border:0;border-radius:var(--r-full);margin:0 4px 8px 0;padding:5px 9px;background:var(--accent-tint);color:var(--accent-strong)}
++.rail-item{display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;padding:9px 10px;border:0;border-radius:var(--r-sm);background:none;color:var(--ink);text-align:left}.rail-item:hover{background:var(--surface-hover)}.rail-copy{display:grid;gap:1px;min-width:0}.rail-copy strong{font-weight:600;overflow:hidden;text-overflow:ellipsis}.rail-copy small{color:var(--ink-3);overflow:hidden;text-overflow:ellipsis}.rail-badge{border-radius:var(--r-full);padding:1px 7px;background:var(--warm);color:#fff;font-size:11px}.rail-section{margin:14px 0}.rail-section h2{padding:0 10px 6px;color:var(--ink-3);font-size:11px;letter-spacing:.09em;text-transform:uppercase}.workspace-view{padding:24px;margin:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface)}.agent-drawer{position:fixed;z-index:20;right:18px;top:18px;bottom:18px;width:min(360px,calc(100vw - 36px));overflow:auto;padding:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-2);box-shadow:var(--shadow-lg)}.agent-card,.task-row{display:grid;gap:6px;padding:12px 0;border-bottom:1px solid var(--line-soft)}.target-chip,.attachment-pill{border:0;border-radius:var(--r-full);margin:0 4px 8px 0;padding:5px 9px;background:var(--accent-tint);color:var(--accent-strong)}
+diff --git a/server/web/css/20-conversation.css b/server/web/css/20-conversation.css
+index 0279691..f2686e3 100644
+--- a/server/web/css/20-conversation.css
++++ b/server/web/css/20-conversation.css
+@@ -34,44 +34,6 @@ body.compact .message { padding:8px 10px; }
+ body.compact .messages { padding:14px clamp(12px,3vw,40px); gap:8px; }
+ body.compact .composer-shell { padding:8px clamp(12px,3vw,40px) 12px; }
+ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
+-.home-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:20px; }
+-.home-card { display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:14px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); text-align:left; }
+-.home-card .home-count { font-size:22px; font-weight:800; color:var(--accent); }
+-.home-card small { color:var(--ink-3); }
+-.home-recent h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); margin:0 0 8px; }
+-.home-empty { color:var(--ink-3); }
+-.home-channel { display:block; width:100%; padding:8px 10px; border:0; border-radius:var(--r-sm); background:var(--bg-sink); color:var(--ink); text-align:left; margin-bottom:6px; }
+-.attention-list { display:grid; gap:10px; }
+-.attention-item { padding:12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); border-left:3px solid var(--line); }
+-.attention-item.severity-high { border-left-color:var(--warm); }
+-.attention-item.severity-medium { border-left-color:var(--warn); }
+-.attention-item small { display:block; color:var(--ink-3); margin:4px 0; }
+-.attention-actions { display:flex; gap:8px; margin-top:8px; }
+-.attention-actions button { padding:6px 10px; border-radius:8px; border:0; background:var(--bg-sink); color:var(--ink); font-weight:700; }
+-.task-filters { display:flex; gap:6px; margin-bottom:12px; }
+-.task-filters button { padding:5px 10px; border:0; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:12px; font-weight:700; }
+-.task-filters button.active { background:var(--accent); color:#fff; }
+-.task-list { display:grid; gap:8px; }
+-.task-row { display:grid; gap:4px; padding:10px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); }
+-.task-row b { color:var(--accent); }
+-.task-count { font-size:12px; color:var(--ink-3); margin-top:10px; }
+-.search-modal { max-width:min(640px,calc(100vw - 32px)); border:0; border-radius:var(--r-lg); background:var(--surface-2); padding:16px; }
+-.search-modal::backdrop { background:rgba(0,0,0,.7); }
+-.search-modal form { display:grid; gap:8px; }
+-.search-input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); color:var(--ink); }
+-.search-results { max-height:60vh; overflow-y:auto; }
+-.search-result { width:100%; text-align:left; padding:10px; border:0; border-bottom:1px solid var(--line-soft); background:transparent; color:var(--ink); }
+-.search-result:hover { background:var(--bg-sink); }
+-.search-meta { display:block; font-size:11px; color:var(--ink-3); margin-bottom:3px; }
+-.search-body { display:block; font-size:13px; }
+-.search-body mark { background:var(--accent-tint); color:var(--ink); padding:0 2px; border-radius:3px; }
+-.archive-modal { max-width:min(520px,calc(100vw - 32px)); border:0; border-radius:var(--r-lg); background:var(--surface-2); padding:16px; }
+-.archive-modal::backdrop { background:rgba(0,0,0,.7); }
+-.archive-modal h3 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); margin:16px 0 8px; }
+-.archive-search { width:100%; padding:8px 12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); color:var(--ink); }
+-.archive-row { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line-soft); }
+-.archive-actions { display:flex; gap:6px; }
+-.archive-actions button { padding:4px 10px; border:0; border-radius:8px; background:var(--bg-sink); color:var(--ink); font-size:12px; }
+ .reach-preview { margin:0 0 8px; font-size:11px; color:var(--ink-3); }
+ .attachment-pill.loading { opacity:.7; cursor:wait; }
+ .ask-card { margin-top:10px; padding:10px; border-radius:10px; background:color-mix(in srgb,var(--surface) 84%,var(--accent-tint)); }.ask-question-set { border:0; padding:0; margin:0 0 8px; }.ask-question { margin:0 0 6px; font-weight:600; }.ask-options { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }.ask-option { display:flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--line); border-radius:99px; font-size:12px; }
+diff --git a/server/web/js/20-workspace.js b/server/web/js/20-workspace.js
+index a872539..f1dcd06 100644
+--- a/server/web/js/20-workspace.js
++++ b/server/web/js/20-workspace.js
+@@ -4,7 +4,6 @@
+   const state = Trio.state;
+   const api = Trio.api;
+   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+-  const pendingDecisions = new Set();
+   const $ = id => document.getElementById(id);
+ 
+   function groupNavigation(channels = [], dms = {}) {
+@@ -22,34 +21,7 @@
+     activeAgents(src = state) { return (state.agents || []).filter(a => ['working','active','idle'].includes(a.status)).length; },
+     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
+     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
+-    taskItems(src = state) {
+-      return (src.tasks || []).map(t => ({
+-        id: t.id || t.task_id,
+-        status: t.status || 'open',
+-        title: t.message || t.title || 'Task',
+-        owner: t.claimed_by || '',
+-        blockers: Array.isArray(t.blocked_by) ? t.blocked_by : [],
+-        channel: t.channel,
+-        updatedAt: t.updated_at,
+-      }));
+-    },
+     attention(src = state) { return selectors.pendingApprovals(src) + selectors.openTasks(src) + selectors.blockedAgents(src); },
+-    attentionItems(src = state) {
+-      const items = [];
+-      for (const a of src.approvals || []) {
+-        if (a.status === 'resolved' || a.status === 'accepted') continue;
+-        items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline', ...(a.can_cancel ? ['cancel'] : [])] });
+-      }
+-      for (const t of src.tasks || []) {
+-        if (t.status !== 'blocked') continue;
+-        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
+-      }
+-      for (const a of src.agents || []) {
+-        if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
+-        items.push({ id: 'agent-' + a.id, kind: 'agent', severity: 'high', title: (a.name || a.id) + ' needs help', source: a.id, timestamp: a.last_active, status: a.status, body: a.status_text || a.error || '', actions: [] });
+-      }
+-      return items.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+-    },
+   };
+   function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }) + selectors.openTasks({ tasks: meta.tasks }); }
+   function openChannel(code, extra = '') {
+@@ -112,21 +84,15 @@
+     catch (error) { Trio.ui.toast(error.message || 'Could not update archive'); }
+   }
+   async function resolveApproval(id, decision) {
+-    if (!id || pendingDecisions.has(id + ':' + decision)) return;
+-    pendingDecisions.add(id + ':' + decision);
++    if (!id) return;
+     try {
+-      const url = decision === 'cancel' ? '/api/approvals/' + encodeURIComponent(id) + '/cancel' : '/api/approvals/' + encodeURIComponent(id) + '/resolve';
+-      await api.post(url, { decision });
++      await api.post('/api/approvals/' + encodeURIComponent(id) + '/resolve', { decision });
+       const list = state.approvals || [];
+       const a = list.find(x => x.id === id);
+-      if (a) {
+-        a.status = (decision === 'accept' || decision === 'acceptForSession') ? 'accepted' : 'resolved';
+-        a.resolved_decision = decision;
+-      }
++      if (a) { a.status = 'resolved'; a.resolved_decision = decision; }
+       showView('attention');
+-      await Trio.workspace?.refresh?.();
++      Trio.workspace?.refresh?.();
+     } catch (error) { Trio.ui.toast(error.message || 'Could not resolve approval'); }
+-    finally { pendingDecisions.delete(id + ':' + decision); }
+   }
+   function railItem(label, subtitle, onClick, badge = '', active = false) {
+     const button = document.createElement('button'); button.type = 'button'; button.className = 'rail-item';
+@@ -156,86 +122,6 @@
+     if (h) h.textContent = title || 'Atrium';
+     if (m) m.textContent = subtitle || '';
+   }
+-  function renderHome(panel) {
+-    panel.replaceChildren();
+-    if (state.workspaceLoading) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Loading workspace…'; panel.append(p); return; }
+-    if (state.workspaceError) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = state.workspaceError; const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Retry'; b.addEventListener('click', refresh); p.append(b); panel.append(p); return; }
+-    const grid = document.createElement('div'); grid.className = 'home-grid';
+-    const cards = [
+-      { title: 'Attention', count: selectors.attention(), subtitle: 'Need action', action: () => showView('attention') },
+-      { title: 'Open tasks', count: selectors.openTasks(), subtitle: 'In flight', action: () => showView('tasks') },
+-      { title: 'Unread DMs', count: selectors.unreadDms(), subtitle: 'Private messages', action: () => showView('home') },
+-      { title: 'Active agents', count: selectors.activeAgents(), subtitle: 'Working now', action: () => { const panel = $('trio-agents'); if (panel) panel.hidden = false; Trio.agents?.refresh?.(); } },
+-    ];
+-    for (const { title, count, subtitle, action } of cards) {
+-      const card = document.createElement('button'); card.type = 'button'; card.className = 'home-card';
+-      card.innerHTML = `<strong>${esc(title)}</strong><span class="home-count">${esc(String(count))}</span><small>${esc(subtitle)}</small>`;
+-      card.addEventListener('click', action); grid.append(card);
+-    }
+-    const recent = document.createElement('div'); recent.className = 'home-recent';
+-    const head = document.createElement('h2'); head.textContent = 'Recent channels'; recent.append(head);
+-    const chans = selectors.recentChannels();
+-    if (!chans.length) { const p = document.createElement('p'); p.textContent = 'No active channels.'; p.className = 'home-empty'; recent.append(p); }
+-    for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.textContent = c.code; b.addEventListener('click', () => openChannel(c.code)); recent.append(b); }
+-    panel.append(grid, recent);
+-  }
+-  function renderAttention(panel) {
+-    panel.replaceChildren();
+-    const heading = document.createElement('h2'); heading.textContent = 'Attention'; panel.append(heading);
+-    const items = selectors.attentionItems();
+-    if (!items.length) { const p = document.createElement('p'); p.textContent = 'Nothing needs attention.'; p.className = 'home-empty'; panel.append(p); return; }
+-    const list = document.createElement('section'); list.className = 'attention-list';
+-    for (const item of items) {
+-      const article = document.createElement('article'); article.className = 'attention-item severity-' + item.severity;
+-      const title = document.createElement('b'); title.textContent = item.title;
+-      const meta = document.createElement('small'); meta.textContent = [item.kind, item.source, timeAgo(item.timestamp)].filter(Boolean).join(' · ');
+-      const body = document.createElement('p'); body.textContent = item.body;
+-      article.append(title, meta, body);
+-      if (item.actions.length) {
+-        const row = document.createElement('div'); row.className = 'attention-actions';
+-        for (const d of item.actions) {
+-          const b = document.createElement('button'); b.type = 'button'; b.textContent = d === 'acceptForSession' ? 'Allow this session' : d;
+-          b.disabled = pendingDecisions.has(item.id + ':' + d);
+-          b.addEventListener('click', () => resolveApproval(item.id, d));
+-          row.append(b);
+-        }
+-        article.append(row);
+-      }
+-      list.append(article);
+-    }
+-    panel.append(list);
+-  }
+-  function timeAgo(iso) { if (!iso) return ''; try { const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; return Math.floor(h / 24) + 'd'; } catch { return ''; } }
+-  function renderTasks(panel) {
+-    panel.replaceChildren();
+-    const heading = document.createElement('h2'); heading.textContent = 'Tasks'; panel.append(heading);
+-    const filters = ['open', 'claimed', 'blocked', 'done', 'all'];
+-    const filter = filters.includes(state.taskFilter) ? state.taskFilter : 'open';
+-    const filterBar = document.createElement('div'); filterBar.className = 'task-filters';
+-    for (const f of filters) {
+-      const b = document.createElement('button'); b.type = 'button'; b.textContent = f;
+-      b.className = f === filter ? 'active' : '';
+-      b.addEventListener('click', () => { state.taskFilter = f; showView('tasks'); });
+-      filterBar.append(b);
+-    }
+-    panel.append(filterBar);
+-    const counts = { open: 0, claimed: 0, blocked: 0, done: 0, all: 0 };
+-    const all = selectors.taskItems();
+-    for (const t of all) { counts[t.status] = (counts[t.status] || 0) + 1; counts.all++; }
+-    const list = document.createElement('div'); list.className = 'task-list';
+-    const rows = filter === 'all' ? all : all.filter(t => t.status === filter);
+-    if (!rows.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No ' + (filter === 'all' ? '' : filter + ' ') + 'tasks.'; list.append(p); }
+-    for (const t of rows) {
+-      const row = document.createElement('article'); row.className = 'task-row';
+-      row.innerHTML = `<b>#${esc(t.id)}</b><span>${esc(t.title)}</span><small>${esc(t.status)}</small>`;
+-      if (t.owner) { const owner = document.createElement('small'); owner.textContent = 'claimed by ' + t.owner; row.append(owner); }
+-      if (t.blockers.length) { const b = document.createElement('small'); b.textContent = 'blocked: ' + t.blockers.join(', '); b.style.color = 'var(--warm)'; row.append(b); }
+-      list.append(row);
+-    }
+-    panel.append(list);
+-    const count = document.createElement('p'); count.className = 'task-count'; count.textContent = `open ${counts.open} · claimed ${counts.claimed} · blocked ${counts.blocked} · done ${counts.done}`;
+-    panel.append(count);
+-  }
+   function showView(view) {
+     state.view = view;
+     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
+@@ -243,9 +129,16 @@
+     let panel = $(`trio-${view}-view`);
+     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
+     panel.hidden = false;
+-    if (view === 'home') { renderHome(panel); }
+-    else if (view === 'tasks') { renderTasks(panel); }
+-    else if (view === 'attention') { renderAttention(panel); }
++    if (view === 'tasks') {
++      const filter = state.taskFilter || 'open';
++      const tasks = (state.tasks || state.meta?.tasks || []).filter(t => filter === 'all' || (t.status || 'open') === filter);
++      panel.innerHTML = `<h2>Tasks</h2><div class="task-filters" id="trio-task-filters"><button data-filter="open" ${filter === 'open' ? 'class="active"' : ''}>Open</button><button data-filter="claimed" ${filter === 'claimed' ? 'class="active"' : ''}>Claimed</button><button data-filter="all" ${filter === 'all' ? 'class="active"' : ''}>All</button></div><div id="trio-task-list">${tasks.map(t => `<article class="task-row" data-status="${esc(t.status || 'open')}"><b>#${esc(t.id || t.task_id)}</b><span>${esc(t.message || t.title || 'Task')}</span><small>${esc(t.status || 'open')}</small></article>`).join('') || '<p>No tasks match.</p>'}</div>`;
++      panel.querySelectorAll('#trio-task-filters [data-filter]').forEach(b => b.addEventListener('click', () => { state.taskFilter = b.dataset.filter; showView('tasks'); }));
++    }
++    else if (view === 'attention') {
++      panel.innerHTML = `<h2>Attention</h2><section class="attention-cards" id="trio-attention-cards">${(state.approvals || []).map(a => `<article class="attention-card"><b>${esc(a.title || a.agent_name || 'Approval requested')}</b><p>${esc(a.reason || a.command || '')}</p><div class="decision-row"><button data-approval="${esc(a.id)}" data-decision="accept" ${a.status === 'resolved' ? 'disabled' : ''}>Allow</button><button data-approval="${esc(a.id)}" data-decision="decline" ${a.status === 'resolved' ? 'disabled' : ''}>Decline</button>${a.status === 'resolved' ? `<small>Resolved: ${esc(a.resolved_decision || '')}</small>` : ''}</div></article>`).join('') || '<p>Nothing needs attention.</p>'}</section>`;
++      panel.querySelectorAll('#trio-attention-cards [data-approval]').forEach(b => b.addEventListener('click', () => resolveApproval(b.dataset.approval, b.dataset.decision)));
++    }
+     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
+   }
+   async function createChannel() {
+@@ -253,33 +146,16 @@
+   }
+   function viewArchiveChannel(code) { loadConversation(code, 'trio#' + code, 'Archived channel — read only', true, false); }
+   function viewArchiveDm(dm) { openDm(dm, true); }
+-  function buildArchiveList(container, items, kind) {
+-    container.replaceChildren();
+-    if (!items.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Nothing archived.'; container.append(p); return; }
+-    const q = (state.archiveSearch || '').toLowerCase();
+-    const filtered = q ? items.filter(x => (x.code || x.name || x.key || '').toLowerCase().includes(q)) : items;
+-    if (!filtered.length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No matches.'; container.append(p); return; }
+-    for (const x of filtered) {
+-      const key = x.code || x.key; const label = x.code || x.name || x.key;
+-      const li = document.createElement('li'); li.className = 'archive-row';
+-      li.innerHTML = `<span class="archive-label">${esc(label)}</span><span class="archive-actions"><button data-kind="${esc(kind)}" data-action="view" data-key="${esc(key)}">View</button><button data-kind="${esc(kind)}" data-action="restore" data-key="${esc(key)}">Restore</button></span>`;
+-      li.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+-        if (b.dataset.action === 'view') b.dataset.kind === 'channel' ? viewArchiveChannel(b.dataset.key) : viewArchiveDm(x);
+-        else archive(b.dataset.kind, b.dataset.key, false);
+-      }));
+-      container.append(li);
+-    }
+-  }
+   async function showArchives() {
+     try {
+       const [channels, dms] = await Promise.all([api.get('/api/channels?archived=1'), api.get('/api/dms?archived=1')]);
+-      const archivedChannels = channels.channels || []; const archivedDms = dms.your_dms || [];
+-      let panel = $('trio-archives'); if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-archives'; panel.className = 'archive-modal'; document.body.append(panel); }
+-      panel.innerHTML = '<form method="dialog"><button class="modal-close" value="cancel">×</button><h2>Archives</h2><input class="archive-search" placeholder="Filter archived…" aria-label="Filter archived"><section><h3>Channels</h3><ul class="archive-channel-list"></ul></section><section><h3>Direct messages</h3><ul class="archive-dm-list"></ul></section></form>';
+-      const cList = panel.querySelector('.archive-channel-list'); const dList = panel.querySelector('.archive-dm-list');
+-      buildArchiveList(cList, archivedChannels, 'channel'); buildArchiveList(dList, archivedDms, 'dm');
+-      const input = panel.querySelector('.archive-search');
+-      input.addEventListener('input', () => { state.archiveSearch = input.value; buildArchiveList(cList, archivedChannels, 'channel'); buildArchiveList(dList, archivedDms, 'dm'); });
++      const lines = [...(channels.channels || []).map(c => `<li>${esc(c.code)} <button data-kind="channel" data-key="${esc(c.code)}" data-action="view">View</button> <button data-kind="channel" data-key="${esc(c.code)}" data-action="restore">Restore</button></li>`), ...(dms.your_dms || []).map(d => `<li>${esc(d.name || d.key)} <button data-kind="dm" data-key="${esc(d.key)}" data-action="view">View</button> <button data-kind="dm" data-key="${esc(d.key)}" data-action="restore">Restore</button></li>`)].join('') || '<li>Nothing archived.</li>';
++      let panel = $('trio-archives'); if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-archives'; document.body.append(panel); }
++      panel.innerHTML = `<form method="dialog"><button class="modal-close">×</button><h2>Archives</h2><ul>${lines}</ul></form>`;
++      panel.querySelectorAll('[data-kind]').forEach(b => b.addEventListener('click', () => {
++        if (b.dataset.action === 'view') b.dataset.kind === 'channel' ? viewArchiveChannel(b.dataset.key) : viewArchiveDm(dms.your_dms?.find(d => d.key === b.dataset.key) || { key: b.dataset.key, channel: state.channel });
++        else archive(b.dataset.kind, b.dataset.key, false);
++      }));
+       panel.showModal();
+     } catch (error) { toast(error.message || 'Could not load archives'); }
+   }
+@@ -292,8 +168,6 @@
+     });
+   }
+   let unroute = null;
+-  let wsl = null;
+-  function onWorkspaceUpdate() { if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
+   function onRoute(route) {
+     if (!route) return;
+     if (route.name === 'channel' && state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, route.params.archived ? 'Archived channel — read only' : 'Live agent workspace', !!route.params.archived, false);
+@@ -301,8 +175,6 @@
+     else if (route.name === 'home') showView('home');
+   }
+   async function refresh() {
+-    if (state.workspaceLoading) return;
+-    state.workspaceLoading = true; state.workspaceError = '';
+     try {
+       const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
+       const [channels, dms, meta, tasks, approvals] = await Promise.all([api.get('/api/channels'), api.get('/api/dms'), api.get('/api/meta' + query), api.get('/api/tasks' + query).catch(() => ({tasks:[]})), api.get('/api/approvals').catch(() => ({approvals:[]}))]);
+@@ -314,67 +186,10 @@
+       Trio.store.set('workspace.approvals', state.approvals);
+       renderRail();
+       Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
+-    } catch (error) { state.workspaceError = error.message || 'Workspace refresh failed'; console.warn('workspace refresh failed', error); }
+-    finally { state.workspaceLoading = false; if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
+-  }
+-  let searchDialog = null, searchController = null, searchTimer = null, searchKeydown = null, detailsClick = null;
+-  function onSearchKey(event) { if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); openSearch(); } }
+-  function renderSearchResults(query, results = []) {
+-    const list = searchDialog.querySelector('.search-results');
+-    list.innerHTML = '';
+-    if (state.searchLoading) { list.innerHTML = '<p class="home-empty">Searching…</p>'; return; }
+-    if (!query) { list.innerHTML = '<p class="home-empty">Start typing to search.</p>'; return; }
+-    if (!results.length) { list.innerHTML = '<p class="home-empty">No results.</p>'; return; }
+-    const q = query.toLowerCase();
+-    for (const r of results) {
+-      const b = document.createElement('button'); b.type = 'button'; b.className = 'search-result';
+-      const ctx = r.dm ? 'DM · ' + r.dm : '#' + (r.channel || 'unknown');
+-      const author = r.member_name || r.member_id || 'unknown';
+-      const time = r.created_at ? new Date(r.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+-      const text = (r.content || '').toLowerCase().includes(q) ? (r.content || '').replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>') : esc(r.content || '');
+-      b.innerHTML = `<span class="search-meta">${esc(ctx)} · ${esc(author)} · ${esc(time)}</span><span class="search-body">${text}</span>`;
+-      b.addEventListener('click', () => { searchDialog.close(); if (r.dm) openDmByKey(r.dm); else openChannel(r.channel); if (r.id != null) setTimeout(() => { const card = document.querySelector(`[data-message-id="${r.id}"]`); if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.focus(); } }, 200); });
+-      list.append(b);
+-    }
+-  }
+-  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+-  async function doSearch(q) {
+-    if (!q) { renderSearchResults(''); return; }
+-    state.searchLoading = true; renderSearchResults(q, []);
+-    if (searchController) { try { searchController.abort(); } catch {} }
+-    searchController = new AbortController();
+-    try {
+-      const resp = await fetch('/api/search?q=' + encodeURIComponent(q) + (state.channel ? '&channel=' + encodeURIComponent(state.channel) : ''), { signal: searchController.signal, headers: { Accept: 'application/json' } });
+-      if (!resp.ok) throw new Error('search failed');
+-      const data = await resp.json();
+-      renderSearchResults(q, data.results || []);
+-    } catch (e) { if (e.name !== 'AbortError') { console.warn('search failed', e); renderSearchResults(q, []); } }
+-    finally { state.searchLoading = false; }
+-  }
+-  function showDetails() {
+-    const channel = (state.channels || []).find(c => c.code === state.channel);
+-    const topic = channel?.topic || 'No topic';
+-    const archived = !!channel?.archived || !!state.readOnly;
+-    const members = [...(state.members?.values() || [])].map(m => m.name || m.id);
+-    const dm = state.dmKey ? (state.dms?.your_dms || []).find(d => d.key === state.dmKey) : null;
+-    const title = dm ? (dm.name || state.dmKey) : (state.channel || 'Atrium');
+-    const body = `<h3>${esc(title)}</h3><p class="detail-row"><b>Topic</b><span>${esc(topic)}</span></p><p class="detail-row"><b>Status</b><span>${esc(archived ? 'Archived' : 'Active')}</span></p><p class="detail-row"><b>Members</b><span>${esc(members.join(', ') || 'Unknown')}</span></p><p class="detail-row"><b>Open tasks</b><span>${selectors.openTasks()}</span></p>`;
+-    Trio.ui.modal('Conversation details', body + '<div class="agent-actions"><button id="details-archive" type="button">' + (archived ? 'Restore' : 'Archive') + '</button></div>', () => {});
+-    setTimeout(() => {
+-      const btn = document.getElementById('details-archive');
+-      if (btn) btn.addEventListener('click', () => { const target = state.dmKey ? 'dm' : 'channel'; archive(target, state.dmKey || state.channel, !archived); document.getElementById('trio-control-modal')?.close?.(); });
+-    }, 0);
+-  }
+-  function openSearch() {
+-    if (!searchDialog) { searchDialog = document.createElement('dialog'); searchDialog.id = 'trio-search'; searchDialog.className = 'search-modal'; document.body.append(searchDialog); }
+-    searchDialog.innerHTML = '<form method="dialog"><button class="modal-close" value="cancel">×</button><input class="search-input" placeholder="Search messages…" aria-label="Search"><div class="search-results"></div></form>';
+-    searchDialog.showModal();
+-    const input = searchDialog.querySelector('.search-input');
+-    input.focus();
+-    input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
++    } catch (error) { console.warn('workspace refresh failed', error); }
+   }
+   let refreshInterval = null;
+-  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+-  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast};
++  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); }
++  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } }
++  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, groupNavigation, attentionCount, selectors, showView, modal, toast};
+ })();
+diff --git a/server/web/js/30-agents.js b/server/web/js/30-agents.js
+index 4258060..e6e6555 100644
+--- a/server/web/js/30-agents.js
++++ b/server/web/js/30-agents.js
+@@ -3,202 +3,15 @@
+   const Trio = window.Trio;
+   const $ = id => document.getElementById(id);
+   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+-  const state = Trio.state;
+-  state.agentFilter = state.agentFilter || 'all';
+-  state.agentsSearch = state.agentsSearch || '';
+-  state.providers = state.providers || ['codex', 'claude'];
+-  state.agentModels = state.agentModels || { codex: ['o4-mini', 'gpt-4.1'], claude: ['claude-sonnet-4-20250801', 'claude-opus-4-20250801'] };
+-  state.discoveryLoading = false;
+-  const pendingAgentActions = new Set();
+-  const typeInfo = {
+-    plan: { label: 'Plan', cls: 'type-plan' },
+-    command: { label: 'Command', cls: 'type-command' },
+-    tool: { label: 'Tool', cls: 'type-tool' },
+-    diff: { label: 'Diff', cls: 'type-diff' },
+-    file: { label: 'File', cls: 'type-file' },
+-    approval: { label: 'Approval', cls: 'type-approval' },
+-    warning: { label: 'Warning', cls: 'type-warning' },
+-    error: { label: 'Error', cls: 'type-error' },
+-  };
+   function host() { let n = $('trio-agents'); if (!n) { n = document.createElement('aside'); n.id = 'trio-agents'; n.className = 'agent-drawer'; document.body.append(n); } n.hidden = true; return n; }
+-  function viewModel(agent = {}) {
+-    const lifecycle = agent.state || (agent.live ? (agent.busy ? 'working' : 'idle') : 'offline');
+-    return {
+-      id: agent.id,
+-      name: agent.name || agent.id,
+-      provider: agent.provider || 'unknown',
+-      model: agent.model || '',
+-      effort: agent.effort || '',
+-      kind: agent.kind || 'agent',
+-      lifecycle,
+-      statusText: agent.status_text || '',
+-      lastActive: agent.last_active || agent.heartbeat,
+-      busy: !!agent.busy,
+-      live: !!agent.live,
+-      error: agent.error || '',
+-      placements: Array.isArray(agent.channels) ? agent.channels : (Array.isArray(agent.placements) ? agent.placements : []),
+-      wakePolicy: agent.filter_mode || agent.wake_policy || 'all',
+-      cwd: agent.cwd || '',
+-      permissions: agent.permissions || '',
+-      needsAttention: lifecycle === 'blocked' || lifecycle === 'errored' || lifecycle === 'error' || !!agent.error,
+-    };
+-  }
+-  function actionCaps(vm) {
+-    const caps = [];
+-    if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('stop');
+-    if (vm.lifecycle === 'idle' || vm.lifecycle === 'sleeping' || vm.lifecycle === 'stopped' || vm.lifecycle === 'offline' || vm.lifecycle === 'stale') caps.push('wake');
+-    if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('interrupt');
+-    if (vm.lifecycle === 'working' || vm.lifecycle === 'active' || vm.lifecycle === 'idle') caps.push('hibernate');
+-    if (!['errored','blocked'].includes(vm.lifecycle)) caps.push('clear');
+-    caps.push('delete');
+-    return caps;
+-  }
+-  function statusIcon(vm) {
+-    if (vm.needsAttention) return '!';
+-    if (vm.busy) return '●';
+-    if (vm.live) return '•';
+-    return '○';
+-  }
+-  async function action(id, action, body = {}) {
+-    const key = id + ':' + action;
+-    if (pendingAgentActions.has(key)) return;
+-    pendingAgentActions.add(key);
+-    try { await Trio.api.post(`/api/agents/${encodeURIComponent(id)}/${action}`, body); await refresh(); }
+-    catch (e) { Trio.ui.toast(e.message || 'Agent action failed'); }
+-    finally { pendingAgentActions.delete(key); }
+-  }
+-  function agentCard(vm) {
+-    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '');
+-    article.innerHTML = `<b>${esc(vm.name)} ${esc(statusIcon(vm))}</b><small>${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''} · ${esc(vm.lifecycle)}</small><p>${esc((vm.placements || []).join(', ') || 'No public rooms')}</p>`;
+-    const row = document.createElement('div'); row.className = 'agent-actions';
+-    const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); row.append(detail);
+-    for (const a of actionCaps(vm).slice(0, 4)) {
+-      const b = document.createElement('button'); b.type = 'button'; b.textContent = a; b.dataset.action = a; b.dataset.id = vm.id;
+-      if (a === 'delete' || a === 'clear') b.className = 'danger';
+-      b.addEventListener('click', () => (a === 'delete' || a === 'clear') && !window.confirm((a === 'delete' ? 'Permanently delete ' : 'Clear context for ') + vm.name + '?') ? null : action(vm.id, a));
+-      row.append(b);
+-    }
+-    const msg = document.createElement('button'); msg.type = 'button'; msg.textContent = 'Message'; msg.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); row.append(msg);
+-    article.append(row); article.append(row);
+-    return article;
+-  }
+-  function matches(vm) {
+-    const f = state.agentFilter;
+-    if (f === 'active') return vm.live;
+-    if (f === 'working') return vm.busy;
+-    if (f === 'resting') return !vm.busy && !vm.needsAttention;
+-    if (f === 'needs-attention') return vm.needsAttention;
+-    return true;
+-  }
+-  function render(agents = Trio.store.get('agents.list')) {
+-    const n = host();
+-    const list = (agents || []).map(a => viewModel(a)).filter(matches);
+-    if (state.agentsSearch) {
+-      const q = state.agentsSearch.toLowerCase();
+-      list = list.filter(vm => (vm.name + ' ' + vm.model + ' ' + vm.provider).toLowerCase().includes(q));
+-    }
+-    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}</div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
+-    n.querySelector('.modal-close').onclick = () => n.hidden = true;
+-    const listNode = n.querySelector('.agent-list');
+-    list.forEach(vm => listNode.append(agentCard(vm)));
+-    n.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { state.agentFilter = b.dataset.filter; render(agents); });
+-    const input = n.querySelector('.agent-search');
+-    input.oninput = () => { state.agentsSearch = input.value; render(agents); };
+-  }
+-  function showDetail(vm) {
+-    const rows = [
+-      ['Name', vm.name], ['Provider', vm.provider], ['Model', vm.model], ['Lifecycle', vm.lifecycle],
+-      ['Wake policy', vm.wakePolicy], ['Cwd', vm.cwd], ['Permissions', vm.permissions], ['Placements', (vm.placements || []).join(', ') || 'none'],
+-      ['Last active', vm.lastActive || ''], ['Status', vm.statusText || ''], ['Error', vm.error || ''],
+-    ];
+-    const html = rows.map(([k, v]) => `<div class="detail-row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('') +
+-      `<div class="agent-actions"><button data-edit="placements" type="button">Edit placements</button><button data-edit="wake" type="button">Edit wake policy</button></div>`;
+-    Trio.ui.modal('Agent details: ' + vm.name, html);
+-    setTimeout(() => {
+-      const panel = document.getElementById('trio-control-modal');
+-      if (!panel) return;
+-      panel.querySelector('[data-edit="placements"]')?.addEventListener('click', () => editPlacements(vm));
+-      panel.querySelector('[data-edit="wake"]')?.addEventListener('click', () => editWake(vm));
+-    }, 0);
+-  }
+-  function editPlacements(vm) {
+-    const channels = (state.channels || []).filter(c => !c.archived);
+-    const html = channels.map(c => `<label><input type="checkbox" name="placement" value="${esc(c.code)}" ${(vm.placements || []).includes(c.code) ? 'checked' : ''}> ${esc(c.code)}</label>`).join('');
+-    Trio.ui.modal('Placements for ' + vm.name, html || '<p>No channels available.</p>', node => {
+-      const selected = [...node.querySelectorAll('input[name="placement"]:checked')].map(cb => cb.value);
+-      action(vm.id, 'placements', { placements: selected });
+-    });
+-  }
+-  function editWake(vm) {
+-    const html = '<label>Wake policy <select name="wake"><option value="all" ' + (vm.wakePolicy === 'all' ? 'selected' : '') + '>all</option><option value="about" ' + (vm.wakePolicy === 'about' ? 'selected' : '') + '>about</option><option value="at" ' + (vm.wakePolicy === 'at' ? 'selected' : '') + '>at</option></select></label>';
+-    Trio.ui.modal('Wake policy for ' + vm.name, html, node => { const v = node.querySelector('[name="wake"]').value; action(vm.id, 'wake', { filter_mode: v }); });
+-  }
+-  async function loadDiscovery() {
+-    if (state.discoveryLoading) return;
+-    state.discoveryLoading = true;
+-    try {
+-      const [health, models] = await Promise.all([Trio.api.get('/api/health').catch(() => ({})), Trio.api.get('/api/agent-models').catch(() => ({}))]);
+-      if (Array.isArray(health.providers)) state.providers = health.providers;
+-      if (models && typeof models.models === 'object' && Object.keys(models.models).length) state.agentModels = models.models;
+-    } catch (e) { console.warn('discovery failed', e); }
+-    finally { state.discoveryLoading = false; }
+-  }
+-  async function refresh() { try { const data = await Trio.api.get('/api/agents'); state.agents = data.agents || []; Trio.store.set('agents.list', data.agents || []); Trio.store.set('agents.loading', false); render(data.agents); } catch (e) { console.warn(e); } }
+-  function renderActivityEvent(e) {
+-    const time = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '';
+-    const t = (e.type || 'event').toLowerCase();
+-    const meta = typeInfo[t] || { label: t, cls: '' };
+-    const content = typeof e.content === 'string' ? e.content : (e.message || (e.content ? JSON.stringify(e.content, null, 2) : ''));
+-    const body = content ? `<pre class="activity-raw">${esc(String(content).slice(0, 800))}</pre>` : '';
+-    return `<article class="activity-event ${esc(meta.cls)}"><time>${esc(time)}</time><b>${esc(meta.label)}</b>${body}</article>`;
+-  }
+-  function showActivity(id, events = [], offset = 0) {
+-    let panel = $('trio-activity');
+-    if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-activity'; panel.className = 'activity-panel'; document.body.append(panel); }
+-    const pageSize = 20;
+-    const page = events.slice(offset, offset + pageSize);
+-    if (!offset) panel.innerHTML = '<form method="dialog"><button class="modal-close" aria-label="Close">×</button><h2>Agent activity</h2><div class="activity-list"></div></form>';
+-    const list = panel.querySelector('.activity-list');
+-    if (!page.length && !offset) { list.innerHTML = '<p class="home-empty">No activity.</p>'; }
+-    else { list.insertAdjacentHTML('beforeend', page.map(renderActivityEvent).join('')); }
+-    const existing = panel.querySelector('.activity-more');
+-    if (existing) existing.remove();
+-    if (offset + pageSize < events.length) {
+-      const more = document.createElement('button'); more.type = 'button'; more.className = 'activity-more'; more.textContent = 'Load more';
+-      more.addEventListener('click', () => showActivity(id, events, offset + pageSize));
+-      panel.querySelector('form').append(more);
+-    }
+-    panel.showModal();
+-  }
+-  async function activity(id) { try { const d = await Trio.api.get(`/api/agents/${encodeURIComponent(id)}/activity`); showActivity(id, d.events || []); } catch (e) { Trio.ui.toast(e.message); } }
+-  function init() { loadDiscovery(); refresh(); }
++  function label(agent) { return agent.live ? (agent.busy ? 'working' : 'online') : (agent.state || 'offline'); }
++  async function action(id, action, body = {}) { try { await Trio.api.post(`/api/agents/${encodeURIComponent(id)}/${action}`, body); await refresh(); } catch (e) { Trio.ui.toast(e.message || 'Agent action failed'); } }
++  function render(agents = Trio.store.get('agents.list')) { const n = host(); n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><button class="new-agent">New agent</button><div class="agent-list">${(agents || []).map(a => `<article class="agent-card"><b>${esc(a.name)}</b><small>${esc(a.model || a.provider || 'agent')} · ${esc(label(a))}</small><p>${esc((a.channels || []).join(', ') || 'No public rooms')}</p><div><button data-action="wake" data-id="${esc(a.id)}">Wake</button><button data-action="hibernate" data-id="${esc(a.id)}">Hibernate</button><button data-action="activity" data-id="${esc(a.id)}">Activity</button></div></article>`).join('') || '<p>No agents.</p>'}</div>`; n.querySelector('.modal-close').onclick = () => n.hidden = true; n.querySelectorAll('[data-action]').forEach(b => b.onclick = () => b.dataset.action === 'activity' ? activity(b.dataset.id) : action(b.dataset.id, b.dataset.action)); n.querySelector('.new-agent').onclick = create; }
++  async function refresh() { try { const data = await Trio.api.get('/api/agents'); Trio.store.set('agents.list', data.agents || []); Trio.store.set('agents.loading', false); render(); } catch (e) { console.warn(e); } }
++  async function activity(id) { try { const d = await Trio.api.get(`/api/agents/${encodeURIComponent(id)}/activity`); const lines = (d.events || []).slice(0, 20).map(e => { const time = e.ts ? new Date(e.ts).toLocaleTimeString() : ''; const type = e.type || 'event'; const content = e.content || e.message || JSON.stringify(e); return `[${time}] ${type}: ${content}`; }).join('\n') || 'No activity'; Trio.ui.modal('Agent activity', `<pre>${esc(lines)}</pre>`); } catch (e) { Trio.ui.toast(e.message); } }
++  async function create() { Trio.ui.modal('Create agent', '<label>Name<input name="name" required></label><label>Provider<select name="provider"><option>codex</option><option>claude</option></select></label><label>Model<input name="model"></label>', async node => { const f = new FormData(node.querySelector('form')); try { await Trio.api.post('/api/agents', { name: f.get('name'), provider: f.get('provider'), model: f.get('model'), channels: [Trio.store.get('session.channel')].filter(Boolean) }); await refresh(); } catch (e) { Trio.ui.toast(e.message || 'Could not create agent'); } }); }
++  function init() { refresh(); }
+   function mount() { init(); }
+   function unmount() {}
+-  async function create() {
+-    const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+-    const defaultProvider = state.providers[0] || 'codex';
+-    const models = (state.agentModels[defaultProvider] || []).map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+-    const html = `<label class="field">Name <input name="name" required pattern="[A-Za-z0-9_]{1,32}"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile <input name="permissions" placeholder="operator,guest"></label>`;
+-    Trio.ui.modal('Create agent', html, async node => {
+-      const f = new FormData(node.querySelector('form'));
+-      const name = (f.get('name') || '').trim();
+-      const provider = f.get('provider');
+-      const model = f.get('model');
+-      const cwd = (f.get('cwd') || '').trim();
+-      if (!name) { Trio.ui.toast('Name is required'); return; }
+-      if (!provider) { Trio.ui.toast('Provider is required'); return; }
+-      if (!model) { Trio.ui.toast('Model is required'); return; }
+-      const key = 'create:' + name;
+-      if (pendingAgentActions.has(key)) return;
+-      pendingAgentActions.add(key);
+-      Trio.ui.toast('Creating agent…');
+-      try {
+-        const result = await Trio.api.post('/api/agents', { name, provider, model, cwd, permissions: (f.get('permissions') || '').trim(), channels: [Trio.store.get('session.channel')].filter(Boolean) });
+-        await refresh();
+-        if (result?.agent?.id) Trio.workspace?.openDmByKey?.(result.agent.id);
+-      } catch (e) { Trio.ui.toast(e.message || 'Could not create agent'); }
+-      finally { pendingAgentActions.delete(key); }
+-    });
+-  }
+-  Trio.agents = { init, mount, unmount, render, refresh, loadDiscovery, viewModel, actionCaps, statusIcon, action };
++  Trio.agents = { init, mount, unmount, render, refresh, label, action };
+ })();
+diff --git a/server/web/js/40-preferences.js b/server/web/js/40-preferences.js
+index 2076fa2..41be164 100644
+--- a/server/web/js/40-preferences.js
++++ b/server/web/js/40-preferences.js
+@@ -1,18 +1,10 @@
+ (() => {
+   'use strict';
+   const Trio = window.Trio;
+-  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+   const KEY = 'trio.preferences.v1';
+   const defaults = { theme: 'light', accent: 'eucalyptus', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
+-  const schema = { theme: ['light','dark'], accent: ['eucalyptus','indigo','plum'], font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
+-  function cast(key, value) {
+-    if (schema[key] === 'boolean') return !!value;
+-    if (Array.isArray(schema[key])) return schema[key].includes(value) ? value : defaults[key];
+-    return value ?? defaults[key];
+-  }
+-  function readFromStorage() { try { const raw = JSON.parse(localStorage.getItem(KEY) || '{}'); const next = {}; for (const k of Object.keys(schema)) next[k] = cast(k, raw[k]); return { ...defaults, ...next }; } catch { return { ...defaults }; } }
++  function readFromStorage() { try { return { ...defaults, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; } catch { return { ...defaults }; } }
+   function read() { return Trio.store ? Trio.store.get('preferences') : (Trio.state.preferences || readFromStorage()); }
+-  function requestNotifications() { if (typeof Notification !== 'undefined' && Notification.permission === 'default') { Notification.requestPermission().then(p => { if (p !== 'granted') save({ notifications: false }); }); } }
+   function apply(next = readFromStorage()) {
+     const root = document.documentElement;
+     root.dataset.theme = next.theme;
+@@ -20,38 +12,28 @@
+     root.dataset.font = next.font;
+     document.body?.classList.toggle('compact', !!next.compact);
+     document.body?.classList.toggle('message-numbers', !!next.messageNumbers);
+-    if (next.notifications) requestNotifications();
+     if (Trio.store) Trio.store.set('preferences', next);
+     else Trio.state.preferences = next;
+     return next;
+   }
+   function save(change) {
+-    const current = readFromStorage(); const next = { ...current };
+-    for (const k of Object.keys(schema)) if (change[k] !== undefined) next[k] = cast(k, change[k]);
++    const next = { ...readFromStorage(), ...change };
+     localStorage.setItem(KEY, JSON.stringify(next));
+     apply(next);
+     Trio.events.dispatchEvent(new CustomEvent('preferences:changed', { detail: next }));
+     return next;
+   }
+-  function reset() { localStorage.removeItem(KEY); const next = { ...defaults }; apply(next); return next; }
+-  function diagnostics() { const note = typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'; return { online: navigator.onLine ? 'yes' : 'no', channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length, notifications: note, stt: Trio.state.sttHealth || 'checking' }; }
+-  async function checkStt() {
+-    try { const h = await Trio.api.get('/api/stt/health'); Trio.state.sttHealth = h && h.ok ? 'ready' : 'unavailable'; }
+-    catch { Trio.state.sttHealth = 'unavailable'; }
+-  }
+-  async function panel() {
++  function diagnostics() { return { online: navigator.onLine, channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length }; }
++  function panel() {
+     let n = document.getElementById('trio-preferences');
+     if (!n) { n = document.createElement('dialog'); n.id = 'trio-preferences'; document.body.append(n); }
+     const p = read();
+-    const rows = Object.entries(diagnostics()).map(([k, v]) => `<div class="diagnostic-row"><b>${esc(k)}</b><span id="diag-${esc(k)}">${esc(v)}</span></div>`).join('');
+-    n.innerHTML = `<form method="dialog"><button class="modal-close">×</button><h2>Settings & diagnostics</h2><label>Theme <select data-key="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label><label>Accent <select data-key="accent"><option>eucalyptus</option><option>indigo</option><option>plum</option></select></label><label>Font <select data-key="font"><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label>${['compact','messageNumbers','notifications','chime','dictation'].map(k=>`<label><input type="checkbox" data-key="${k}" ${p[k]?'checked':''}> ${k.replace(/([A-Z])/g,' $1').toLowerCase()}</label>`).join('')}<div class="diagnostics-list">${rows}</div><button type="button" class="reset-prefs">Reset to defaults</button></form>`;
+-    n.querySelectorAll('[data-key]:not([disabled])').forEach(el => { if (el.type === 'checkbox') el.checked = !!p[el.dataset.key]; else el.value = p[el.dataset.key]; el.onchange = () => save({ [el.dataset.key]: el.type === 'checkbox' ? el.checked : el.value }); });
+-    n.querySelector('.reset-prefs')?.addEventListener('click', () => { reset(); panel(); });
++    n.innerHTML = `<form method="dialog"><button class="modal-close">×</button><h2>Settings & diagnostics</h2><label>Theme <select data-key="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label><label>Accent <select data-key="accent"><option>eucalyptus</option><option>indigo</option><option>plum</option></select></label>${['compact','messageNumbers','notifications','chime','dictation'].map(k=>`<label><input type="checkbox" data-key="${k}" ${p[k]?'checked':''}> ${k.replace(/([A-Z])/g,' $1').toLowerCase()}</label>`).join('')}<pre>${JSON.stringify(diagnostics(),null,2)}</pre></form>`;
++    n.querySelectorAll('[data-key]:not([disabled])').forEach(el => { el.value = el.type === 'checkbox' ? el.checked : p[el.dataset.key]; el.onchange = () => save({ [el.dataset.key]: el.type === 'checkbox' ? el.checked : el.value }); });
+     n.showModal();
+-    checkStt().then(() => { const v = document.getElementById('diag-stt'); if (v) v.textContent = Trio.state.sttHealth; });
+   }
+   function init() { apply(); }
+   function mount() { init(); }
+   function unmount() {}
+-  Trio.preferences = { init, mount, unmount, apply, save, reset, read, diagnostics, panel };
++  Trio.preferences = { init, mount, unmount, apply, save, read, diagnostics, panel };
+ })();
+diff --git a/server/web/js/90-boot.js b/server/web/js/90-boot.js
+index 2663ea9..eed6314 100644
+--- a/server/web/js/90-boot.js
++++ b/server/web/js/90-boot.js
+@@ -19,7 +19,10 @@
+       document.documentElement.dataset.theme = next;
+       Trio.preferences?.save?.({ theme: next });
+     });
+-    ['search-btn', 'details-btn'].forEach(id => { const btn = document.getElementById(id); if (btn) { btn.disabled = false; btn.title = id === 'search-btn' ? 'Search (Ctrl/Cmd+K)' : 'Conversation details'; } });
++    ['search-btn', 'details-btn'].forEach(id => {
++      const btn = document.getElementById(id);
++      if (btn) { btn.disabled = true; btn.title = (id === 'search-btn' ? 'Search' : 'Conversation details') + ' — not yet implemented'; }
++    });
+     const archiveBtn = document.getElementById('archive-btn');
+     archiveBtn?.addEventListener('click', () => Trio.workspace?.archiveCurrent?.());
+     if (Trio.state.conversation?.kind === 'dm' && Trio.workspace?.openDmByKey) {
+diff --git a/tests/test-client-render.js b/tests/test-client-render.js
+index 4ebf1f6..d4d99c0 100644
+--- a/tests/test-client-render.js
++++ b/tests/test-client-render.js
+@@ -96,17 +96,6 @@ check('agent roster panel is hidden on render', () => {
+   assert.ok(panel);
+   assert.strictEqual(panel.hidden, true);
+ });
+-check('agent view model normalizes lifecycle and status', () => {
+-  const vm = H.Trio.agents.viewModel({ id: 'ag_1', name: 'Test', live: true, busy: true, provider: 'claude', model: 'sonnet', filter_mode: 'about', error: 'boom' });
+-  assert.strictEqual(vm.lifecycle, 'working');
+-  assert.strictEqual(vm.wakePolicy, 'about');
+-  assert.strictEqual(vm.needsAttention, true);
+-});
+-check('agent action capabilities filter by lifecycle', () => {
+-  const caps = H.Trio.agents.actionCaps(H.Trio.agents.viewModel({ id: 'ag_1', live: false, state: 'stopped' }));
+-  assert.ok(caps.includes('wake'));
+-  assert.strictEqual(caps.includes('interrupt'), false);
+-});
+ check('preferences save persists the dictation switch', () => {
+   H.Trio.preferences.save({ dictation: false });
+   assert.strictEqual(H.Trio.preferences.read().dictation, false);
