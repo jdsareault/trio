@@ -56,7 +56,7 @@
   function openChannel(code, extra = '') {
     const readOnly = extra === 'archived';
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
-    loadConversation(code, 'trio#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
+    loadConversation(code, '#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
   }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false, isAudit = false) {
     if (Trio.store) Trio.store.set('session.channel', channel);
@@ -72,6 +72,7 @@
     renderRail();
     document.getElementById('h-channel').textContent = title;
     document.getElementById('h-meta').textContent = subtitle;
+    renderFacePile();
     const banner = document.getElementById('private-banner');
     if (banner) { banner.classList.toggle('hidden', !isDm); banner.classList.toggle('audit', !!isAudit); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
@@ -151,6 +152,29 @@
   function initials(label) { return String(label || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase(); }
   function avatar(label, tone = 'eucalyptus', status = '') { return `<span class="av av-28 tone-${tone} ${status ? 'st-' + status : ''}">${esc(initials(label))}${status ? '<span class="st-ring"></span>' : ''}</span>`; }
   function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
+  function renderFacePile() {
+    const pile = $('face-pile'); if (!pile) return;
+    pile.replaceChildren();
+    const members = [...(state.members?.values?.() || [])];
+    const operator = state.operator || state.meta?.operator;
+    if (operator?.id && !members.some(member => member.id === operator.id)) members.push(operator);
+    const visible = members.slice(0, 4);
+    visible.forEach(member => {
+      const node = document.createElement('span');
+      node.innerHTML = avatar(member.name || member.id, avatarTone(member.name || member.id), member.status === 'working' ? 'thinking' : 'online');
+      const face = node.firstElementChild;
+      face.setAttribute('aria-label', member.name || member.id || 'Channel member');
+      face.title = member.name || member.id || 'Channel member';
+      pile.append(face);
+    });
+    if (members.length > visible.length) {
+      const more = document.createElement('span');
+      more.className = 'more'; more.textContent = '+' + (members.length - visible.length);
+      more.setAttribute('aria-label', `${members.length - visible.length} more channel members`);
+      pile.append(more);
+    }
+    pile.hidden = !members.length;
+  }
   function navItem(label, icon, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
     button.innerHTML = `<span class="nav-hash">${icon === 'hash' ? '#' : navIcon(icon)}</span><span class="nav-label">${esc(label)}</span>${badge ? `<span class="nav-meta"><span class="badge">${esc(badge)}</span></span>` : ''}`;
@@ -402,8 +426,8 @@
     if (!route) return;
     if (route.name === 'channel') {
       const subtitle = route.params.archived ? 'Archived channel — read only' : 'Live agent workspace';
-      if (state.channel !== route.params.code) loadConversation(route.params.code, 'trio#' + route.params.code, subtitle, !!route.params.archived, false);
-      else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; showConversationPage(); updateTopbar('trio#' + route.params.code, subtitle); renderRail(); }
+      if (state.channel !== route.params.code) loadConversation(route.params.code, '#' + route.params.code, subtitle, !!route.params.archived, false);
+      else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; showConversationPage(); updateTopbar('#' + route.params.code, subtitle); renderFacePile(); renderRail(); }
     }
     else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
     else if (route.name === 'home') showView('home');
@@ -488,7 +512,7 @@
     input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
   }
   let refreshInterval = null;
-  function mount() { refresh(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast};
 })();

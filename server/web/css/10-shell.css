@@ -147,15 +147,16 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 @media (max-width:880px){ .hamb{ display:grid; } }
 
 .topbar .tt{ min-width:0; flex:1; }
-.topbar h2{ font-family:var(--font-display); font-size:19px; font-weight:600; letter-spacing:-.01em; display:flex; align-items:center; gap:8px; }
-.topbar h2 .h{ color:var(--ink-3); font-weight:500; }
+.topbar h1,.topbar h2{ font-family:var(--font-display); font-size:19px; font-weight:600; letter-spacing:-.01em; display:flex; align-items:center; gap:8px; }
+.topbar h1 .h,.topbar h2 .h{ color:var(--ink-3); font-weight:500; }
 .topbar .topic{ font-size:12.5px; color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:1px; }
 .topbar-actions{ display:flex; align-items:center; gap:6px; }
 
 .face-pile{ display:flex; align-items:center; padding-right:6px; }
-.face-pile .av{ margin-left:-8px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2.5px var(--bg); }
+.face-pile .av{ width:34px; height:34px; font-size:14px; margin-left:-8px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2.5px var(--bg); }
+.face-pile .av:first-child{ margin-left:0; }
 .face-pile .more{
-  margin-left:-8px; width:28px; height:28px; border-radius:50%; background:var(--surface);
+  margin-left:-8px; width:34px; height:34px; border-radius:50%; background:var(--surface);
   display:grid; place-items:center; font-size:11px; font-weight:700; color:var(--ink-2);
   box-shadow: 0 0 0 2.5px var(--bg); border:1px solid var(--line);
 }

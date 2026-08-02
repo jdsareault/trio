@@ -39,7 +39,7 @@
         return false;
       }
     }
-    document.getElementById('h-channel').textContent = root.state.channel ? `trio#${root.state.channel}` : 'Atrium';
+    document.getElementById('h-channel').textContent = root.state.channel ? `#${root.state.channel}` : 'Atrium';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
     mountFeatures?.();
     if (root.startEvents) root.startEvents(root.state.channel);
