@@ -3,7 +3,7 @@
   const Trio = window.Trio;
   async function boot() {
     const mountFeatures = () => {
-      ['conversation', 'workspace', 'agents', 'preferences', 'router'].forEach(name => {
+      ['conversation', 'workspace', 'agents', 'preferences', 'router', 'composer'].forEach(name => {
         const feature = Trio[name];
         if (feature) Trio.lifecycle?.mount?.(name, feature);
       });
