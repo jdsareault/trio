@@ -55,10 +55,19 @@ reveal_calls = []
 
 def fake_run(args, **kwargs):
     reveal_calls.append({"args": args, "kwargs": kwargs})
-    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    # stdout/stderr as BYTES: real subprocess.run returns bytes when text=True
+    # is unset, and subprocess.check_output delegates to run — so a str stdout
+    # here would let tailscale_whois reach `.decode()` on a str and crash. Keep
+    # the mock faithful to the real subprocess contract.
+    return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
 
 web.subprocess.run = fake_run
+# No Tailscale daemon in the test env: skip whois so identity resolution falls
+# through to loopback (operator). Also keeps `reveal_calls` free of whois
+# noise — without this, check_output (which delegates to the mocked run) would
+# append a `tailscale whois` call to reveal_calls on every request.
+web.tailscale_whois = lambda remote_ip: None
 
 
 def http(port, path, body):
@@ -198,6 +207,23 @@ try:
     for bad in ({"path": ""}, {"path": "   "}, {"path": 123}, {}):
         st, _ = http(port, "/api/reveal", bad)
         check(f"reveal: bad body {bad} -> 400", st == 400)
+
+    # ── operator-only gate ──
+    # /api/path/validate and /api/reveal probe filesystem existence on the hub
+    # and pop Finder windows; both must be denied to non-operators (guests /
+    # pending browsers / single-channel viewers) — otherwise any device on a
+    # tailnet can enumerate paths or spam the operator's desktop.
+    _orig_seeing = web.is_all_seeing
+    web.is_all_seeing = lambda mid: False
+    try:
+        st, _ = http(port, "/api/path/validate", {"paths": [real_file]})
+        check("auth: non-operator /api/path/validate -> 403", st == 403)
+        reveal_calls.clear()
+        st, _ = http(port, "/api/reveal", {"path": real_file})
+        check("auth: non-operator /api/reveal -> 403", st == 403)
+        check("auth: non-operator reveal never invokes open", not reveal_calls)
+    finally:
+        web.is_all_seeing = _orig_seeing
 
 except OSError as e:
     skip("file-reveal", f"could not start server: {e}")

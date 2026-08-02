@@ -818,16 +818,20 @@ class EventHub:
         Defaults keep the operator (and existing callers/tests) all-seeing."""
         q: queue.Queue = queue.Queue(maxsize=200)
         sub = (q, viewer_id, all_seeing)
-        # Compute the priming payloads BEFORE this subscriber is visible to
-        # _broadcast, then register the subscriber and enqueue them together
-        # while holding _lock (the same lock _broadcast takes to iterate
-        # _subs). That makes "start receiving live events" and "primed
-        # history is already queued" atomic, so a message broadcast during
-        # priming can no longer land in q ahead of (or duplicated with) the
-        # snapshot it belongs after.
-        payloads = self._build_prime_payloads(viewer_id, all_seeing)
+        # Register the subscriber BEFORE building the prime snapshot. A
+        # message committed between the snapshot query and registration used
+        # to be permanently lost (snapshot missed it; _broadcast could not see
+        # the sub yet). Registering first closes that gap: anything broadcast
+        # during priming is also enqueued live, so the client may see a
+        # duplicate of a primed message — which it dedupes by id (and orders
+        # by id in 11-conversation.js::upsert). Duplicates are benign; a gap
+        # is not. The prime payloads are enqueued under _lock so they land
+        # atomically relative to each other; a live event that interleaves
+        # between register and enqueue is reordered/deduped client-side.
         with self._lock:
             self._subs.append(sub)
+        payloads = self._build_prime_payloads(viewer_id, all_seeing)
+        with self._lock:
             try:
                 for payload in payloads:
                     q.put_nowait(payload)
@@ -2509,8 +2513,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 return
             self._handle_delete()
         elif parsed.path == "/api/path/validate":
+            if self._require_operator() is None:
+                return
             self._handle_path_validate()
         elif parsed.path == "/api/reveal":
+            if self._require_operator() is None:
+                return
             self._handle_reveal()
         else:
             self._error(404, "not found")

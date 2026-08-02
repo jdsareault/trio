@@ -29,8 +29,17 @@
     node.innerHTML = `<form method="dialog" class="control-modal"><button type="submit" formnovalidate class="modal-close" value="cancel">×</button><h2>${esc(title)}</h2>${body}<footer><button type="submit" formnovalidate value="cancel">${cancelLabel}</button>${submitButton}</footer></form>`;
     node.addEventListener('close', () => { if (node.returnValue === 'default') submit?.(node); }, { once: true }); node.showModal();
   }
-  function confirmAction(message, action) {
-    modal('Confirm', `<p>${esc(message)}</p>`, () => action?.());
+  function confirmAction(message, actionOrDescription, maybeAction) {
+    // Two-arg form: confirmAction(message, action)
+    // Three-arg form: confirmAction(message, description, action) — renders a
+    // body line under the prompt; description is text-only (escaped here).
+    const hasDescription = typeof actionOrDescription === 'string';
+    const description = hasDescription ? actionOrDescription : '';
+    const action = hasDescription ? maybeAction : actionOrDescription;
+    const body = description
+      ? `<p>${esc(message)}</p><p class="modal-desc">${esc(description)}</p>`
+      : `<p>${esc(message)}</p>`;
+    modal('Confirm', body, () => action?.());
   }
   function setLive(text) {
     let region = document.getElementById('trio-aria-live');
