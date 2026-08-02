@@ -11,6 +11,11 @@
   state.discoveryLoading = false;
   let discoveryPromise = null;
   const pendingAgentActions = new Set();
+  const PERMISSION_PROFILES = [
+    ['observe', 'Observe (read-only)'],
+    ['balanced', 'Balanced'],
+    ['autonomous', 'Autonomous'],
+  ];
   const typeInfo = {
     plan: { label: 'Plan', cls: 'type-plan' },
     command: { label: 'Command', cls: 'type-command' },
@@ -176,6 +181,9 @@
   function modelOptions(models) {
     return normalizeModels(models).map(model => `<option value="${esc(model.id)}">${esc(model.name)}</option>`).join('');
   }
+  function permissionOptions(selected = 'balanced') {
+    return `<select name="permission_profile">${PERMISSION_PROFILES.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('')}</select>`;
+  }
   async function loadDiscovery() {
     if (discoveryPromise) return discoveryPromise;
     discoveryPromise = (async () => {
@@ -237,7 +245,7 @@
     const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
     const defaultProvider = state.providers[0] || 'codex';
     const models = modelOptions(state.agentModels[defaultProvider]);
-    const html = `<label class="field">Name <input name="name" required pattern="[A-Za-z0-9_]{1,32}"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile <input name="permissions" placeholder="operator,guest"></label>`;
+    const html = `<label class="field">Name <input name="name" required pattern="[A-Za-z0-9_]{1,32}"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
       const name = (f.get('name') || '').trim();
@@ -252,7 +260,7 @@
       pendingAgentActions.add(key);
       Trio.ui.toast('Creating agent…');
       try {
-        const result = await Trio.api.post('/api/agents', { name, provider, model, cwd, permissions: (f.get('permissions') || '').trim(), channels: [Trio.store.get('session.channel')].filter(Boolean) });
+        const result = await Trio.api.post('/api/agents', { name, provider, model, cwd, permission_profile: f.get('permission_profile') || 'balanced', channels: [Trio.store.get('session.channel')].filter(Boolean) });
         await refresh();
         if (result?.agent?.id) Trio.workspace?.openDmByKey?.(result.agent.id);
       } catch (e) { Trio.ui.toast(e.message || 'Could not create agent'); }
@@ -265,5 +273,5 @@
       if (modelField) modelField.innerHTML = modelOptions(state.agentModels[providerField.value]);
     });
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, viewModel, actionCaps, statusIcon, action, create };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, statusIcon, action, create };
 })();
