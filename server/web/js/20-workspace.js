@@ -73,7 +73,7 @@
     document.getElementById('h-channel').textContent = title;
     document.getElementById('h-meta').textContent = subtitle;
     const banner = document.getElementById('private-banner');
-    if (banner) { banner.classList.toggle('hidden', !isDm); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
+    if (banner) { banner.classList.toggle('hidden', !isDm); banner.classList.toggle('audit', !!isAudit); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
     Trio.conversation?.render?.();
     Trio.composer?.syncReadOnly?.();
