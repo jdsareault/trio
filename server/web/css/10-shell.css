@@ -41,7 +41,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   height:100vh;
   height:100dvh;
 }
-.app.channel-details-open{ grid-template-columns:300px minmax(0,1fr) minmax(360px,565px); }
+.app.channel-details-open{ grid-template-columns:300px minmax(0,1fr) var(--channel-drawer-width,380px); }
 @media (max-width: 880px){
   .app{ grid-template-columns: 1fr; }
   .sidebar{ position:fixed; z-index:var(--z-sidebar); inset:0 auto 0 0; width:300px; transform:translateX(-105%); transition:transform var(--dur) var(--ease); box-shadow:var(--shadow-lg); }
@@ -173,8 +173,13 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .channel-drawer{
   grid-column:3; grid-row:1; min-width:0; min-height:0; width:auto;
   display:none; flex-direction:column; background:var(--surface); border-left:1px solid var(--line);
+  position:relative;
 }
 .channel-drawer.open{ display:flex; }
+.channel-drawer-resize{ position:absolute; z-index:2; top:0; bottom:0; left:-5px; width:10px; padding:0; cursor:col-resize; border:0; background:transparent; }
+.channel-drawer-resize span{ display:block; width:2px; height:36px; margin:auto; border-radius:99px; background:transparent; transition:background .16s var(--ease); }
+.channel-drawer-resize:hover span,.channel-drawer-resize:focus-visible span,.app.is-resizing .channel-drawer-resize span{ background:var(--accent); }
+.app.is-resizing,.app.is-resizing *{ cursor:col-resize !important; user-select:none !important; }
 .channel-drawer-head{ min-height:78px; padding:18px 28px 14px 32px; display:flex; align-items:center; gap:16px; border-bottom:1px solid var(--line-soft); }
 .channel-drawer-head h2{ flex:1; min-width:0; font-family:var(--font-display); font-size:23px; font-weight:600; letter-spacing:-.015em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .channel-drawer-head .icon-btn{ width:40px; height:40px; border:1.5px solid transparent; border-radius:13px; }
@@ -211,6 +216,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 @media (max-width:880px){
   .app.channel-details-open{ grid-template-columns:1fr; grid-template-rows:minmax(0,1fr) minmax(320px,62dvh); }
   .channel-drawer{ grid-column:1; grid-row:2; border-top:1px solid var(--line); border-left:0; }
+  .channel-drawer-resize{ display:none; }
   .channel-drawer-body{ padding-left:24px; padding-right:24px; }
   .channel-drawer-head{ padding-left:24px; padding-right:20px; }
 }

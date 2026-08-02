@@ -472,6 +472,7 @@
     menu.querySelector('button')?.focus();
   }
   let menuClick = null, menuKeydown = null, menuButtonClick = null;
+  let drawerResizeStart = null, drawerResizeMove = null, drawerResizeEnd = null;
   let unroute = null;
   let wsl = null;
   function onWorkspaceUpdate() { if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
@@ -563,6 +564,29 @@
     if (!drawer) return;
     drawer.classList.remove('open'); $('app')?.classList.remove('channel-details-open'); drawer.setAttribute('aria-hidden', 'true'); $('details-btn')?.classList.remove('menu-active');
   }
+  function startDrawerResize(event) {
+    if (event.button !== 0) return;
+    const app = $('app'); const drawer = $('channel-drawer'); const handle = $('channel-drawer-resize');
+    if (!app || !drawer || !handle) return;
+    event.preventDefault();
+    const startWidth = drawer.getBoundingClientRect().width;
+    const startX = event.clientX;
+    const minWidth = 320;
+    const maxWidth = Math.min(560, Math.max(minWidth, window.innerWidth - 420));
+    app.classList.add('is-resizing');
+    drawerResizeStart = {startWidth, startX, minWidth, maxWidth};
+    drawerResizeMove = move => {
+      if (!drawerResizeStart) return;
+      const width = Math.round(Math.max(drawerResizeStart.minWidth, Math.min(drawerResizeStart.maxWidth, drawerResizeStart.startWidth + drawerResizeStart.startX - move.clientX)));
+      app.style.setProperty('--channel-drawer-width', width + 'px');
+      handle.setAttribute('aria-valuenow', String(width));
+    };
+    drawerResizeEnd = () => {
+      drawerResizeStart = null; app.classList.remove('is-resizing');
+      document.removeEventListener('pointermove', drawerResizeMove); document.removeEventListener('pointerup', drawerResizeEnd);
+    };
+    document.addEventListener('pointermove', drawerResizeMove); document.addEventListener('pointerup', drawerResizeEnd, {once:true});
+  }
   function showDetails() {
     const drawer = $('channel-drawer'); const body = $('channel-drawer-body');
     if (!drawer || !body) return;
@@ -593,7 +617,7 @@
     input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
   }
   let refreshInterval = null;
-  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { closeChannelMenu(); closeDetails(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast};
 })();
