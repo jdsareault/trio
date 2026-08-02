@@ -46,8 +46,9 @@
         items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline', ...(a.can_cancel ? ['cancel'] : [])] });
       }
       for (const t of listOf(src.tasks)) {
-        if (t.status !== 'blocked') continue;
-        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.description || t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
+        if (t.status !== 'open' && t.status !== 'blocked') continue;
+        const isBlocked = t.status === 'blocked';
+        items.push({ id: 'task-' + t.id, kind: 'task', severity: isBlocked ? 'medium' : 'low', title: t.description || t.message || t.title || (isBlocked ? 'Blocked task' : 'Open task'), source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: isBlocked ? 'Blocked by ' + (t.blocked_by || []).join(', ') : 'Open — waiting to be claimed', actions: [] });
       }
       for (const a of listOf(src.agents)) {
         if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
@@ -271,7 +272,7 @@
     intro.innerHTML = `<div class="greet">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc(operatorName)}.</div><div class="sub">Here’s what’s happening across your workspace.</div>`;
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
-      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
+      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.openTasks()} tasks · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
       { title: 'Messages for you', count: selectors.unreadDms(), subtitle: 'Unread & mentions', tone: 'accent', detail: 'Private messages and direct pings', action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
       { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
     ];
