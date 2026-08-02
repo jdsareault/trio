@@ -370,6 +370,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .theme-choice{ display:flex; gap:10px; flex-wrap:wrap; }
 .theme-choice-group{ flex:1 1 100%; }
 .theme-choice-group .theme-choice{ margin-top:8px; }
+.theme-group-label{ font-weight:600; font-size:13px; color:var(--ink-2); margin-bottom:6px; }
 .theme-opt{
   border:2px solid var(--line); border-radius:14px; padding:10px 12px; min-width:104px;
   background:var(--surface-2); text-align:left; transition:all .18s var(--ease); position:relative;

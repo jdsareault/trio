@@ -108,7 +108,7 @@
     const themeChoices = document.createElement('div'); themeChoices.className = 'theme-choice';
     [['lightTheme', 'Light default', lightThemes], ['darkTheme', 'Dark default', darkThemes]].forEach(([key, label, options]) => {
       const group = document.createElement('div'); group.className = 'theme-choice-group';
-      group.innerHTML = `<div class="tl">${label}</div>`;
+      group.innerHTML = `<div class="theme-group-label">${label}</div>`;
       const choices = document.createElement('div'); choices.className = 'theme-choice';
       options.forEach(option => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p[key] === option.id ? ' on' : ''); b.setAttribute('aria-pressed', p[key] === option.id ? 'true' : 'false'); b.innerHTML = `<span class="swatch ${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
       group.append(choices); themeChoices.append(group);
