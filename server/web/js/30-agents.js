@@ -11,6 +11,7 @@
   state.discoveryLoading = false;
   let discoveryPromise = null;
   const pendingAgentActions = new Set();
+  const compactionPolls = new Map();
   const PERMISSION_PROFILES = [
     ['observe', 'Observe (read-only)'],
     ['balanced', 'Balanced'],
@@ -99,9 +100,24 @@
     const key = id + ':' + action;
     if (pendingAgentActions.has(key)) return;
     pendingAgentActions.add(key);
-    try { await Trio.api.post(`/api/agents/${encodeURIComponent(id)}/${action}`, body); await refresh(); }
+    try {
+      await Trio.api.post(`/api/agents/${encodeURIComponent(id)}/${action}`, body);
+      await refresh();
+      if (action === 'compact') watchCompaction(id);
+    }
     catch (e) { Trio.ui.toast(e.message || 'Agent action failed'); }
     finally { pendingAgentActions.delete(key); }
+  }
+  function watchCompaction(id) {
+    clearTimeout(compactionPolls.get(id));
+    const poll = async () => {
+      await refresh();
+      const agent = (state.agents || []).find(candidate => candidate.id === id);
+      if (agent?.state === 'compacting') compactionPolls.set(id, setTimeout(poll, 1500));
+      else compactionPolls.delete(id);
+    };
+    const agent = (state.agents || []).find(candidate => candidate.id === id);
+    if (agent?.state === 'compacting') compactionPolls.set(id, setTimeout(poll, 1500));
   }
   function agentCard(vm) {
     const article = document.createElement('article'); article.className = 'agent-card agent-card-openable' + (vm.needsAttention ? ' needs-attention' : '');
@@ -198,11 +214,21 @@
       if (!panel) return;
       panel.querySelectorAll('[data-agent-action]').forEach(button => button.addEventListener('click', () => {
         const actionName = button.dataset.agentAction;
-        if (confirmAction(vm, actionName)) action(vm.id, actionName);
+        if (actionName === 'compact') {
+          panel.close('cancel');
+          setTimeout(() => showCompact(vm), 0);
+        } else if (confirmAction(vm, actionName)) action(vm.id, actionName);
       }));
       panel.querySelector('[data-edit="placements"]')?.addEventListener('click', () => editPlacements(vm));
       panel.querySelector('[data-edit="wake"]')?.addEventListener('click', () => editWake(vm));
     }, 0);
+  }
+  function showCompact(vm) {
+    const html = `<p>Summarize this agent's context to free room while retaining the important work.</p><label class="field">What should be preserved? <textarea name="compaction-message" maxlength="2000" placeholder="Optional: key decisions, constraints, or next steps to retain"></textarea></label>`;
+    Trio.ui.modal('Compact context: ' + vm.name, html, node => {
+      const message = (node.querySelector('[name="compaction-message"]')?.value || '').trim();
+      action(vm.id, 'compact', { message });
+    });
   }
   function editPlacements(vm) {
     const channels = (state.channels || []).filter(c => !c.archived);
@@ -300,7 +326,7 @@
   async function activity(id) { try { const d = await Trio.api.get(`/api/agents/${encodeURIComponent(id)}/activity`); showActivity(id, d.events || []); } catch (e) { Trio.ui.toast(e.message); } }
   function init() { loadDiscovery(); refresh(); }
   function mount() { init(); }
-  function unmount() {}
+  function unmount() { compactionPolls.forEach(timer => clearTimeout(timer)); compactionPolls.clear(); }
   async function create() {
     await loadDiscovery();
     const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
