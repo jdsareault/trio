@@ -155,11 +155,16 @@
     button.innerHTML = `<span class="nav-hash">${icon === 'hash' ? '#' : navIcon(icon)}</span><span class="nav-label">${esc(label)}</span>${badge ? `<span class="nav-meta"><span class="badge">${esc(badge)}</span></span>` : ''}`;
     button.addEventListener('click', onClick); return button;
   }
-  function section(title, items, add) {
+  function section(title, items, add, onAdd = createChannel, addLabel = 'Create channel') {
     const wrap = document.createElement('section'); wrap.className = 'nav-section';
     const head = document.createElement('div'); head.className = 'nav-head'; head.innerHTML = `<h3>${esc(title)}</h3>`;
-    if (add) { const button = document.createElement('button'); button.type = 'button'; button.className = 'add-btn'; button.setAttribute('aria-label', 'Create channel'); button.title = 'Create channel'; button.innerHTML = navIcon('plus'); button.addEventListener('click', createChannel); head.append(button); }
+    if (add) { const button = document.createElement('button'); button.type = 'button'; button.className = 'add-btn'; button.setAttribute('aria-label', addLabel); button.title = addLabel; button.innerHTML = navIcon('plus'); button.addEventListener('click', onAdd); head.append(button); }
     wrap.append(head); items.forEach(item => wrap.append(item)); return wrap;
+  }
+  function itemWithAdd(item, onAdd, addLabel) {
+    const row = document.createElement('div'); row.className = 'nav-item-row';
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'add-btn'; button.setAttribute('aria-label', addLabel); button.title = addLabel; button.innerHTML = navIcon('plus'); button.addEventListener('click', onAdd);
+    row.append(item, button); return row;
   }
   function dmItem(dm, audit = false) {
     const label = dm.name || dm.key || 'Conversation';
@@ -176,14 +181,14 @@
     const workspaceItems = [
       navItem('Home', 'home', () => showView('home'), '', state.view === 'home'),
       navItem('Attention', 'attention', () => showView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
-      navItem('Agent roster', 'roster', () => showView('roster'), '', state.view === 'roster'),
+      itemWithAdd(navItem('Agent roster', 'roster', () => showView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
       navItem('Preferences', 'settings', () => showView('prefs'), '', state.view === 'prefs'),
     ];
     const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code));
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
     rail.append(section('Workspace', workspaceItems));
     rail.append(section('Channels', channelItems, true));
-    if (nav.yours.length) rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d))));
+    if (nav.yours.length) rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d)), true, () => showView('roster'), 'Start direct message'));
     if (nav.agentAudit.length) rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true))));
     const operator = state.operator || state.meta?.operator || {}; const opName = operator.name || 'Workspace'; const opAvatar = $('operator-avatar'); const opLabel = $('operator-name'); const opRole = $('operator-role');
     if (opAvatar) { opAvatar.textContent = initials(opName); opAvatar.className = 'operator-avatar tone-' + avatarTone(opName); }
