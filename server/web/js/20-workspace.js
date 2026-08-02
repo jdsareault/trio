@@ -144,7 +144,7 @@
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
   }
   function initials(label) { return String(label || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase(); }
-  function avatar(label, tone = 'eucalyptus', status = '') { return `<span class="av av-40 tone-${tone} ${status ? 'st-' + status : ''}">${esc(initials(label))}${status ? '<span class="st-ring"></span>' : ''}</span>`; }
+  function avatar(label, tone = 'eucalyptus', status = '') { return `<span class="av av-28 tone-${tone} ${status ? 'st-' + status : ''}">${esc(initials(label))}${status ? '<span class="st-ring"></span>' : ''}</span>`; }
   function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
   function navItem(label, icon, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
