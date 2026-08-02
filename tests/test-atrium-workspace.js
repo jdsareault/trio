@@ -57,6 +57,9 @@ check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' },
 check('selector unread dms', s.unreadDms({ dms: { your_dms: [{ unread: 3 }, { unread: 0 }, {} ] } }) === 3);
 check('selector recent channels', s.recentChannels({ channels: [{ code: 'x' }, { code: 'y', archived: true }, { code: 'z' }] }).length === 2);
 
+base.Trio.state.dms = { targets: [{ id: 'z', name: 'Zed' }, { id: 'a', name: 'Ada' }] };
+check('direct-message targets are sorted by display name', base.Trio.workspace.dmTargets().map(target => target.id).join(',') === 'a,z');
+
 // Agent-audit clicks are read-only, but they are not archived threads. The
 // client must preserve that distinction in the history request.
 base.document.querySelector = () => null;
