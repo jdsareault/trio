@@ -1709,6 +1709,14 @@ def dm_thread_key(message, operator_id: str) -> Tuple[str, List[str]]:
     return key, others
 
 
+def dm_audit_thread_key(message) -> str:
+    """Return the stable participant key for a non-operator DM row."""
+    recipients = parse_recipients(message["recipients"])
+    participants = set(recipients)
+    participants.add(message["member_id"])
+    return ",".join(sorted(participants)) if len(participants) > 1 else ""
+
+
 def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
     """Create the private DM transport and place every managed agent in it.
 
@@ -3384,6 +3392,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 matched = []
                 for r in rows:
                     key, _others = dm_thread_key(r, operator_id)
+                    if not key:
+                        key = dm_audit_thread_key(r)
                     if key == requested_key:
                         matched.append(r)
                 latest = matched[0]["id"] if matched else 0
