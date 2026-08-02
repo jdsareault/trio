@@ -183,6 +183,7 @@
       navItem('Home', 'home', () => showView('home'), '', state.view === 'home'),
       navItem('Attention', 'attention', () => showView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
       itemWithAdd(navItem('Agent roster', 'roster', () => showView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
+      navItem('Tasks', 'tasks', () => showView('tasks'), '', state.view === 'tasks'),
       navItem('Preferences', 'settings', () => showView('prefs'), '', state.view === 'prefs'),
     ];
     const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code));
