@@ -505,6 +505,7 @@ function buildScript() {
       systemMessageText: window.Trio.markdown.systemMessageText,
       humanizeIdSigils: window.Trio.markdown.humanizeIdSigils,
       paintBody: window.Trio.conversation.paintBody,
+      cardFor: window.Trio.conversation.cardFor,
       answerPayload: window.Trio.conversation.answerPayload,
       isPrivate: window.Trio.conversation.isPrivate,
       buildSendPayload: window.Trio.composer.buildSendPayload,

@@ -91,3 +91,9 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .composer-shell{border-top:0;background:var(--bg);padding:8px 26px 20px}.composer-shell .composer-inner{padding:8px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-md)}.composer-shell textarea{border:0;box-shadow:none;background:transparent;resize:none;min-height:42px;padding:8px 10px 2px}.composer-shell textarea:focus{border:0;box-shadow:none}.composer-shell .comp-bar{padding:0 4px 2px}.composer-shell .reach-preview{padding:2px 6px 0}.composer-shell .mode-tabs{margin:0 0 2px 4px}
 /* Agent-to-agent audit marker: a read-only badge distinct from archived DMs. */
 .private-banner.audit{text-align:center}.private-banner.audit span{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid color-mix(in oklab,var(--warm) 45%,var(--line));border-radius:999px;background:var(--warm-soft);box-shadow:var(--shadow-sm);color:color-mix(in oklab,var(--warm) 78%,var(--ink));font-size:11.5px;font-weight:800;letter-spacing:.02em}.private-banner.audit span::before{content:"↔";font-size:14px;line-height:1}
+
+/* Lifecycle notices are quiet timeline annotations, not authored messages. */
+.message.msg.system-message{width:100%;max-width:820px;align-self:center;padding:8px 0;border:0;background:transparent;box-shadow:none}
+.message.msg.system-message .message-content{width:100%;max-width:none;align-items:flex-start}
+.message.msg.system-message .message-body.system{width:100%;box-sizing:border-box;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink-3);font-size:13px;line-height:1.4;text-align:left}
+@media(max-width:640px){.message.msg.system-message .message-content{max-width:none}}

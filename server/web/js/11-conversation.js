@@ -30,6 +30,7 @@
       isOwn: msg.member_id === op,
       isPrivate: isPrivate(msg),
       isSystem: M.isSystemContent(msg.content || ''),
+      channel: msg.channel || state.channel || '',
       isTask: !!msg.task_id,
       isQuestion: !!msg.choices,
       isEdited: !!msg.edited_at,
@@ -109,7 +110,7 @@
     }
     if (vm.isSystem) {
       body.className = 'message-body plain system';
-      body.textContent = M.humanizeIdSigils(vm.content);
+      body.textContent = M.systemMessageText(vm.content, vm.channel);
     } else {
       body.className = 'message-body bubble';
       body.innerHTML = M.renderMarkdown(vm.content);
@@ -246,8 +247,14 @@
   }
   function cardFor(msg) {
     const vm = viewModel(msg);
-    const card = document.createElement('article'); card.className = 'message msg' + (vm.isOwn ? ' own me' : '') + (vm.isPrivate ? ' private' : '');
+    const card = document.createElement('article'); card.className = 'message msg' + (vm.isSystem ? ' system-message' : '') + (!vm.isSystem && vm.isOwn ? ' own me' : '') + (!vm.isSystem && vm.isPrivate ? ' private' : '');
     card.dataset.messageId = vm.id;
+    if (vm.isSystem) {
+      const content = document.createElement('div'); content.className = 'message-content msg-body';
+      const body = document.createElement('div'); paintBody(card, body, vm); content.append(body);
+      card.append(content);
+      return card;
+    }
     const avatar = document.createElement('div'); avatar.className = 'message-avatar av av-32'; avatar.setAttribute('aria-hidden', 'true');
     avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     const content = document.createElement('div'); content.className = 'message-content msg-body';

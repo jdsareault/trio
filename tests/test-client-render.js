@@ -23,6 +23,17 @@ check('system events collapse to concise human-readable copy', () => {
   assert.strictEqual(H.systemMessageText('[culled] Boromir (ag_123) removed from channel — released tasks: #4'), 'Boromir removed from channel');
   assert.strictEqual(H.systemMessageText('[channel created] Testing the new Atrium UI', 'atrium-test'), 'atrium-test channel created');
 });
+check('system cards omit authored-message chrome', () => {
+  H.Trio.state.channel = 'atrium-test';
+  H.Trio.state.operator = { id: 'operator' };
+  const card = H.cardFor({ id: 12, member_id: 'operator', member_name: 'jdsareault', content: '[channel created] Testing' });
+  assert.ok(card.classList.contains('system-message'));
+  assert.strictEqual(card.querySelector('.message-avatar'), null);
+  assert.strictEqual(card.querySelector('.message-head'), null);
+  assert.strictEqual(card.querySelector('.message-controls'), null);
+  assert.strictEqual(card.querySelector('.message-id'), null);
+  assert.strictEqual(card.querySelector('.message-body').textContent, 'atrium-test channel created');
+});
 check('id sigils render with the current display name', () => {
   H.state.members.set('a1', { id: 'a1', name: 'alice' });
   assert.strictEqual(H.humanizeIdSigils('@a1'), '@alice');
