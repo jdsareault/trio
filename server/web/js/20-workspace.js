@@ -23,6 +23,7 @@
   const selectors = {
     pendingApprovals(src = state) { return listOf(src.approvals).filter(a => a.status !== 'resolved' && a.status !== 'accepted').length; },
     openTasks(src = state) { return listOf(src.tasks).filter(t => t.status === 'open' || t.status === 'blocked').length; },
+    blockedTasks(src = state) { return listOf(src.tasks).filter(t => t.status === 'blocked').length; },
     blockedAgents(src = state) { return listOf(src.agents).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
     activeAgents(src = state) { return listOf(src.agents).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
@@ -38,7 +39,7 @@
         updatedAt: t.updated_at,
       }));
     },
-    attention(src = state) { return selectors.pendingApprovals(src) + selectors.openTasks(src) + selectors.blockedAgents(src); },
+    attention(src = state) { return selectors.pendingApprovals(src) + selectors.blockedTasks(src) + selectors.blockedAgents(src); },
     attentionItems(src = state) {
       const items = [];
       for (const a of listOf(src.approvals)) {
@@ -46,9 +47,8 @@
         items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline', ...(a.can_cancel ? ['cancel'] : [])] });
       }
       for (const t of listOf(src.tasks)) {
-        if (t.status !== 'open' && t.status !== 'blocked') continue;
-        const isBlocked = t.status === 'blocked';
-        items.push({ id: 'task-' + t.id, kind: 'task', severity: isBlocked ? 'medium' : 'low', title: t.description || t.message || t.title || (isBlocked ? 'Blocked task' : 'Open task'), source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: isBlocked ? 'Blocked by ' + (t.blocked_by || []).join(', ') : 'Open — waiting to be claimed', actions: [] });
+        if (t.status !== 'blocked') continue;
+        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.description || t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
       }
       for (const a of listOf(src.agents)) {
         if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
@@ -57,7 +57,7 @@
       return items.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
     },
   };
-  function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }) + selectors.openTasks({ tasks: meta.tasks }); }
+  function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }) + selectors.blockedTasks({ tasks: meta.tasks }); }
   function openChannel(code, extra = '') {
     const readOnly = extra === 'archived';
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
@@ -272,7 +272,7 @@
     intro.innerHTML = `<div class="greet">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc(operatorName)}.</div><div class="sub">Here’s what’s happening across your workspace.</div>`;
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
-      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.openTasks()} tasks · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
+      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.blockedTasks()} blocked tasks · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
       { title: 'Messages for you', count: selectors.unreadDms(), subtitle: 'Unread & mentions', tone: 'accent', detail: 'Private messages and direct pings', action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
       { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
     ];

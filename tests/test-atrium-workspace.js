@@ -48,9 +48,10 @@ function check(name, cond) {
 
 const nav = base.Trio.workspace.groupNavigation([{ code: 'a' }, { code: 'b', archived: true }], { your_dms: [{ key: 'x' }] });
 check('navigation grouping', nav.active.length === 1 && nav.archived.length === 1 && nav.yours.length === 1);
-check('attention count', base.Trio.workspace.attentionCount({ approvals: [{}], tasks: [{ status: 'open' }, { status: 'done' }] }) === 2);
+check('attention count', base.Trio.workspace.attentionCount({ approvals: [{}], tasks: [{ status: 'blocked' }, { status: 'done' }] }) === 2);
 
 const s = base.Trio.workspace.selectors;
+check('selector blocked tasks', s.blockedTasks({ tasks: [{ status: 'open' }, { status: 'blocked' }, { status: 'done' }] }) === 1);
 check('selector pending approvals', s.pendingApprovals({ approvals: [{ status: 'open' }, { status: 'resolved' }] }) === 1);
 check('selector open tasks', s.openTasks({ tasks: [{ status: 'open' }, { status: 'blocked' }, { status: 'done' }] }) === 2);
 check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' }, { status: 'working' }] }) === 1);
