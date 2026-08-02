@@ -162,6 +162,14 @@ check('agent model options are selected from the active provider', () => {
   assert.ok(H.Trio.agents.modelOptions(H.Trio.state.agentModels.claude).includes('sonnet'));
   assert.ok(H.Trio.agents.modelOptions(H.Trio.state.agentModels.codex).includes('gpt-5-codex'));
 });
+check('permission profiles expose the backend enum as a dropdown', () => {
+  const html = H.Trio.agents.permissionOptions();
+  assert.ok(html.includes('name="permission_profile"'));
+  assert.ok(html.includes('value="observe"'));
+  assert.ok(html.includes('value="balanced"'));
+  assert.ok(html.includes('value="autonomous"'));
+  assert.ok(html.includes('value="balanced" selected'));
+});
 check('preferences save persists the dictation switch', () => {
   H.Trio.preferences.save({ dictation: false });
   assert.strictEqual(H.Trio.preferences.read().dictation, false);
