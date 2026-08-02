@@ -43,6 +43,13 @@ check('own message actions stay hidden until a long-press gesture', () => {
   assert.ok(card._listeners.pointerdown);
   assert.ok(card._listeners.contextmenu);
 });
+check('operator messages omit the agent role badge', () => {
+  H.Trio.state.operator = { id: 'operator' };
+  const operatorCard = H.cardFor({ id: 14, member_id: 'operator', member_name: 'me', content: 'from me' });
+  assert.strictEqual(operatorCard.querySelector('.message-role'), null);
+  const agentCard = H.cardFor({ id: 15, member_id: 'agent-1', member_name: 'Atlas', content: 'from Atlas' });
+  assert.strictEqual(agentCard.querySelector('.message-role').textContent, 'agent');
+});
 check('id sigils render with the current display name', () => {
   H.state.members.set('a1', { id: 'a1', name: 'alice' });
   assert.strictEqual(H.humanizeIdSigils('@a1'), '@alice');

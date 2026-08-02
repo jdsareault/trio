@@ -27,8 +27,8 @@
       id: msg.id,
       member_id: msg.member_id,
       author: nameFor(msg.member_id, msg.member_name),
-      role: memberObj.kind || 'agent',
       isOwn: msg.member_id === op,
+      role: msg.member_id === op ? '' : (memberObj.kind || 'agent'),
       isPrivate: isPrivate(msg),
       isSystem: M.isSystemContent(msg.content || ''),
       channel: msg.channel || state.channel || '',
@@ -308,11 +308,15 @@
     const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = vm.author;
-    const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
     const stamp = document.createElement('time');
     const idPart = document.createElement('span'); idPart.className = 'message-id'; idPart.textContent = '#' + vm.id + ' · ';
     stamp.append(idPart, document.createTextNode(vm.timestamp));
-    head.append(author, role, stamp);
+    head.append(author);
+    if (vm.role) {
+      const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
+      head.append(role);
+    }
+    head.append(stamp);
     if (vm.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + vm.confidence; confidence.textContent = vm.confidence; head.append(confidence); }
     if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
     if (vm.isTask) { const task = document.createElement('span'); task.className = 'task-chip'; task.textContent = 'task #' + vm.taskId; head.append(task); }
