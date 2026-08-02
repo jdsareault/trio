@@ -278,12 +278,39 @@
   // "[word]" event, rendering them as markdown instead of muted system lines.)
   const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
     'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
-    'pinned', 'renamed', 'culled', 'objective']);
+    'pinned', 'renamed', 'culled', 'objective', 'channel', 'superseded']);
   function isSystemContent(s) {
     // "[word " (the #id family) OR "[word]" followed by a space/end. Requiring
     // space-or-end after the "]" avoids muting a markdown link like [done](url).
     const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
     return !!m && SYSTEM_WORDS.has(m[1]);
+  }
+
+  // Keep lifecycle notices readable without exposing storage details such as
+  // bracket tags, member ids, task ids, or the author who recorded the event.
+  function systemMessageText(s, channel) {
+    const raw = (s || '').trim();
+    let m = /^\[joined\]\s+(.+?)(?:\s+—.*)?$/s.exec(raw);
+    if (m) return m[1].trim() + ' joined channel';
+    m = /^\[culled\]\s+(.+?)(?:\s+\([^)]*\))?\s+removed from channel(?:\s+—.*)?$/s.exec(raw);
+    if (m) return m[1].trim() + ' removed from channel';
+    if (/^\[channel created\](?:\s|$)/.test(raw)) return (channel || 'Channel') + ' channel created';
+    m = /^\[superseded\]\s+(.+?)(?:\s+\([^)]*\))?\s+—/s.exec(raw);
+    if (m) return m[1].trim() + ' superseded';
+    if (/^\[retracted(?:\s+#\d+)?\]/.test(raw)) return 'Message deleted';
+    m = /^\[(claimed|done|released|cancelled)\s+#?(\d+)\]/.exec(raw);
+    if (m) return 'Task #' + m[2] + ' ' + ({ claimed: 'claimed', done: 'completed', released: 'released', cancelled: 'cancelled' }[m[1]]);
+    m = /^\[left\]\s+(.+)$/s.exec(raw);
+    if (m) return m[1].trim() + ' left channel';
+    m = /^\[renamed\]\s+(.+)$/s.exec(raw);
+    if (m) return 'Channel renamed: ' + m[1].trim();
+    m = /^\[(locked|unlocked)\]\s+(.+?)(?:\s+\(TTL[^)]*\))?$/s.exec(raw);
+    if (m) return m[2].trim() + ' ' + m[1];
+    m = /^\[objective\]\s+(.+)$/s.exec(raw);
+    if (m) return 'Channel objective: ' + m[1].trim();
+    m = /^\[pinned\]\s+(.+)$/s.exec(raw);
+    if (m) return 'Message pinned: ' + m[1].trim();
+    return raw.replace(/^\[[^\]]+\]\s*/, '').trim();
   }
 
   // Task lifecycle events are ordinary chat messages tagged with a leading
@@ -365,7 +392,7 @@
   }
 
   Trio.markdown = {
-    escapeHtml, renderMarkdown, isSystemContent, taskEventInfo,
+    escapeHtml, renderMarkdown, isSystemContent, systemMessageText, taskEventInfo,
     renderTaskEventCard, humanizeIdSigils,
   };
 }());

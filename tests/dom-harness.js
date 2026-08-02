@@ -502,6 +502,7 @@ function buildScript() {
       renderMarkdown: window.Trio.markdown.renderMarkdown,
       escapeHtml: window.Trio.markdown.escapeHtml,
       isSystemContent: window.Trio.markdown.isSystemContent,
+      systemMessageText: window.Trio.markdown.systemMessageText,
       humanizeIdSigils: window.Trio.markdown.humanizeIdSigils,
       paintBody: window.Trio.conversation.paintBody,
       answerPayload: window.Trio.conversation.answerPayload,

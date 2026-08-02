@@ -15,7 +15,13 @@ check('markdown escapes HTML and renders emphasis', () => {
 });
 check('system events are plain and links are not system events', () => {
   assert.strictEqual(H.isSystemContent('[joined] alice'), true);
+  assert.strictEqual(H.isSystemContent('[channel created] Testing'), true);
   assert.strictEqual(H.isSystemContent('[done](https://example.test)'), false);
+});
+check('system events collapse to concise human-readable copy', () => {
+  assert.strictEqual(H.systemMessageText('[joined] Eomer — online for the UI update (skills: coding)'), 'Eomer joined channel');
+  assert.strictEqual(H.systemMessageText('[culled] Boromir (ag_123) removed from channel — released tasks: #4'), 'Boromir removed from channel');
+  assert.strictEqual(H.systemMessageText('[channel created] Testing the new Atrium UI', 'atrium-test'), 'atrium-test channel created');
 });
 check('id sigils render with the current display name', () => {
   H.state.members.set('a1', { id: 'a1', name: 'alice' });
