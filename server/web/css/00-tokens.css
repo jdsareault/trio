@@ -79,6 +79,18 @@
   --z-dialog: 100;
   --z-toast: 110;
 }
+/* Explicit Bone selector so the theme-picker swatch (which carries
+   data-theme="light-bone") resolves to Bone tokens instead of inheriting
+   the currently-active theme. Mirrors the :root color block above. */
+[data-theme="light-bone"] {
+  --bg:#ece7e1; --bg-sink:#e3ddd5; --surface:#f7f4ef; --surface-2:#fbf9f6; --surface-hover:#f0ebe4;
+  --sidebar:#efe9e2; --sidebar-hover:#f5f1ec; --line:#ddd4c9; --line-soft:#e6ded4;
+  --ink:#2c2723; --ink-2:#5c554d; --ink-3:#8b8378; --ink-inv:#f7f4ef;
+  --bubble-agent:#ffffff; --code-bg:#efe9e1; --code-ink:#6b4f66;
+  --accent:#3d7a63; --accent-strong:#316451; --accent-tint:#e3ede7;
+  --warm:#d98a5b; --warm-soft:color-mix(in oklab,#d98a5b 18%, #f7f4ef);
+  --st-online:#5b9a6f; --st-thinking:#c98a3c; --st-idle:#b0a99d; --st-offline:#b9b1a6;
+}
 
 /* ---- other LIGHT presets ----
    Same near-white/off-white surface treatment as Bone — only the undertone
