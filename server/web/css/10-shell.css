@@ -367,10 +367,13 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .switch input:focus-visible ~ .track{ box-shadow:0 0 0 3px var(--focus); }
 
 /* theme + accent selectors */
-.theme-choice{ display:flex; gap:10px; flex-wrap:wrap; }
+.theme-choice{ display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
 .theme-choice-group{ flex:1 1 100%; }
-.theme-choice-group .theme-choice{ margin-top:8px; }
-.theme-group-label{ font-weight:600; font-size:13px; color:var(--ink-2); margin-bottom:6px; }
+.theme-choice-group .theme-choice{ margin-top:0; }
+.theme-group-label{ font-weight:600; font-size:13px; color:var(--ink-2); margin-bottom:14px; }
+.pref-row-themes{ flex-wrap:wrap; align-items:flex-start; }
+.pref-row-themes .pr-txt{ flex:0 0 100%; margin-bottom:10px; }
+.pref-row-themes .theme-choice{ flex:1 1 100%; margin-left:0; }
 .theme-opt{
   border:2px solid var(--line); border-radius:14px; padding:10px 12px; min-width:104px;
   background:var(--surface-2); text-align:left; transition:all .18s var(--ease); position:relative;
