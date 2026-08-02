@@ -6,10 +6,10 @@
   // The sidebar-toggle button (formerly the orphan workspace-switch chevron)
   // expands/collapses explicitly. State persists in localStorage.
   const KEY = 'trio.sidebar.v1';
-  const MIN_EXPANDED = 240;   // floor for the expanded width
+  const MIN_EXPANDED = 220;   // floor for the expanded width
   const MAX_EXPANDED = 480;   // ceiling (also clamped to viewport on drag)
   const COLLAPSED_WIDTH = 56; // icon-rail width
-  const SNAP_THRESHOLD = 200; // release below this → collapse
+  const SNAP_THRESHOLD = 160; // release below this → collapse
   const DEFAULTS = { width: 300, collapsed: false };
 
   // Double-chevron icons — « collapses (points left, into the rail), » expands
@@ -96,6 +96,39 @@
     save(next); apply(next);
   }
 
+  // ── Floating tooltip for collapsed-rail icons ──────────────────────────
+  // The nav-scroll container has overflow:auto, so a CSS ::after tooltip gets
+  // clipped. This floats a div on <body> instead, positioned next to the item.
+  const TIP_DELAY = 400; // ms before showing — the "split sec"
+  let tipEl = null, tipTimer = null, tipTarget = null;
+  function ensureTipEl() {
+    if (tipEl) return tipEl;
+    tipEl = document.createElement('div');
+    tipEl.className = 'sidebar-tip';
+    tipEl.setAttribute('role', 'tooltip');
+    document.body.append(tipEl);
+    return tipEl;
+  }
+  function showTip(target) {
+    const text = target.getAttribute('data-tip');
+    if (!text) return;
+    const el = ensureTipEl();
+    el.textContent = text;
+    const rect = target.getBoundingClientRect();
+    el.style.left = (rect.right + 10) + 'px';
+    el.style.top = (rect.top + rect.height / 2) + 'px';
+    el.style.transform = 'translateY(-50%)';
+    requestAnimationFrame(() => el.classList.add('show'));
+  }
+  function hideTip() {
+    if (tipTimer) { clearTimeout(tipTimer); tipTimer = null; }
+    tipTarget = null;
+    if (tipEl) tipEl.classList.remove('show');
+  }
+  function isCollapsed() {
+    return document.getElementById('app')?.classList.contains('sidebar-collapsed');
+  }
+
   function init() {
     apply(read());
     document.getElementById('sidebar-resize')?.addEventListener('pointerdown', startResize);
@@ -112,6 +145,32 @@
         save(next); apply(next);
       }
     }, { passive: true });
+    // Tooltip: event delegation on the rail — survives renderRail() re-renders.
+    const rail = document.getElementById('workspace-rail');
+    if (rail) {
+      rail.addEventListener('mouseover', e => {
+        const target = e.target.closest('[data-tip]');
+        if (!target || target === tipTarget) return;
+        if (!isCollapsed()) return;
+        hideTip();
+        tipTarget = target;
+        tipTimer = setTimeout(() => showTip(target), TIP_DELAY);
+      });
+      rail.addEventListener('mouseout', e => {
+        const target = e.target.closest('[data-tip]');
+        if (!target) return;
+        const related = e.relatedTarget?.closest('[data-tip]');
+        if (related === target) return; // moving within the same item
+        hideTip();
+      });
+      // If the rail scrolls while a tip is pending/showing, reposition or hide.
+      rail.addEventListener('scroll', hideTip, { passive: true });
+    }
+    // Hide tooltip when collapsing/expanding or leaving the window.
+    document.getElementById('app')?.addEventListener('transitionstart', e => {
+      if (e.propertyName === 'grid-template-columns') hideTip();
+    });
+    document.addEventListener('mouseleave', hideTip);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });

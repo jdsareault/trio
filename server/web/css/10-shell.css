@@ -99,29 +99,22 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   .app.sidebar-collapsed .side-foot .who,
   .app.sidebar-collapsed .side-foot #theme-toggle{ display:none; }
   .app.sidebar-collapsed .dm-item .unread-dot{ position:absolute; top:6px; right:8px; }
-  /* delayed tooltip on icon-only items in collapsed mode */
-  .app.sidebar-collapsed .nav-item[data-tip],
-  .app.sidebar-collapsed .dm-item[data-tip]{ position:relative; }
-  .app.sidebar-collapsed .nav-item[data-tip]::after,
-  .app.sidebar-collapsed .dm-item[data-tip]::after{
-    content: attr(data-tip);
-    position:absolute; left:calc(100% + 10px); top:50%; transform:translateY(-50%);
-    background:var(--surface-2); color:var(--ink);
-    padding:5px 11px; border-radius:8px; font-size:12.5px; font-weight:500;
-    white-space:nowrap; pointer-events:none;
-    box-shadow:var(--shadow-md); border:1px solid var(--line);
-    opacity:0; z-index:var(--z-menu);
-    transition:opacity .1s var(--ease);
-  }
-  .app.sidebar-collapsed .nav-item[data-tip]:hover::after,
-  .app.sidebar-collapsed .dm-item[data-tip]:hover::after{
-    opacity:1;
-    transition:opacity .12s var(--ease) .45s;
-  }
 }
 @media (max-width: 880px){
   .sidebar-resize, .sidebar-toggle{ display:none !important; }
 }
+/* floating tooltip for collapsed-rail icon items — lives on <body> so it
+   escapes the nav-scroll overflow clipping. Toggled by 08-sidebar.js. */
+.sidebar-tip{
+  position:fixed; z-index:var(--z-menu);
+  background:var(--surface-2); color:var(--ink);
+  padding:5px 11px; border-radius:8px; font-size:12.5px; font-weight:500;
+  white-space:nowrap; pointer-events:none;
+  box-shadow:var(--shadow-md); border:1px solid var(--line);
+  opacity:0; transform:translateY(-1px);
+  transition:opacity .12s var(--ease), transform .12s var(--ease);
+}
+.sidebar-tip.show{ opacity:1; transform:translateY(0); }
 .brand{
   display:flex; align-items:center; gap:12px;
   padding:20px 20px 16px;
