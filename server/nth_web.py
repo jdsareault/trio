@@ -2136,13 +2136,20 @@ class AgentRouter(threading.Thread):
                         (m["id"],)).fetchall() if r[0]]
                 except sqlite3.OperationalError:
                     pass
+                # A bounded blocking put instead of put_nowait: a transient
+                # spike (the common case) becomes a brief wait rather than
+                # permanent message loss. The worker does not dedupe by
+                # source_message_id, so we can NOT break-and-retry from last_id
+                # (that would re-feed messages already queued this tick). The
+                # 1s ceiling bounds router-thread blocking so a stuck worker
+                # degrades to drops + logs, not an unbounded stall.
                 try:
-                    self._q.put_nowait((aid, m["channel"],
-                                        f'{m["member_name"]}: {m["content"]}', attachments,
-                                        m["id"], m["member_id"]))
+                    self._q.put((aid, m["channel"],
+                                f'{m["member_name"]}: {m["content"]}', attachments,
+                                m["id"], m["member_id"]), timeout=1.0)
                 except queue.Full:
                     sys.stderr.write(
-                        f"[nth_web] AgentRouter queue full — dropping message for agent {aid}\n")
+                        f"[nth_web] AgentRouter queue full after 1s — dropping message for agent {aid}\n")
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():

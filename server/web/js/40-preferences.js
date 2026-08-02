@@ -71,7 +71,16 @@
     const currentTheme = themes.find(theme => theme.id === current.theme);
     return save({ theme: currentTheme?.mode === 'dark' ? current.lightTheme : current.darkTheme });
   }
-  function reset() { localStorage.removeItem(KEY); const next = { ...defaults }; apply(next); return next; }
+  function reset() {
+    localStorage.removeItem(KEY);
+    const next = { ...defaults };
+    apply(next);
+    // Mirror save(): apply() alone doesn't notify listeners (composer
+    // dictation visibility, notification wiring), so a reset left them stale
+    // until the next save(). Dispatch the same event so they react immediately.
+    Trio.events.dispatchEvent(new CustomEvent('preferences:changed', { detail: next }));
+    return next;
+  }
   function diagnostics() { const note = typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'; return { online: navigator.onLine ? 'yes' : 'no', channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length, notifications: note, stt: Trio.state.sttHealth || 'checking' }; }
   async function checkStt() {
     try { const h = await Trio.api.get('/api/stt/health'); Trio.state.sttHealth = h && h.ok ? 'ready' : 'unavailable'; }

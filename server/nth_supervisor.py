@@ -554,9 +554,15 @@ class AgentSupervisor:
                 on_event=lambda aid, evt: self._handle_event(aid, evt, source=proc),
                 on_session=self._persist_session)
             self._set_state(agent_id, ST_SPAWNING)
-            proc.start()
+            # Register the proc BEFORE start() so the reader thread's early
+            # events find themselves in _procs and pass the stale-source guard
+            # in _handle_event. Registering after start() dropped any event
+            # emitted between start() and the assignment (the guard saw
+            # _procs.get(agent_id) as None/old != source and returned). The
+            # spawn-died branch below still removes the handle on failure.
             with self._lock:
                 self._procs[agent_id] = proc
+            proc.start()
             sid = proc.wait_session(session_timeout)
             if not proc.alive():
                 # Spawn died before/around init — drop the dead handle so the
