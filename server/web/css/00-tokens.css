@@ -23,7 +23,7 @@
   --ease-soft: cubic-bezier(.34,1.2,.64,1);
   --dur: .28s;
 
-  /* ---- LIGHT THEME: Bone (warm off-white paper, default) ---- */
+  /* ---- LIGHT THEME: light-1 (warm off-white paper, default) ---- */
   --bg: #ece7e1;                 /* room */
   --bg-sink: #e3ddd5;            /* recessed */
   --surface: #f7f4ef;           /* raised cards */
@@ -79,10 +79,10 @@
   --z-dialog: 100;
   --z-toast: 110;
 }
-/* Explicit Bone selector so the theme-picker swatch (which carries
-   data-theme="light-bone") resolves to Bone tokens instead of inheriting
+/* Explicit light-1 selector so the theme-picker swatch (which carries
+   data-theme="light-1") resolves to its own tokens instead of inheriting
    the currently-active theme. Mirrors the :root color block above. */
-[data-theme="light-bone"] {
+[data-theme="light-1"] {
   --bg:#ece7e1; --bg-sink:#e3ddd5; --surface:#f7f4ef; --surface-2:#fbf9f6; --surface-hover:#f0ebe4;
   --sidebar:#efe9e2; --sidebar-hover:#f5f1ec; --line:#ddd4c9; --line-soft:#e6ded4;
   --ink:#2c2723; --ink-2:#5c554d; --ink-3:#8b8378; --ink-inv:#f7f4ef;
@@ -93,39 +93,39 @@
 }
 
 /* ---- other LIGHT presets ----
-   Same near-white/off-white surface treatment as Bone — only the undertone
+   Same near-white/off-white surface treatment as light-1 — only the undertone
    (warm/cool/neutral) and the accent change. Color lives in the accent, not
    in a full-page tint. */
-[data-theme="light-cloud"] {
+[data-theme="light-3"] {
   /* cool neutral gray, indigo accent */
   --bg:#eef0f3; --bg-sink:#e4e7ec; --surface:#f9fafb; --surface-2:#fdfdfe; --surface-hover:#eef1f4;
   --sidebar:#eef1f4; --sidebar-hover:#f4f6f8; --line:#d8dde3; --line-soft:#e4e8ec;
   --ink:#20242b; --ink-2:#525a65; --ink-3:#838c97; --bubble-agent:#ffffff; --code-bg:#eef1f5; --code-ink:#3d4f9e;
   --accent:#4b52a8; --accent-strong:#3c4290; --accent-tint:#e6e7f4;
 }
-[data-theme="light-birch"] {
+[data-theme="light-5"] {
   /* true neutral off-white, terracotta accent */
   --bg:#f2f0ec; --bg-sink:#e8e5df; --surface:#fbfaf8; --surface-2:#fdfdfc; --surface-hover:#f4f2ee;
   --sidebar:#f4f2ee; --sidebar-hover:#f8f6f3; --line:#ded9d0; --line-soft:#e9e6e0;
   --ink:#262320; --ink-2:#58524a; --ink-3:#8a8378; --bubble-agent:#ffffff; --code-bg:#f2eee7; --code-ink:#8a5a2e;
   --accent:#b0632f; --accent-strong:#93501f; --accent-tint:#f3e4d5;
 }
-[data-theme="light-dune"] {
+[data-theme="light-6"] {
   /* warm sand whisper, plum accent */
   --bg:#f2ede2; --bg-sink:#e8e1d2; --surface:#fbf9f3; --surface-2:#fdfcf9; --surface-hover:#f5f1e7;
   --sidebar:#f5f1e7; --sidebar-hover:#f9f6ee; --line:#ded4bf; --line-soft:#ebe5d5;
   --ink:#2c2619; --ink-2:#5c5340; --ink-3:#8c8168; --bubble-agent:#ffffff; --code-bg:#f2ecd9; --code-ink:#7d5c8a;
   --accent:#8a4f78; --accent-strong:#743f64; --accent-tint:#f1e6ee;
 }
-[data-theme="light-linen"] {
+[data-theme="light-4"] {
   /* near-white, barely warm, coral accent */
   --bg:#f6f5f3; --bg-sink:#ededeb; --surface:#fcfbf9; --surface-2:#fefefd; --surface-hover:#f0efed;
   --sidebar:#f0efed; --sidebar-hover:#f6f5f3; --line:#e0ddd9; --line-soft:#ebe9e5;
   --ink:#24211c; --ink-2:#544e46; --ink-3:#847d72; --bubble-agent:#ffffff; --code-bg:#f2f0ec; --code-ink:#b85544;
   --accent:#d65a4a; --accent-strong:#bf4839; --accent-tint:#f6e0db;
 }
-[data-theme="light-frost"] {
-  /* near-white, barely cool, sky blue accent — lighter than Cloud */
+[data-theme="light-2"] {
+  /* near-white, barely cool, sky blue accent — lighter than light-3 */
   --bg:#f5f7f9; --bg-sink:#ebeef2; --surface:#fcfdfe; --surface-2:#fefefe; --surface-hover:#eff2f5;
   --sidebar:#eff2f5; --sidebar-hover:#f5f7f9; --line:#dde3e9; --line-soft:#e8edf2;
   --ink:#1a222b; --ink-2:#4a5662; --ink-3:#7a8692; --bubble-agent:#ffffff; --code-bg:#eff3f6; --code-ink:#2c7ab8;

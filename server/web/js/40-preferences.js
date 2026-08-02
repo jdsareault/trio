@@ -8,12 +8,12 @@
   // white/off-white (color lives in the accent, not a full-page tint); dark
   // presets can lean into a moodier color cast.
   const themes = [
-    { id: 'light-bone', mode: 'light', label: 'Bone' },
-    { id: 'light-frost', mode: 'light', label: 'Frost' },
-    { id: 'light-cloud', mode: 'light', label: 'Cloud' },
-    { id: 'light-linen', mode: 'light', label: 'Linen' },
-    { id: 'light-birch', mode: 'light', label: 'Birch' },
-    { id: 'light-dune', mode: 'light', label: 'Dune' },
+    { id: 'light-1', mode: 'light', label: 'Light 1' },
+    { id: 'light-2', mode: 'light', label: 'Light 2' },
+    { id: 'light-3', mode: 'light', label: 'Light 3' },
+    { id: 'light-4', mode: 'light', label: 'Light 4' },
+    { id: 'light-5', mode: 'light', label: 'Light 5' },
+    { id: 'light-6', mode: 'light', label: 'Light 6' },
     { id: 'dark-1', mode: 'dark', label: 'Dark 1' },
     { id: 'dark-2', mode: 'dark', label: 'Dark 2' },
     { id: 'dark-3', mode: 'dark', label: 'Dark 3' },
@@ -26,7 +26,7 @@
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
-  const defaults = { theme: 'light-bone', lightTheme: 'light-bone', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
+  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
   const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
