@@ -14,19 +14,19 @@
     { id: 'light-linen', mode: 'light', label: 'Linen' },
     { id: 'light-birch', mode: 'light', label: 'Birch' },
     { id: 'light-dune', mode: 'light', label: 'Dune' },
-    { id: 'dark-carbon', mode: 'dark', label: 'Carbon' },
-    { id: 'dark-onyx', mode: 'dark', label: 'Onyx' },
-    { id: 'dark-graphite', mode: 'dark', label: 'Graphite' },
-    { id: 'dark-slate', mode: 'dark', label: 'Slate' },
-    { id: 'dark-cobalt', mode: 'dark', label: 'Cobalt' },
-    { id: 'dark-midnight', mode: 'dark', label: 'Midnight' },
+    { id: 'dark-1', mode: 'dark', label: 'Dark 1' },
+    { id: 'dark-2', mode: 'dark', label: 'Dark 2' },
+    { id: 'dark-3', mode: 'dark', label: 'Dark 3' },
+    { id: 'dark-4', mode: 'dark', label: 'Dark 4' },
+    { id: 'dark-5', mode: 'dark', label: 'Dark 5' },
+    { id: 'dark-6', mode: 'dark', label: 'Dark 6' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
-  const defaults = { theme: 'light-bone', lightTheme: 'light-bone', darkTheme: 'dark-graphite', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
+  const defaults = { theme: 'light-bone', lightTheme: 'light-bone', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
   const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
