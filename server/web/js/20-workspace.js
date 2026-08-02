@@ -303,7 +303,7 @@
     panel.replaceChildren(); panel.append(viewHeader('Attention', 'Everything waiting for you, in one calm place'));
     const tabs = document.createElement('div'); tabs.className = 'att-tabs';
     [['all','All'],['approval','Approvals'],['question','Questions']].forEach(([key,label]) => { const b = document.createElement('button'); b.type = 'button'; b.className = (state.attentionFilter || 'all') === key ? 'on' : ''; b.textContent = label; b.addEventListener('click', () => { state.attentionFilter = key; showView('attention'); }); tabs.append(b); });
-    panel.append(tabs);
+    const tabsWrap = document.createElement('div'); tabsWrap.className = 'att-tabs-wrap'; tabsWrap.append(tabs); panel.append(tabsWrap);
     const items = selectors.attentionItems();
     const filtered = (state.attentionFilter && state.attentionFilter !== 'all') ? items.filter(item => item.kind === state.attentionFilter) : items;
     if (!filtered.length) { const p = document.createElement('p'); p.textContent = 'Nothing needs attention.'; p.className = 'home-empty'; panel.append(p); return; }
