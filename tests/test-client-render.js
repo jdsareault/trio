@@ -114,11 +114,13 @@ check('composer send payload keeps integer attachment ids and channel targets', 
   H.state.pendingAttachments = [{ id: 4 }, { id: 'bad' }, { id: 8 }];
   H.state.dmTargetId = 'ag_1';
   H.Trio.state.channel = 'atrium';
+  const input = cx.document.getElementById('input');
   H.Trio.composer.setTargets(['ag_1']);
   H.Trio.composer.init();
+  assert.strictEqual(H.Trio.state.composerMode, undefined);
   H.Trio.composer.buildSendPayload();
   H.Trio.state.pendingAttachments = H.state.pendingAttachments;
-  const input = cx.document.getElementById('input'); input.value = 'hello';
+  input.value = 'hello';
   assert.deepStrictEqual(JSON.parse(JSON.stringify(H.buildSendPayload())), {
     content: '@ag_1 hello', mentions: ['ag_1'], attachment_ids: [4, 8], recipients: ['ag_1'],
   });

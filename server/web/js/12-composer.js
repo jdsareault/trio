@@ -5,7 +5,6 @@
   const { state, api, events, actions } = Trio;
   state.selectedTargets = state.selectedTargets instanceof Set ? state.selectedTargets : new Set();
   state.pendingAttachments = Array.isArray(state.pendingAttachments) ? state.pendingAttachments : [];
-  state.composerMode = state.composerMode || 'broadcast';
   state.sttMode = state.sttMode || 'local';
   state.drafts = state.drafts || {};
   let recognition = null, recorder = null, stream = null, chunks = [];
@@ -62,7 +61,7 @@
     }
     return body;
   }
-  function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); renderReach(); }
+  function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); }
 
   async function upload(file) {
     if (!file) return;
@@ -155,8 +154,6 @@
   }
   const domListeners = [];
   let unroute;
-  let modeTabs = null;
-  let reachPreview = null;
   let ac = null;
   let isComposing = false;
   let acIndex = -1;
@@ -216,32 +213,6 @@
     const buttons = ac.querySelectorAll('.ac-opt');
     buttons.forEach((b, i) => { b.classList.toggle('hi', i === acIndex); b.setAttribute('aria-selected', String(i === acIndex)); });
   }
-  function setMode(mode) {
-    state.composerMode = ['broadcast', 'whisper', 'reply'].includes(mode) ? mode : 'broadcast';
-    if (modeTabs) modeTabs.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.mode === state.composerMode));
-    if (state.composerMode !== 'whisper') state.selectedTargets = new Set();
-    renderTargets(); updateSendState(); renderReach();
-  }
-  function renderReach() {
-    if (!reachPreview) return;
-    const targets = [...state.selectedTargets].map(id => targetName(id));
-    if (state.composerMode === 'reply' && state.composerReply) { reachPreview.textContent = 'Replying to message #' + state.composerReply.id; }
-    else if (state.composerMode === 'whisper' && targets.length) { reachPreview.textContent = 'Whisper to ' + targets.join(', '); }
-    else { reachPreview.textContent = 'Broadcast to the channel'; }
-  }
-  function renderModeTabs(container) {
-    if (!container || !container.querySelector) return;
-    if (modeTabs) { modeTabs.remove(); modeTabs = null; }
-    modeTabs = document.createElement('div'); modeTabs.className = 'mode-tabs';
-    ['broadcast', 'whisper'].forEach(mode => {
-      const b = document.createElement('button'); b.type = 'button'; b.dataset.mode = mode; b.textContent = mode;
-      b.classList.toggle('on', mode === state.composerMode);
-      b.addEventListener('click', () => setMode(mode));
-      modeTabs.append(b);
-    });
-    container.insertBefore(modeTabs, container.firstChild);
-    reachPreview = document.createElement('div'); reachPreview.className = 'reach-preview'; container.insertBefore(reachPreview, container.firstChild);
-  }
   function setInputState(text) {
     if (!text) return;
     text.disabled = !!state.readOnly;
@@ -252,8 +223,7 @@
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
     setInputState(text);
-    renderModeTabs(text.parentElement);
-    renderTargets(); renderAttachments(); renderReach();
+    renderTargets(); renderAttachments();
     const onInput = () => { updateSendState(); saveDraft(); updateAutocomplete(); resize(); };
     const onCompositionStart = () => { isComposing = true; };
     const onCompositionEnd = () => { isComposing = false; updateAutocomplete(); resize(); };
