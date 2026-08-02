@@ -3704,7 +3704,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         the process. Operator-only."""
         if self._require_operator() is None or not self._require_agent_control():
             return
-        body = self._read_json_body() or {}
+        body = self._read_json_body()
+        if body is None:
+            return
         provider = (body.get("provider") or "claude").strip().lower()
         if provider not in ("claude", "codex"):
             self._error(400, "provider must be claude or codex")
