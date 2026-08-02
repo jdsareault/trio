@@ -52,12 +52,28 @@
   function actionCaps(vm) {
     const caps = [];
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('stop');
-    if (vm.lifecycle === 'idle' || vm.lifecycle === 'sleeping' || vm.lifecycle === 'stopped' || vm.lifecycle === 'offline' || vm.lifecycle === 'stale') caps.push('wake');
+    if (!vm.live && (vm.lifecycle === 'idle' || vm.lifecycle === 'sleeping' || vm.lifecycle === 'stopped' || vm.lifecycle === 'offline' || vm.lifecycle === 'stale')) caps.push('wake');
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('interrupt');
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active' || vm.lifecycle === 'idle') caps.push('hibernate');
     if (!['errored','blocked'].includes(vm.lifecycle)) caps.push('clear');
     caps.push('delete');
     return caps;
+  }
+  function actionLabel(action) {
+    return ({
+      stop: 'Stop',
+      interrupt: 'Interrupt',
+      hibernate: 'Hibernate',
+      wake: 'Wake',
+      clear: 'Clear context',
+      delete: 'Delete agent',
+    })[action] || action;
+  }
+  function isDestructiveAction(action) { return action === 'clear' || action === 'delete'; }
+  function confirmAction(vm, actionName) {
+    if (!isDestructiveAction(actionName)) return true;
+    const subject = actionName === 'delete' ? 'Permanently delete ' : 'Clear context for ';
+    return window.confirm(subject + vm.name + '?');
   }
   function statusIcon(vm) {
     if (vm.needsAttention) return '!';
@@ -89,8 +105,8 @@
     const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); row.append(detail);
     for (const a of actionCaps(vm).slice(0, 4)) {
       const b = document.createElement('button'); b.type = 'button'; b.textContent = a; b.dataset.action = a; b.dataset.id = vm.id;
-      if (a === 'delete' || a === 'clear') b.className = 'danger';
-      b.addEventListener('click', () => (a === 'delete' || a === 'clear') && !window.confirm((a === 'delete' ? 'Permanently delete ' : 'Clear context for ') + vm.name + '?') ? null : action(vm.id, a));
+      if (isDestructiveAction(a)) b.className = 'danger';
+      b.addEventListener('click', () => confirmAction(vm, a) && action(vm.id, a));
       row.append(b);
     }
     const msg = document.createElement('button'); msg.type = 'button'; msg.textContent = 'Message'; msg.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); row.append(msg);
@@ -112,7 +128,7 @@
     article.style.setProperty('--card-accent', tone);
     article.innerHTML = `<div class="ac-top"><span class="directory-avatar">${esc(initials)}</span><span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
     const actions = document.createElement('div'); actions.className = 'agent-actions';
-    const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); actions.append(detail);
+    const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Manage'; detail.addEventListener('click', () => showDetail(vm)); actions.append(detail);
     const message = document.createElement('button'); message.type = 'button'; message.textContent = 'Message'; message.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); actions.append(message);
     article.append(actions); return article;
   }
@@ -154,12 +170,20 @@
       ['Wake policy', vm.wakePolicy], ['Cwd', vm.cwd], ['Permissions', vm.permissions], ['Placements', (vm.placements || []).join(', ') || 'none'],
       ['Last active', formatLastActive(vm.lastActive)], ['Status', vm.statusText || ''], ['Error', vm.error || ''],
     ];
+    const lifecycleActions = actionCaps(vm).map(actionName =>
+      `<button data-agent-action="${esc(actionName)}" type="button"${isDestructiveAction(actionName) ? ' class="danger"' : ''}>${esc(actionLabel(actionName))}</button>`
+    ).join('');
     const html = rows.map(([k, v]) => `<div class="detail-row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('') +
+      `<div class="agent-actions" aria-label="Agent lifecycle controls">${lifecycleActions}</div>` +
       `<div class="agent-actions"><button data-edit="placements" type="button">Edit placements</button><button data-edit="wake" type="button">Edit wake policy</button></div>`;
-    Trio.ui.modal('Agent details: ' + vm.name, html);
+    Trio.ui.modal('Manage agent: ' + vm.name, html);
     setTimeout(() => {
       const panel = document.getElementById('trio-control-modal');
       if (!panel) return;
+      panel.querySelectorAll('[data-agent-action]').forEach(button => button.addEventListener('click', () => {
+        const actionName = button.dataset.agentAction;
+        if (confirmAction(vm, actionName)) action(vm.id, actionName);
+      }));
       panel.querySelector('[data-edit="placements"]')?.addEventListener('click', () => editPlacements(vm));
       panel.querySelector('[data-edit="wake"]')?.addEventListener('click', () => editWake(vm));
     }, 0);
@@ -282,5 +306,5 @@
       if (modelField) modelField.innerHTML = modelOptions(state.agentModels[providerField.value]);
     });
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, statusIcon, formatLastActive, action, create };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create };
 })();

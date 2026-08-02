@@ -172,6 +172,14 @@ check('agent action capabilities filter by lifecycle', () => {
   assert.ok(caps.includes('wake'));
   assert.strictEqual(caps.includes('interrupt'), false);
 });
+check('agent management exposes every supported lifecycle action', () => {
+  const live = H.Trio.agents.viewModel({ id: 'ag_live', live: true, busy: false });
+  const resting = H.Trio.agents.viewModel({ id: 'ag_resting', live: false, state: 'sleeping' });
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(live)), ['hibernate', 'clear', 'delete']);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(resting)), ['wake', 'clear', 'delete']);
+  assert.strictEqual(H.Trio.agents.actionLabel('hibernate'), 'Hibernate');
+  assert.strictEqual(H.Trio.agents.actionLabel('delete'), 'Delete agent');
+});
 check('agent model options normalize provider model records', () => {
   const models = H.Trio.agents.normalizeModels([
     { id: 'sonnet', name: 'Claude Sonnet' },
