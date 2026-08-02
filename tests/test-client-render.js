@@ -145,6 +145,23 @@ check('agent action capabilities filter by lifecycle', () => {
   assert.ok(caps.includes('wake'));
   assert.strictEqual(caps.includes('interrupt'), false);
 });
+check('agent model options normalize provider model records', () => {
+  const models = H.Trio.agents.normalizeModels([
+    { id: 'sonnet', name: 'Claude Sonnet' },
+    { id: 'opus', name: 'Claude Opus' },
+  ]);
+  assert.deepStrictEqual(models.map(model => model.id), ['sonnet', 'opus']);
+  assert.ok(H.Trio.agents.modelOptions(models).includes('value="sonnet"'));
+  assert.ok(H.Trio.agents.modelOptions(models).includes('Claude Sonnet'));
+});
+check('agent model options are selected from the active provider', () => {
+  H.Trio.state.agentModels = {
+    claude: [{ id: 'sonnet', name: 'Claude Sonnet' }],
+    codex: [{ id: 'gpt-5-codex', name: 'GPT-5-Codex' }],
+  };
+  assert.ok(H.Trio.agents.modelOptions(H.Trio.state.agentModels.claude).includes('sonnet'));
+  assert.ok(H.Trio.agents.modelOptions(H.Trio.state.agentModels.codex).includes('gpt-5-codex'));
+});
 check('preferences save persists the dictation switch', () => {
   H.Trio.preferences.save({ dictation: false });
   assert.strictEqual(H.Trio.preferences.read().dictation, false);
