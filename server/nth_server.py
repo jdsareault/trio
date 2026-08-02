@@ -538,6 +538,48 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_agent_channels_member
         ON agent_channels (member_id)
     """)
+
+    # v7.3: per-member, per-message read receipts. Used by the web dashboard
+    # to show unread mentions/DMs and to drive the Messages view. Existing
+    # messages are treated as already-read for human members/operators at
+    # migration time so the new unread counter starts from feature deployment.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_reads (
+            message_id  INTEGER NOT NULL,
+            member_id   TEXT NOT NULL,
+            read_at     TEXT NOT NULL,
+            PRIMARY KEY (message_id, member_id),
+            FOREIGN KEY (message_id) REFERENCES messages(id)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_member
+        ON message_reads (member_id, message_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_message
+        ON message_reads (message_id)
+    """)
+    try:
+        already = conn.execute("SELECT COUNT(*) FROM message_reads").fetchone()[0]
+    except sqlite3.OperationalError:
+        already = 0
+    if already == 0:
+        now = now_iso()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO message_reads (message_id, member_id, read_at) "
+                "SELECT m.id, h.id, ? FROM messages m "
+                "CROSS JOIN ("
+                "    SELECT DISTINCT id FROM members "
+                "    WHERE id GLOB '_op_l_*' OR id GLOB '_op_t_*' OR kind = 'human'"
+                ") h "
+                "WHERE m.member_id != h.id",
+                (now,),
+            )
+        except sqlite3.OperationalError:
+            pass
+
     conn.commit()
     return conn
 

@@ -695,6 +695,50 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
             pass  # column already exists
 
 
+def ensure_message_reads_table(db: sqlite3.Connection) -> None:
+    """Create the per-member message read-receipts table. The web side owns
+    its own forward-compat CREATE so a standalone hub works before the MCP
+    server has migrated the shared DB. On first creation, pre-seed all existing
+    messages as already-read for human members/operators so the new unread
+    counter starts from feature deployment rather than the entire history."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS message_reads (
+            message_id  INTEGER NOT NULL,
+            member_id   TEXT NOT NULL,
+            read_at     TEXT NOT NULL,
+            PRIMARY KEY (message_id, member_id),
+            FOREIGN KEY (message_id) REFERENCES messages(id)
+        )
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_member
+        ON message_reads (member_id, message_id)
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_message
+        ON message_reads (message_id)
+    """)
+    try:
+        already = db.execute("SELECT COUNT(*) FROM message_reads").fetchone()[0]
+    except sqlite3.OperationalError:
+        already = 0
+    if already == 0:
+        now = now_iso()
+        try:
+            db.execute(
+                "INSERT OR IGNORE INTO message_reads (message_id, member_id, read_at) "
+                "SELECT m.id, h.id, ? FROM messages m "
+                "CROSS JOIN ("
+                "    SELECT DISTINCT id FROM members "
+                "    WHERE id GLOB '_op_l_*' OR id GLOB '_op_t_*' OR kind = 'human'"
+                ") h "
+                "WHERE m.member_id != h.id",
+                (now,),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+
 def sniff_image_mime(data: bytes) -> Optional[str]:
     """Real image MIME from magic bytes, or None if not a supported image.
     We trust the sniffed type over the client-declared Content-Type."""
@@ -2583,6 +2627,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if self._require_operator() is None:
                 return
             self._handle_reveal()
+        elif parsed.path == "/api/messages/mark-read":
+            if self._require_operator() is None:
+                return
+            self._handle_message_read()
         else:
             self._error(404, "not found")
 
@@ -3419,8 +3467,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
-                "SELECT * FROM messages WHERE recipients IS NOT NULL "
-                "AND recipients NOT IN ('', '[]') ORDER BY id DESC LIMIT 2000"
+                "SELECT m.*, (mr.member_id IS NOT NULL) AS is_read "
+                "FROM messages m "
+                "LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.member_id = ? "
+                "WHERE m.recipients IS NOT NULL AND m.recipients NOT IN ('', '[]') "
+                "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id,),
             ).fetchall()
             names: Dict[str, str] = {}
             for r in db.execute("SELECT id, name FROM agents").fetchall():
@@ -3451,7 +3503,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             "channel": r["channel"], "last_id": r["id"],
                             "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
                             "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                            "unread": 0,
                         }
+                    if r["member_id"] != operator_id and not r["is_read"]:
+                        yours[key]["unread"] = (yours[key].get("unread") or 0) + 1
                 else:
                     ids = sorted(participants)
                     key = ",".join(ids)
@@ -3462,6 +3517,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             "channel": r["channel"], "last_id": r["id"],
                             "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
                             "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                            "unread": 0,
                         }
 
             for key, thread in yours.items():
@@ -3796,7 +3852,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.close()
 
     def _handle_mentions(self) -> None:
-        """Return @mentions of the operator that the operator has not yet read."""
+        """Return @mentions of the operator, annotated with a per-message read
+        receipt from the message_reads table."""
         ident = self._require_operator()
         if ident is None:
             return
@@ -3805,22 +3862,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA busy_timeout=3000")
-            last_reads = {r["channel"]: r["last_read"] for r in db.execute(
-                "SELECT channel, last_read FROM members WHERE id = ?", (operator_id,)).fetchall()}
             rows = db.execute(
-                "SELECT id, channel, member_id, member_name, content, created_at, mentions "
-                "FROM messages "
-                "WHERE mentions LIKE ? AND member_id != ? "
-                "AND EXISTS (SELECT 1 FROM channels c WHERE c.code = messages.channel AND c.archived_at IS NULL) "
-                "ORDER BY id DESC LIMIT 2000",
-                (f"%{operator_id}%", operator_id)).fetchall()
+                "SELECT m.id, m.channel, m.member_id, m.member_name, m.content, "
+                "m.created_at, m.mentions, (mr.member_id IS NOT NULL) AS is_read "
+                "FROM messages m "
+                "LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.member_id = ? "
+                "WHERE m.mentions LIKE ? AND m.member_id != ? "
+                "AND EXISTS (SELECT 1 FROM channels c WHERE c.code = m.channel AND c.archived_at IS NULL) "
+                "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, f"%{operator_id}%", operator_id)).fetchall()
             mentions = []
+            unread_count = 0
             for r in rows:
                 m_ids = parse_mentions_json(r["mentions"])
                 if operator_id not in m_ids:
                     continue
-                if r["id"] <= last_reads.get(r["channel"], 0):
-                    continue
+                is_read = bool(r["is_read"])
+                if not is_read:
+                    unread_count += 1
                 mentions.append({
                     "id": r["id"],
                     "channel": r["channel"],
@@ -3828,12 +3887,61 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "member_name": r["member_name"] or r["member_id"],
                     "created_at": r["created_at"],
                     "content": r["content"] or "",
+                    "read": is_read,
                 })
-            self._json({"ok": True, "count": len(mentions), "mentions": mentions})
+            self._json({
+                "ok": True,
+                "count": len(mentions),
+                "unread_count": unread_count,
+                "mentions": mentions,
+            })
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
         finally:
             db.close()
+
+    def _handle_message_read(self) -> None:
+        """Mark one or more messages as read (or unread) for the operator."""
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        body = self._read_json_body(max_bytes=65536)
+        if body is None:
+            return
+        ids = body.get("ids")
+        read = body.get("read", True)
+        if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
+            self._error(400, "ids must be a list of integers")
+            return
+        if len(ids) > 1000:
+            self._error(400, "too many ids (max 1000)")
+            return
+        if not ids:
+            self._json({"ok": True, "updated": 0})
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            if read:
+                now = now_iso()
+                db.executemany(
+                    "INSERT OR IGNORE INTO message_reads (message_id, member_id, read_at) "
+                    "VALUES (?, ?, ?)",
+                    [(mid, operator_id, now) for mid in ids],
+                )
+            else:
+                db.executemany(
+                    "DELETE FROM message_reads WHERE message_id = ? AND member_id = ?",
+                    [(mid, operator_id) for mid in ids],
+                )
+            db.commit()
+        except sqlite3.Error as exc:
+            self._error(500, f"db error: {exc}")
+            return
+        finally:
+            db.close()
+        self._json({"ok": True, "updated": len(ids)})
 
     def _handle_health(self) -> None:
         """Operator-facing app, database, and provider runtime readiness."""
@@ -4965,6 +5073,7 @@ def main() -> int:
     _mig = sqlite3.connect(str(db_path), timeout=5)
     try:
         ensure_ask_columns(_mig)
+        ensure_message_reads_table(_mig)
         ensure_agents_schema(_mig)
         ensure_archive_schema(_mig)
         ensure_agent_inboxes(_mig)
