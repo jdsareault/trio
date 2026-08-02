@@ -30,6 +30,7 @@
   --surface-2: #fbf9f6;         /* highest */
   --surface-hover: #f0ebe4;
   --sidebar: #efe9e2;
+  --sidebar-hover: #f5f1ec;
   --line: #ddd4c9;              /* hairlines */
   --line-soft: #e6ded4;
 
@@ -88,6 +89,7 @@
   --surface-2: #2f2a25;
   --surface-hover: #302b25;
   --sidebar: #201c19;
+  --sidebar-hover: #38322c;
   --line: #3a342d;
   --line-soft: #322d27;
 
