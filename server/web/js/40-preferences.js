@@ -8,18 +8,18 @@
   // white/off-white (color lives in the accent, not a full-page tint); dark
   // presets can lean into a moodier color cast.
   const themes = [
-    { id: 'light-1', mode: 'light', label: 'Light 1' },
-    { id: 'light-2', mode: 'light', label: 'Light 2' },
-    { id: 'light-3', mode: 'light', label: 'Light 3' },
-    { id: 'light-4', mode: 'light', label: 'Light 4' },
-    { id: 'light-5', mode: 'light', label: 'Light 5' },
-    { id: 'light-6', mode: 'light', label: 'Light 6' },
-    { id: 'dark-1', mode: 'dark', label: 'Dark 1' },
-    { id: 'dark-2', mode: 'dark', label: 'Dark 2' },
-    { id: 'dark-3', mode: 'dark', label: 'Dark 3' },
-    { id: 'dark-4', mode: 'dark', label: 'Dark 4' },
-    { id: 'dark-5', mode: 'dark', label: 'Dark 5' },
-    { id: 'dark-6', mode: 'dark', label: 'Dark 6' },
+    { id: 'light-1', mode: 'light', label: 'Sagebrush' },
+    { id: 'light-2', mode: 'light', label: 'Frost' },
+    { id: 'light-3', mode: 'light', label: 'Slate' },
+    { id: 'light-4', mode: 'light', label: 'Linen' },
+    { id: 'light-5', mode: 'light', label: 'Clay' },
+    { id: 'light-6', mode: 'light', label: 'Mojave' },
+    { id: 'dark-1', mode: 'dark', label: 'Midnight' },
+    { id: 'dark-2', mode: 'dark', label: 'Terminal' },
+    { id: 'dark-3', mode: 'dark', label: 'Graphite' },
+    { id: 'dark-4', mode: 'dark', label: 'Abyss' },
+    { id: 'dark-5', mode: 'dark', label: 'Noir' },
+    { id: 'dark-6', mode: 'dark', label: 'Torch' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
