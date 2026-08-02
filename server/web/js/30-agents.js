@@ -65,6 +65,15 @@
     if (vm.live) return '•';
     return '○';
   }
+  function formatLastActive(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString([], {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+    });
+  }
   async function action(id, action, body = {}) {
     const key = id + ':' + action;
     if (pendingAgentActions.has(key)) return;
@@ -143,7 +152,7 @@
     const rows = [
       ['Name', vm.name], ['Provider', vm.provider], ['Model', vm.model], ['Lifecycle', vm.lifecycle],
       ['Wake policy', vm.wakePolicy], ['Cwd', vm.cwd], ['Permissions', vm.permissions], ['Placements', (vm.placements || []).join(', ') || 'none'],
-      ['Last active', vm.lastActive || ''], ['Status', vm.statusText || ''], ['Error', vm.error || ''],
+      ['Last active', formatLastActive(vm.lastActive)], ['Status', vm.statusText || ''], ['Error', vm.error || ''],
     ];
     const html = rows.map(([k, v]) => `<div class="detail-row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('') +
       `<div class="agent-actions"><button data-edit="placements" type="button">Edit placements</button><button data-edit="wake" type="button">Edit wake policy</button></div>`;
@@ -273,5 +282,5 @@
       if (modelField) modelField.innerHTML = modelOptions(state.agentModels[providerField.value]);
     });
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, statusIcon, action, create };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, statusIcon, formatLastActive, action, create };
 })();
