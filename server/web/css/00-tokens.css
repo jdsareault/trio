@@ -97,11 +97,11 @@
    (warm/cool/neutral) and the accent change. Color lives in the accent, not
    in a full-page tint. */
 [data-theme="light-3"] {
-  /* cool neutral gray, indigo accent */
+  /* cool neutral gray, slate blue accent */
   --bg:#eef0f3; --bg-sink:#e4e7ec; --surface:#f9fafb; --surface-2:#fdfdfe; --surface-hover:#eef1f4;
   --sidebar:#eef1f4; --sidebar-hover:#f4f6f8; --line:#d8dde3; --line-soft:#e4e8ec;
-  --ink:#20242b; --ink-2:#525a65; --ink-3:#838c97; --bubble-agent:#ffffff; --code-bg:#eef1f5; --code-ink:#3d4f9e;
-  --accent:#4b52a8; --accent-strong:#3c4290; --accent-tint:#e6e7f4;
+  --ink:#20242b; --ink-2:#525a65; --ink-3:#838c97; --bubble-agent:#ffffff; --code-bg:#eef1f5; --code-ink:#4a6580;
+  --accent:#607d9b; --accent-strong:#4a6580; --accent-tint:#e2e7ec;
 }
 [data-theme="light-5"] {
   /* true neutral off-white, terracotta accent */
