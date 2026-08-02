@@ -2485,6 +2485,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_agent_models(parsed)
         elif path == "/api/approvals":
             self._handle_approvals()
+        elif path == "/api/questions":
+            self._handle_questions()
+        elif path == "/api/mentions":
+            self._handle_mentions()
         elif path.startswith("/api/agents/") and path.endswith("/activity") \
                 and path.count("/") == 4:
             self._handle_agent_activity(path.split("/")[3], parsed)
@@ -3718,6 +3722,92 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "approval is missing or already resolved")
             return
         self._json({"ok": True, "approval_id": approval_id, "decision": decision})
+
+    def _handle_questions(self) -> None:
+        """Return pending multiple-choice questions addressed to the operator."""
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            answered = {(r["channel"], r["reply_to"]) for r in db.execute(
+                "SELECT channel, reply_to FROM messages "
+                "WHERE member_id = ? AND reply_to IS NOT NULL AND COALESCE(selection, '') != ''",
+                (operator_id,)).fetchall()}
+            rows = db.execute(
+                "SELECT id, channel, member_id, member_name, content, created_at, choices "
+                "FROM messages "
+                "WHERE COALESCE(choices, '') != '' AND member_id != ? "
+                "ORDER BY id DESC LIMIT 2000",
+                (operator_id,)).fetchall()
+            questions = []
+            for r in rows:
+                choices = parse_obj_json(r["choices"])
+                if not isinstance(choices, dict) or choices.get("target") != operator_id:
+                    continue
+                if (r["channel"], r["id"]) in answered:
+                    continue
+                qs = choices.get("questions") or []
+                if not qs and "options" in choices:
+                    qs = [{"question": choices.get("question", ""), "options": choices["options"], "mode": choices.get("mode")}]
+                if not qs:
+                    continue
+                questions.append({
+                    "id": r["id"],
+                    "channel": r["channel"],
+                    "member_id": r["member_id"],
+                    "member_name": r["member_name"] or r["member_id"],
+                    "created_at": r["created_at"],
+                    "question": qs[0].get("question", "") or "Question",
+                    "questions": qs,
+                })
+            self._json({"ok": True, "count": len(questions), "questions": questions})
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+        finally:
+            db.close()
+
+    def _handle_mentions(self) -> None:
+        """Return @mentions of the operator that the operator has not yet read."""
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            last_reads = {r["channel"]: r["last_read"] for r in db.execute(
+                "SELECT channel, last_read FROM members WHERE id = ?", (operator_id,)).fetchall()}
+            rows = db.execute(
+                "SELECT id, channel, member_id, member_name, content, created_at, mentions "
+                "FROM messages "
+                "WHERE mentions LIKE ? AND member_id != ? "
+                "ORDER BY id DESC LIMIT 2000",
+                (f"%{operator_id}%", operator_id)).fetchall()
+            mentions = []
+            for r in rows:
+                m_ids = parse_mentions_json(r["mentions"])
+                if operator_id not in m_ids:
+                    continue
+                if r["id"] <= last_reads.get(r["channel"], 0):
+                    continue
+                mentions.append({
+                    "id": r["id"],
+                    "channel": r["channel"],
+                    "member_id": r["member_id"],
+                    "member_name": r["member_name"] or r["member_id"],
+                    "created_at": r["created_at"],
+                    "content": r["content"] or "",
+                })
+            self._json({"ok": True, "count": len(mentions), "mentions": mentions})
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+        finally:
+            db.close()
 
     def _handle_health(self) -> None:
         """Operator-facing app, database, and provider runtime readiness."""

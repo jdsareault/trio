@@ -27,6 +27,8 @@
     blockedAgents(src = state) { return listOf(src.agents).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
     activeAgents(src = state) { return listOf(src.agents).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
+    unreadMentions(src = state) { return listOf(src.mentions).length; },
+    pendingQuestions(src = state) { return listOf(src.questions).length; },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     taskItems(src = state) {
       return listOf(src.tasks).map(t => ({
@@ -39,25 +41,20 @@
         updatedAt: t.updated_at,
       }));
     },
-    attention(src = state) { return selectors.pendingApprovals(src) + selectors.blockedTasks(src) + selectors.blockedAgents(src); },
+    attention(src = state) { return selectors.pendingApprovals(src) + selectors.pendingQuestions(src); },
     attentionItems(src = state) {
       const items = [];
       for (const a of listOf(src.approvals)) {
         if (a.status === 'resolved' || a.status === 'accepted') continue;
         items.push({ id: a.id, kind: 'approval', severity: 'high', title: a.title || a.agent_name || 'Approval requested', source: a.agent_name || a.member_id, timestamp: a.created_at, status: a.status, body: a.reason || a.command || '', actions: ['accept','acceptForSession','decline', ...(a.can_cancel ? ['cancel'] : [])] });
       }
-      for (const t of listOf(src.tasks)) {
-        if (t.status !== 'blocked') continue;
-        items.push({ id: 'task-' + t.id, kind: 'task', severity: 'medium', title: t.description || t.message || t.title || 'Blocked task', source: t.claimed_by || 'unknown', timestamp: t.updated_at, status: t.status, body: 'Blocked by ' + (t.blocked_by || []).join(', '), actions: [] });
-      }
-      for (const a of listOf(src.agents)) {
-        if (a.status !== 'blocked' && a.status !== 'error' && a.status !== 'errored') continue;
-        items.push({ id: 'agent-' + a.id, kind: 'agent', severity: 'high', title: (a.name || a.id) + ' needs help', source: a.id, timestamp: a.last_active, status: a.status, body: a.status_text || a.error || '', actions: [] });
+      for (const q of listOf(src.questions)) {
+        items.push({ id: 'question-' + q.id, kind: 'question', severity: 'medium', title: q.question || 'Question', source: q.member_name || q.member_id, timestamp: q.created_at, status: 'pending', body: q.content || '', channel: q.channel, actions: [] });
       }
       return items.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
     },
   };
-  function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }) + selectors.blockedTasks({ tasks: meta.tasks }); }
+  function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }); }
   function openChannel(code, extra = '') {
     const readOnly = extra === 'archived';
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
@@ -272,8 +269,8 @@
     intro.innerHTML = `<div class="greet">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc(operatorName)}.</div><div class="sub">Here’s what’s happening across your workspace.</div>`;
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
-      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.blockedTasks()} blocked tasks · ${selectors.blockedAgents()} agent issues`, action: () => showView('attention') },
-      { title: 'Messages for you', count: selectors.unreadDms(), subtitle: 'Unread & mentions', tone: 'accent', detail: 'Private messages and direct pings', action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
+      { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.pendingQuestions()} questions`, action: () => showView('attention') },
+      { title: 'Messages for you', count: selectors.unreadDms() + selectors.unreadMentions(), subtitle: 'Unread & mentions', tone: 'accent', detail: `${selectors.unreadDms()} DMs · ${selectors.unreadMentions()} mentions`, action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
       { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => showView('tasks') },
     ];
     for (const { title, count, subtitle, tone, detail, action } of cards) {
@@ -305,7 +302,7 @@
   function renderAttention(panel) {
     panel.replaceChildren(); panel.append(viewHeader('Attention', 'Everything waiting for you, in one calm place'));
     const tabs = document.createElement('div'); tabs.className = 'att-tabs';
-    [['all','All'],['approval','Approvals'],['task','Tasks'],['agent','Agents']].forEach(([key,label]) => { const b = document.createElement('button'); b.type = 'button'; b.className = (state.attentionFilter || 'all') === key ? 'on' : ''; b.textContent = label; b.addEventListener('click', () => { state.attentionFilter = key; showView('attention'); }); tabs.append(b); });
+    [['all','All'],['approval','Approvals'],['question','Questions']].forEach(([key,label]) => { const b = document.createElement('button'); b.type = 'button'; b.className = (state.attentionFilter || 'all') === key ? 'on' : ''; b.textContent = label; b.addEventListener('click', () => { state.attentionFilter = key; showView('attention'); }); tabs.append(b); });
     panel.append(tabs);
     const items = selectors.attentionItems();
     const filtered = (state.attentionFilter && state.attentionFilter !== 'all') ? items.filter(item => item.kind === state.attentionFilter) : items;
@@ -521,6 +518,8 @@
       api.get('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); }),
       api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); }),
       api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); }),
+      api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); }),
+      api.get('/api/mentions').then(data => { state.mentions = data.mentions || []; Trio.store.set('workspace.mentions', state.mentions); }),
     ];
     const results = await Promise.allSettled(requests);
     const failures = results.filter(result => result.status === 'rejected');
