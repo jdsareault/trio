@@ -190,7 +190,7 @@
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
     rail.append(section('Workspace', workspaceItems));
     rail.append(section('Channels', channelItems, true));
-    rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d)), true, () => showView('roster'), 'Start direct message'));
+    rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d)), true, openDmDialog, 'Start direct message'));
     rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true))));
     const operator = state.operator || state.meta?.operator || {}; const opName = operator.name || 'Workspace'; const opAvatar = $('operator-avatar'); const opLabel = $('operator-name'); const opRole = $('operator-role');
     if (opAvatar) { opAvatar.textContent = initials(opName); opAvatar.className = 'operator-avatar tone-' + avatarTone(opName); }
@@ -328,6 +328,23 @@
   }
   async function createChannel() {
     modal('Create channel', '<label>Channel code<input name="code" required pattern="[a-z0-9][a-z0-9-]*"></label><label>Topic<input name="topic"></label>', async node => { const f=new FormData(node.querySelector('form')); try { await api.post('/api/channels', {code:f.get('code'),topic:f.get('topic')}); openChannel(f.get('code')); } catch (error) { toast(error.message || 'Could not create channel'); } });
+  }
+  function dmTargets() {
+    const targets = state.dms?.targets || [];
+    if (targets.length) return targets.slice().sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
+    return (Trio.store?.get('agents.list') || state.agents || []).map(agent => ({id: agent.id, name: agent.name || agent.id, dm_channel: agent.dm_channel})).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  }
+  function openDmDialog() {
+    const targets = dmTargets();
+    const options = targets.map(target => `<option value="${esc(target.id)}">${esc(target.name || target.id)}</option>`).join('');
+    modal('Start a direct message', `<p>Choose an agent to open a private conversation with.</p><label for="dm-agent">Agent<select id="dm-agent" name="agent" required ${targets.length ? '' : 'disabled'}><option value="">Select an agent…</option>${options}</select></label>${targets.length ? '' : '<p class="home-empty">No agents are available yet.</p>'}`, node => {
+      const id = new FormData(node.querySelector('form')).get('agent');
+      const target = targets.find(item => item.id === id);
+      if (!target) return;
+      const existing = (state.dms?.your_dms || []).find(dm => dm.key === id);
+      openDm(existing || {key: id, member_ids: [id], name: target.name || id, channel: target.dm_channel || state.channel});
+    });
+    document.getElementById('dm-agent')?.focus();
   }
   function viewArchiveChannel(code) { loadConversation(code, 'trio#' + code, 'Archived channel — read only', true, false); }
   function viewArchiveDm(dm) { openDm(dm, true); }
