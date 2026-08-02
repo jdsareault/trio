@@ -7,6 +7,10 @@
   const listOf = value => Array.isArray(value) ? value : [];
   const pendingDecisions = new Set();
   const $ = id => document.getElementById(id);
+  // Monotonic navigation generation. Bumped in loadConversation so in-flight
+  // DM loaders can detect that the user navigated away before their response
+  // resolved, and bail before inserting private history into the wrong view.
+  let navGen = 0;
 
   function groupNavigation(channels = [], dms = {}) {
     return {
@@ -60,6 +64,12 @@
   }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false, isAudit = false) {
     if (Trio.store) Trio.store.set('session.channel', channel);
+    // Invalidate any in-flight DM loaders and cancel their fetches. Without
+    // this, a late DM response resolved after navigating to a channel (or
+    // another DM) would insert private history into the now-current view,
+    // because the completion handler no longer sees a dmKey to filter against.
+    navGen++;
+    if (!isDm) Trio.loader?.cancelAll?.('dm:');
     state.view = 'conversation';
     showConversationPage();
     state.readOnly = !!readOnly;
@@ -91,20 +101,29 @@
     if (Trio.router?.navigate) Trio.router.navigate(auditReadOnly ? 'audit' : 'dm', { key: dm.key, ...(readOnly && !auditReadOnly ? { archived: true } : {}) });
     Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
+    // Capture the navigation generation and dm key after loadConversation so
+    // the completion handler can reject a stale response (user navigated to a
+    // channel or a different DM before this resolved).
+    const gen = navGen;
+    const dmKey = dm.key;
     const loader = Trio.loader?.load ? Trio.loader : { load: (name, fn) => { const c = { abort() {} }; return fn(c); } };
     loader.load('dm:' + dm.key, signal => api.get('/api/dms?with=' + encodeURIComponent(dm.key) + (readOnly && !auditReadOnly ? '&archived=1' : ''), false, { signal })).then(data => {
+      if (gen !== navGen || state.dmKey !== dmKey) return;
       state.dmLoading = false; state.dmError = '';
       if (data && Array.isArray(data.messages)) { data.messages.forEach(Trio.conversation.upsert); }
       if (data && data.ok === false) { state.dmError = data.error || 'Could not load DM'; }
       Trio.conversation?.render?.();
     }).catch(error => {
+      if (gen !== navGen) return;
       if (error?.name === 'AbortError' || (typeof error === 'string' && error.includes('aborted'))) return;
       state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.();
     });
   }
   function openDmByKey(key, audit = false) {
     if (!key) return;
+    const gen = navGen;
     api.get('/api/dms?with=' + encodeURIComponent(key)).then(data => {
+      if (gen !== navGen) return null;
       const auditThread = (data.agent_dms || []).find(d => d.key === key);
       if (audit && auditThread) return openDm(auditThread, false, true);
       const yours = (data.your_dms || []).find(d => d.key === key);
@@ -112,8 +131,12 @@
       if (auditThread) return openDm(auditThread, false, true);
       return api.get('/api/dms?archived=1&with=' + encodeURIComponent(key));
     }).then(data => {
+      if (gen !== navGen) return;
       if (data) { const dm = (data.your_dms || []).find(d => d.key === key); if (dm) openDm(dm, true); }
-    }).catch(error => Trio.ui.toast(error.message || 'Could not load DM'));
+    }).catch(error => {
+      if (gen !== navGen) return;
+      Trio.ui.toast(error.message || 'Could not load DM');
+    });
   }
   const toast = m => Trio.ui.toast(m);
   const modal = (t, b, s) => Trio.ui.modal(t, b, s);
