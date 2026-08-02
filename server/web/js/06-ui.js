@@ -20,11 +20,13 @@
   // `body` is raw HTML, unlike `title` — callers MUST pre-escape any
   // user-controlled content (via `esc()` here or `Trio.markdown.escapeHtml`)
   // before passing it in.
-  function modal(title, body, submit) {
+  function modal(title, body, submit, options = {}) {
     let node = document.getElementById('trio-control-modal');
     if (!node) { node = document.createElement('dialog'); node.id = 'trio-control-modal'; document.body.append(node); }
     configureDialog(node);
-    node.innerHTML = `<form method="dialog" class="control-modal"><button type="submit" formnovalidate class="modal-close" value="cancel">×</button><h2>${esc(title)}</h2>${body}<footer><button type="submit" formnovalidate value="cancel">Cancel</button><button type="submit" value="default" class="primary">Save</button></footer></form>`;
+    const cancelLabel = esc(options.cancelLabel || 'Cancel');
+    const submitButton = options.submit === false ? '' : '<button type="submit" value="default" class="primary">Save</button>';
+    node.innerHTML = `<form method="dialog" class="control-modal"><button type="submit" formnovalidate class="modal-close" value="cancel">×</button><h2>${esc(title)}</h2>${body}<footer><button type="submit" formnovalidate value="cancel">${cancelLabel}</button>${submitButton}</footer></form>`;
     node.addEventListener('close', () => { if (node.returnValue === 'default') submit?.(node); }, { once: true }); node.showModal();
   }
   function confirmAction(message, action) {

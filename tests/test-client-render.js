@@ -202,6 +202,14 @@ check('clicking a roster tile opens that agent’s management dialog', () => {
   assert.strictEqual(opened.title, 'Manage agent: Tile Agent');
   assert.ok(opened.body.includes('Compact context'));
 });
+check('agent-management dialogs can omit the unrelated Save action', () => {
+  const dialog = cx.document.getElementById('trio-control-modal');
+  dialog.showModal = () => {};
+  H.Trio.ui.modal('Manage agent', '<p>Controls</p>', undefined, { submit: false, cancelLabel: 'Close' });
+  const labels = dialog.querySelectorAll('button').map(button => button.textContent);
+  assert.ok(labels.includes('Close'));
+  assert.strictEqual(labels.includes('Save'), false);
+});
 check('agent model options normalize provider model records', () => {
   const models = H.Trio.agents.normalizeModels([
     { id: 'sonnet', name: 'Claude Sonnet' },

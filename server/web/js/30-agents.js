@@ -208,7 +208,7 @@
     const html = rows.map(([k, v]) => `<div class="detail-row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('') +
       `<div class="agent-actions" aria-label="Agent lifecycle controls">${lifecycleActions}</div>` +
       `<div class="agent-actions"><button data-edit="placements" type="button">Edit placements</button><button data-edit="wake" type="button">Edit wake policy</button></div>`;
-    Trio.ui.modal('Manage agent: ' + vm.name, html);
+    Trio.ui.modal('Manage agent: ' + vm.name, html, undefined, { submit: false, cancelLabel: 'Close' });
     setTimeout(() => {
       const panel = document.getElementById('trio-control-modal');
       if (!panel) return;
@@ -217,10 +217,18 @@
         if (actionName === 'compact') {
           panel.close('cancel');
           setTimeout(() => showCompact(vm), 0);
-        } else if (confirmAction(vm, actionName)) action(vm.id, actionName);
+        } else if (confirmAction(vm, actionName)) {
+          panel.close('cancel');
+          Trio.ui.toast(actionLabel(actionName) + ' requested for ' + vm.name);
+          action(vm.id, actionName);
+        }
       }));
-      panel.querySelector('[data-edit="placements"]')?.addEventListener('click', () => editPlacements(vm));
-      panel.querySelector('[data-edit="wake"]')?.addEventListener('click', () => editWake(vm));
+      panel.querySelector('[data-edit="placements"]')?.addEventListener('click', () => {
+        panel.close('cancel'); setTimeout(() => editPlacements(vm), 0);
+      });
+      panel.querySelector('[data-edit="wake"]')?.addEventListener('click', () => {
+        panel.close('cancel'); setTimeout(() => editWake(vm), 0);
+      });
     }, 0);
   }
   function showCompact(vm) {
