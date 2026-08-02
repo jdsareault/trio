@@ -157,6 +157,15 @@ check('agent view model normalizes lifecycle and status', () => {
   assert.strictEqual(vm.wakePolicy, 'about');
   assert.strictEqual(vm.needsAttention, true);
 });
+check('agent last-active timestamps are local and human-readable', () => {
+  const iso = '2026-08-02T00:45:14+00:00';
+  const options = { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  const formatted = H.Trio.agents.formatLastActive(iso);
+  assert.strictEqual(formatted, new Date(iso).toLocaleString([], options));
+  assert.notStrictEqual(formatted, iso);
+  assert.ok(!formatted.includes('T'));
+  assert.strictEqual(H.Trio.agents.formatLastActive('not a timestamp'), 'not a timestamp');
+});
 check('agent action capabilities filter by lifecycle', () => {
   const caps = H.Trio.agents.actionCaps(H.Trio.agents.viewModel({ id: 'ag_1', live: false, state: 'stopped' }));
   assert.ok(caps.includes('wake'));
