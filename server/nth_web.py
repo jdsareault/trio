@@ -816,7 +816,12 @@ class EventHub:
         only broadcasts, its own messages, and DMs addressed to it — real DMs
         are withheld from a guest's live feed, not just hidden client-side.
         Defaults keep the operator (and existing callers/tests) all-seeing."""
-        q: queue.Queue = queue.Queue(maxsize=200)
+        # Size for the prime burst: one roster payload plus up to HISTORY_LIMIT
+        # message payloads, plus headroom for live events that interleave
+        # during priming (the sub is registered before the snapshot, so a
+        # concurrent broadcast also enqueues here). A 200-entry queue dropped
+        # the 201st prime payload — the newest message — at full history.
+        q: queue.Queue = queue.Queue(maxsize=HISTORY_LIMIT + 1 + 16)
         sub = (q, viewer_id, all_seeing)
         # Register the subscriber BEFORE building the prime snapshot. A
         # message committed between the snapshot query and registration used
@@ -2019,10 +2024,10 @@ class AgentIdleReaper(threading.Thread):
         self.sup = supervisor
         self.idle_seconds = max(0.0, idle_seconds)
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.wait(self.interval):
+        while not self._stop_event.wait(self.interval):
             try:
                 self.sup.reconcile()
             except Exception:
@@ -2056,7 +2061,7 @@ class AgentIdleReaper(threading.Thread):
         return slept
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 def build_mcp_config_for_hub() -> str:
@@ -2076,7 +2081,7 @@ class AgentRouter(threading.Thread):
         self.db_path = db_path
         self.sup = supervisor
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.last_id = 0
         # Wake+feed happens on a worker, NOT the poll loop — a cold-start wake
         # blocks for up to ~10s and must not stall message DETECTION across all
@@ -2095,7 +2100,7 @@ class AgentRouter(threading.Thread):
         db.row_factory = sqlite3.Row
         try:
             self.last_id = db.execute("SELECT COALESCE(MAX(id),0) FROM messages").fetchone()[0]
-            while not self._stop.wait(self.interval):
+            while not self._stop_event.wait(self.interval):
                 try:
                     self.tick(db)
                 except Exception as e:
@@ -2152,7 +2157,7 @@ class AgentRouter(threading.Thread):
                         f"[nth_web] AgentRouter queue full after 1s — dropping message for agent {aid}\n")
 
     def _worker_loop(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 aid, chan, text, attachments, source_message_id, source_sender = \
                     self._q.get(timeout=0.5)
@@ -2206,7 +2211,7 @@ class AgentRouter(threading.Thread):
         return out
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 def _gen_agent_id() -> str:
@@ -2339,6 +2344,45 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except http.cookies.CookieError:
             pass
         return OPERATOR_REGISTRY.new_token(), True
+
+    def _check_same_origin(self) -> bool:
+        """Reject cross-origin mutations (CSRF defense).
+
+        A malicious webpage can otherwise mint a loopback operator identity
+        via a simple text/plain POST that avoids CORS preflight: the browser
+        connects from loopback, _resolve_identity trusts the OS user, and the
+        request is honored even without the existing cookie. fetch()/XHR
+        always send Origin on POST; we compare its host:port against the
+        request's Host header (which reflects the address the client used to
+        reach us). Absent Origin AND Referer means a non-browser caller
+        (curl, MCP) — allow, since the loopback-mint attack requires a
+        credentialed browser context. Writes a 403 and returns False on
+        denial."""
+        origin = self.headers.get("Origin")
+        referer = self.headers.get("Referer")
+        if not origin and not referer:
+            return True
+        parsed = urlparse(origin or referer)
+        cand_host = (parsed.hostname or "").lower()
+        if not cand_host:
+            self._error(403, "cross-origin request not allowed")
+            return False
+        cand_port = parsed.port
+        if cand_port is None:
+            cand_port = 443 if (parsed.scheme or "http").lower() == "https" else 80
+        host_header = (self.headers.get("Host") or "").lower()
+        if ":" in host_header:
+            req_host, _, req_port_str = host_header.rpartition(":")
+            try:
+                req_port = int(req_port_str)
+            except ValueError:
+                req_host, req_port = host_header, self.server.server_address[1]
+        else:
+            req_host, req_port = host_header, self.server.server_address[1]
+        if cand_host == req_host and cand_port == req_port:
+            return True
+        self._error(403, "cross-origin request not allowed")
+        return False
 
     def _resolve_identity(self) -> Tuple[str, OperatorIdentity, bool]:
         """Resolve (token, identity, is_new_cookie). Trust ladder:
@@ -2475,6 +2519,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._resolved_channel = None
+        # CSRF defense: a cross-origin webpage can otherwise mint a loopback
+        # operator identity via a simple text/plain POST. See _check_same_origin.
+        if not self._check_same_origin():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/channels":
             self._handle_channel_create()
@@ -2666,6 +2714,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return None
         if length <= 0 or length > max_bytes:
             self._error(400, "missing or oversized body")
+            return None
+        # Restrict JSON endpoints to an application/json content type. A
+        # cross-origin simple request with text/plain avoids CORS preflight;
+        # requiring application/json forces a preflight the server does not
+        # grant, blocking the request. Defense-in-depth alongside the Origin
+        # check in do_POST. Empty Content-Type is allowed for same-origin
+        # callers that omit it; a cross-origin attacker cannot send a JSON
+        # body without a non-JSON simple content type.
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype and ctype != "application/json":
+            self._error(415, "Content-Type must be application/json")
             return None
         try:
             raw = self.rfile.read(length)
@@ -3704,7 +3763,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         the process. Operator-only."""
         if self._require_operator() is None or not self._require_agent_control():
             return
-        body = self._read_json_body() or {}
+        body = self._read_json_body()
+        if body is None:
+            return
         provider = (body.get("provider") or "claude").strip().lower()
         if provider not in ("claude", "codex"):
             self._error(400, "provider must be claude or codex")

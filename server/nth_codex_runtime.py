@@ -397,38 +397,43 @@ class CodexRuntimeManager:
             return self._agent_locks.setdefault(agent_id, threading.RLock())
 
     def ensure_started(self) -> None:
-        if not self._worker_started:
-            self._worker.start()
-            self._worker_started = True
-        if self._client.alive():
-            return
-        self._client.start()
-        account = self._client.request("account/read", {"refreshToken": False})
-        if account.get("requiresOpenaiAuth") and not account.get("account"):
-            self._client.stop()
-            raise CodexProtocolError("Codex App Server is not authenticated")
-        mcp = self._client.request("mcpServerStatus/list", {
-            "limit": 50, "detail": "toolsAndAuthOnly"})
-        trio = next((row for row in mcp.get("data", [])
-                     if row.get("name") == "nth-trio"), None)
-        required = {"trio_" + name for name in (
-            "connect", "send", "dm", "poll", "ack", "pounds", "ask",
-            "claim", "complete", "cancel", "release", "lock", "unlock",
-            "set_status", "rename", "status", "roster", "history", "end",
-            "list", "cull", "cleanup", "retract")}
-        tools = set((trio or {}).get("tools", {}).keys())
-        missing = sorted(required - tools)
-        if trio is None or missing:
-            self._client.stop()
-            detail = "nth-trio MCP did not initialize" if trio is None else (
-                "nth-trio is missing tools: " + ", ".join(missing))
-            raise CodexProtocolError(detail)
-        self._ready_detail = {
-            "app_server": True,
-            "app_server_pid": self._client.pid,
-            "trio_mcp": True,
-            "tool_count": len(tools),
-        }
+        # Serialize the full start sequence. Different agents use different
+        # per-agent locks, so without this global lock two simultaneous
+        # requests could both call Thread.start() / client.start() and either
+        # raise RuntimeError or start competing provider processes.
+        with self._lock:
+            if not self._worker_started:
+                self._worker.start()
+                self._worker_started = True
+            if self._client.alive():
+                return
+            self._client.start()
+            account = self._client.request("account/read", {"refreshToken": False})
+            if account.get("requiresOpenaiAuth") and not account.get("account"):
+                self._client.stop()
+                raise CodexProtocolError("Codex App Server is not authenticated")
+            mcp = self._client.request("mcpServerStatus/list", {
+                "limit": 50, "detail": "toolsAndAuthOnly"})
+            trio = next((row for row in mcp.get("data", [])
+                         if row.get("name") == "nth-trio"), None)
+            required = {"trio_" + name for name in (
+                "connect", "send", "dm", "poll", "ack", "pounds", "ask",
+                "claim", "complete", "cancel", "release", "lock", "unlock",
+                "set_status", "rename", "status", "roster", "history", "end",
+                "list", "cull", "cleanup", "retract")}
+            tools = set((trio or {}).get("tools", {}).keys())
+            missing = sorted(required - tools)
+            if trio is None or missing:
+                self._client.stop()
+                detail = "nth-trio MCP did not initialize" if trio is None else (
+                    "nth-trio is missing tools: " + ", ".join(missing))
+                raise CodexProtocolError(detail)
+            self._ready_detail = {
+                "app_server": True,
+                "app_server_pid": self._client.pid,
+                "trio_mcp": True,
+                "tool_count": len(tools),
+            }
 
     def diagnostics(self, deep: bool = False) -> Dict[str, Any]:
         result = codex_cli_diagnostics()
@@ -604,7 +609,13 @@ class CodexRuntimeManager:
             if pending is not None and turn_id:
                 self._active[agent_id] = turn_id
                 self._turn_context[turn_id] = pending
-        self._set_state(agent_id, "running")
+        # Only mark running when the turn is still pending/active. The
+        # turn/started (or turn/completed) notification may have already
+        # resolved on the reader thread — pending is None then, and the
+        # notification has already set the final state. Overwriting it with
+        # "running" would leave durable state stuck as running.
+        if pending is not None and turn_id:
+            self._set_state(agent_id, "running")
         return bool(turn_id)
 
     def compact(self, agent_id: str, message: str = "") -> bool:
@@ -694,6 +705,7 @@ class CodexRuntimeManager:
 
     def clear(self, agent_id: str, **spawn_kw) -> Optional[CodexAgentHandle]:
         with self._agent_lock(agent_id):
+            self._cancel_approvals(agent_id)
             db = self._db()
             try:
                 row = db.execute(
@@ -705,6 +717,16 @@ class CodexRuntimeManager:
                 return None
             with self._lock:
                 old_thread = self._threads.get(agent_id)
+                old_turn = self._active.get(agent_id)
+            # Interrupt any active turn before archiving so the old turn cannot
+            # keep running tools after the UI reports a fresh context. Its
+            # notifications are dropped below by clearing the per-agent state.
+            if old_turn and old_thread and self._client.alive():
+                try:
+                    self._client.request("turn/interrupt", {
+                        "threadId": old_thread, "turnId": old_turn})
+                except CodexProtocolError:
+                    pass
             if old_thread and self._client.alive():
                 try:
                     self._client.request("thread/archive", {"threadId": old_thread})
@@ -715,7 +737,13 @@ class CodexRuntimeManager:
                 self._threads.pop(agent_id, None)
                 if old_thread:
                     self._thread_agents.pop(old_thread, None)
+                self._active.pop(agent_id, None)
+                self._starting.pop(agent_id, None)
+                self._queued.pop(agent_id, None)
                 self._compacting.discard(agent_id)
+                if old_turn:
+                    self._turn_context.pop(old_turn, None)
+                    self._turn_text.pop(old_turn, None)
             self._set_state(agent_id, "stopped", clear_runtime_ref=True)
             return self.spawn(
                 agent_id,

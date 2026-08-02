@@ -1414,6 +1414,14 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
                     "AND active=1 ORDER BY joined_at", (channel,)).fetchall()]
             if recipient_ids:
                 recipients_json = json.dumps(list(dict.fromkeys(recipient_ids)))
+            else:
+                # Fail closed: no prior private sender and no human member to
+                # address. Storing [] would broadcast the message to every
+                # managed agent in the shared hidden inbox. Reject instead.
+                return json.dumps({
+                    "error": "trio_send in the agent inbox has no recipient: "
+                             "no prior private sender and no human member was "
+                             "found. Use trio_dm with an explicit recipient."})
 
         now = now_iso()
         task_id = None
@@ -2698,6 +2706,12 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
         if truncated:
             rows = rows[:HISTORY_FROM_ID_LIMIT]
 
+        # Capture the last raw row id BEFORE visibility filtering. An all-hidden
+        # page (every row is a DM this reader can't see) empties `messages`;
+        # deriving the continuation from `messages` would fall back to the
+        # original from_id and loop the caller on the same page forever.
+        last_raw_id = rows[-1]["id"] if rows else from_id
+
         rows = [
             m for m in rows
             if can_see(reader_id, reader_kind, m["member_id"],
@@ -2741,7 +2755,7 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None, memb
             resp["retracted_ids"] = retracted_ids
         if truncated:
             resp["truncated"] = True
-            resp["next_from_id"] = messages[-1]["id"] + 1 if messages else from_id
+            resp["next_from_id"] = last_raw_id + 1
         return json.dumps(resp)
     finally:
         db.close()
