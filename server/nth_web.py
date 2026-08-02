@@ -3706,6 +3706,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if self._require_operator() is None or not self._require_agent_control():
             return
         approvals = get_supervisor().pending_approvals()
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            active_channels = [r["code"] for r in db.execute(
+                "SELECT code FROM channels WHERE archived_at IS NULL").fetchall()]
+            if active_channels:
+                placeholders = ",".join("?" * len(active_channels))
+                active_agents = {r["agent_id"] for r in db.execute(
+                    f"SELECT DISTINCT agent_id FROM agent_channels "
+                    f"WHERE channel IN ({placeholders})", active_channels).fetchall()}
+            else:
+                active_agents = set()
+            approvals = [a for a in approvals if a.get("agent_id") in active_agents]
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            db.close()
         self._json({"ok": True, "count": len(approvals), "approvals": approvals})
 
     def _handle_approval_resolve(self, approval_id: str) -> None:
@@ -3735,12 +3754,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=3000")
             answered = {(r["channel"], r["reply_to"]) for r in db.execute(
                 "SELECT channel, reply_to FROM messages "
-                "WHERE member_id = ? AND reply_to IS NOT NULL AND COALESCE(selection, '') != ''",
+                "WHERE member_id = ? AND reply_to IS NOT NULL AND COALESCE(selection, '') != '' "
+                "AND EXISTS (SELECT 1 FROM channels c WHERE c.code = messages.channel AND c.archived_at IS NULL)",
                 (operator_id,)).fetchall()}
             rows = db.execute(
                 "SELECT id, channel, member_id, member_name, content, created_at, choices "
                 "FROM messages "
                 "WHERE COALESCE(choices, '') != '' AND member_id != ? "
+                "AND EXISTS (SELECT 1 FROM channels c WHERE c.code = messages.channel AND c.archived_at IS NULL) "
                 "ORDER BY id DESC LIMIT 2000",
                 (operator_id,)).fetchall()
             questions = []
@@ -3786,6 +3807,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "SELECT id, channel, member_id, member_name, content, created_at, mentions "
                 "FROM messages "
                 "WHERE mentions LIKE ? AND member_id != ? "
+                "AND EXISTS (SELECT 1 FROM channels c WHERE c.code = messages.channel AND c.archived_at IS NULL) "
                 "ORDER BY id DESC LIMIT 2000",
                 (f"%{operator_id}%", operator_id)).fetchall()
             mentions = []
