@@ -376,12 +376,23 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             (channel, local_hwm, member_id),
                         ).fetchall()
                     except sqlite3.OperationalError:
-                        unread = db.execute(
-                            "SELECT id, mentions, recipients, member_id, member_name, content "
-                            "FROM messages WHERE channel = ? AND id > ? AND member_id != ? "
-                            "ORDER BY id",
-                            (channel, local_hwm, member_id),
-                        ).fetchall()
+                        try:
+                            unread = db.execute(
+                                "SELECT id, mentions, recipients, member_id, member_name, content "
+                                "FROM messages WHERE channel = ? AND id > ? AND member_id != ? "
+                                "ORDER BY id",
+                                (channel, local_hwm, member_id),
+                            ).fetchall()
+                        except sqlite3.OperationalError:
+                            # Pre-DM schema: no recipients column. Operate in
+                            # broadcast-only mode (can_see treats a missing
+                            # recipients key as a visible broadcast).
+                            unread = db.execute(
+                                "SELECT id, mentions, member_id, member_name, content "
+                                "FROM messages WHERE channel = ? AND id > ? AND member_id != ? "
+                                "ORDER BY id",
+                                (channel, local_hwm, member_id),
+                            ).fetchall()
 
                 if unread:
                     # Advance the LOCAL watermark over the whole raw batch first,
