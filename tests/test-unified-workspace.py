@@ -34,15 +34,22 @@ json.loads(srv.nth_connect(summary="a", name="SeedA", channel="chan-a"))
 json.loads(srv.nth_connect(summary="b", name="SeedB", channel="chan-b"))
 
 aid = "ag_workspace"
+bid = "ag_workspace_b"
 now = srv.now_iso()
 db = srv.get_db()
 db.execute("INSERT INTO agents (id,name,model,state,managed,created_at) "
            "VALUES (?, 'Workspace Agent', 'sonnet', 'sleeping', 1, ?)", (aid, now))
+db.execute("INSERT INTO agents (id,name,model,state,managed,created_at) "
+           "VALUES (?, 'Workspace Agent B', 'sonnet', 'sleeping', 1, ?)", (bid, now))
 for channel in ("chan-a", "chan-b"):
     db.execute("INSERT INTO members (id,channel,name,summary,skills,last_seen,joined_at,active,kind) "
                "VALUES (?,?, 'Workspace Agent','','',?,?,1,'agent')", (aid, channel, now, now))
     db.execute("INSERT INTO agent_channels (agent_id,channel,member_id,joined_at) VALUES (?,?,?,?)",
                (aid, channel, aid, now))
+    db.execute("INSERT INTO members (id,channel,name,summary,skills,last_seen,joined_at,active,kind) "
+               "VALUES (?,?, 'Workspace Agent B','','',?,?,1,'agent')", (bid, channel, now, now))
+    db.execute("INSERT INTO agent_channels (agent_id,channel,member_id,joined_at) VALUES (?,?,?,?)",
+               (bid, channel, bid, now))
 web.ensure_agent_inboxes(db)
 db.commit()
 db.close()
@@ -125,6 +132,26 @@ try:
     messages = thread.get("messages", [])
     check("merged DM history includes both source channels",
           st == 200 and {m.get("channel") for m in messages} == {"chan-a", "chan-b"})
+
+    # Agent-to-agent audit threads are listed in the sidebar but must also
+    # return their merged history when the human opens one.
+    db = sqlite3.connect(str(srv.DB_PATH))
+    db.execute("INSERT INTO messages (channel,member_id,member_name,content,recipients,created_at) "
+               "VALUES (?,?,?,?,?,?)",
+               ("chan-a", aid, "Workspace Agent", "agent-only message", json.dumps([bid]), srv.now_iso()))
+    db.commit()
+    db.close()
+
+    st, inbox = http(port, "/api/dms")
+    audit_key = ",".join(sorted((aid, bid)))
+    audit_threads = inbox.get("agent_dms", [])
+    check("agent-to-agent DM appears in the audit sidebar",
+          st == 200 and any(thread.get("key") == audit_key for thread in audit_threads))
+
+    st, audit = http(port, "/api/dms?with=" + audit_key)
+    check("opening an agent-to-agent DM returns its history",
+          st == 200 and any(message.get("content") == "agent-only message"
+                             for message in audit.get("messages", [])))
 finally:
     if server is not None:
         server.shutdown()
