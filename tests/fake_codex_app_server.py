@@ -15,6 +15,7 @@ hold_turns = "--hold" in sys.argv
 held = []
 last_approval = ""
 last_input = []
+last_injected_items = []
 last_thread_start = {}
 
 
@@ -119,9 +120,14 @@ for raw in sys.stdin:
         send({"id": request_id, "result": {"input": last_input}})
     elif method == "fake/last-thread-start":
         send({"id": request_id, "result": {"params": last_thread_start}})
+    elif method == "fake/last-injected-items":
+        send({"id": request_id, "result": {"items": last_injected_items}})
     elif method == "fake/crash":
         raise SystemExit(7)
     elif method == "turn/interrupt":
+        send({"id": request_id, "result": {}})
+    elif method == "thread/inject_items":
+        last_injected_items = params.get("items") or []
         send({"id": request_id, "result": {}})
     elif method in ("thread/unsubscribe", "thread/archive", "thread/delete",
                     "thread/compact/start"):

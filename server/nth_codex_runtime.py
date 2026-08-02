@@ -365,6 +365,7 @@ class CodexRuntimeManager:
         self._thread_agents: Dict[str, str] = {}
         self._loaded: set = set()
         self._active: Dict[str, str] = {}
+        self._compacting: set = set()
         self._starting: Dict[str, Dict[str, Any]] = {}
         self._turn_context: Dict[str, Dict[str, Any]] = {}
         self._turn_text: Dict[str, str] = {}
@@ -606,16 +607,36 @@ class CodexRuntimeManager:
         self._set_state(agent_id, "running")
         return bool(turn_id)
 
-    def compact(self, agent_id: str) -> bool:
+    def compact(self, agent_id: str, message: str = "") -> bool:
         if not self.is_running(agent_id) and self.wake(agent_id) is None:
             return False
         with self._lock:
             thread_id = self._threads.get(agent_id)
         if not thread_id:
             return False
-        self._client.request("thread/compact/start", {"threadId": thread_id})
-        self._set_state(agent_id, "running")
-        return True
+        with self._lock:
+            self._compacting.add(agent_id)
+        self._set_state(agent_id, "compacting")
+        try:
+            if message.strip():
+                self._client.request("thread/inject_items", {
+                    "threadId": thread_id,
+                    "items": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Compaction guidance — preserve this information: " + message.strip(),
+                        }],
+                    }],
+                })
+            self._client.request("thread/compact/start", {"threadId": thread_id})
+            return True
+        except CodexProtocolError:
+            with self._lock:
+                self._compacting.discard(agent_id)
+            self._set_state(agent_id, "running")
+            return False
 
     def interrupt(self, agent_id: str) -> bool:
         with self._lock:
@@ -667,6 +688,7 @@ class CodexRuntimeManager:
                 self._active.pop(agent_id, None)
                 self._starting.pop(agent_id, None)
                 self._queued.pop(agent_id, None)
+                self._compacting.discard(agent_id)
             self._set_state(agent_id, state)
             return True
 
@@ -693,6 +715,7 @@ class CodexRuntimeManager:
                 self._threads.pop(agent_id, None)
                 if old_thread:
                     self._thread_agents.pop(old_thread, None)
+                self._compacting.discard(agent_id)
             self._set_state(agent_id, "stopped", clear_runtime_ref=True)
             return self.spawn(
                 agent_id,
@@ -732,6 +755,7 @@ class CodexRuntimeManager:
                     self._thread_agents.pop(thread_id, None)
                 self._active.pop(agent_id, None)
                 self._queued.pop(agent_id, None)
+                self._compacting.discard(agent_id)
             return True
 
     def is_running(self, agent_id: str) -> bool:
@@ -748,7 +772,8 @@ class CodexRuntimeManager:
 
     def is_busy(self, agent_id: str) -> bool:
         with self._lock:
-            return agent_id in self._active or agent_id in self._starting
+            return (agent_id in self._active or agent_id in self._starting
+                    or agent_id in self._compacting)
 
     def activity(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
@@ -806,7 +831,9 @@ class CodexRuntimeManager:
                     self._active[agent_id] = turn_id
                     if context is not None:
                         self._turn_context[turn_id] = context
-            self._set_state(agent_id, "running")
+            with self._lock:
+                compacting = agent_id in self._compacting
+            self._set_state(agent_id, "compacting" if compacting else "running")
         elif method == "item/completed":
             item = params.get("item") or {}
             turn_id = str(params.get("turnId") or self._active.get(agent_id) or "")
@@ -818,6 +845,7 @@ class CodexRuntimeManager:
             turn_id = str(turn.get("id") or self._active.get(agent_id) or "")
             with self._lock:
                 self._active.pop(agent_id, None)
+                self._compacting.discard(agent_id)
                 context = self._turn_context.pop(turn_id, None)
                 text = self._turn_text.pop(turn_id, "")
                 still_loaded = agent_id in self._loaded

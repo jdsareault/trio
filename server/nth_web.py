@@ -3833,9 +3833,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif action == "clear":
             ok = clear_agent(agent_id, sup, self.db_path) is not None
         elif action == "compact":
+            body = {}
+            if (self.headers.get("Content-Length", "0") or "0") != "0":
+                body = self._read_json_body(max_bytes=4096)
+                if body is None:
+                    return
+            message = body.get("message", "")
+            if not isinstance(message, str):
+                self._error(400, "compaction message must be text")
+                return
+            message = message.strip()
+            if len(message) > 2000:
+                self._error(400, "compaction message is too long")
+                return
             if not sup.is_running(agent_id):
                 wake_agent(agent_id, sup, self.db_path)
-            ok = sup.compact(agent_id)
+            ok = sup.compact(agent_id, message=message)
         elif action == "placement":
             body = self._read_json_body(max_bytes=4096)
             if body is None:

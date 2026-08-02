@@ -108,7 +108,15 @@ try:
               for i in inputs))
     manager._client.request("fake/complete")
 
-    check("compact maps to the native thread operation", manager.compact("ag1"))
+    check("compact maps to the native thread operation", manager.compact(
+        "ag1", message="Keep the migration decisions"))
+    with sqlite3.connect(str(db_path)) as check_db:
+        compacting = check_db.execute(
+            "SELECT state FROM agents WHERE id='ag1'").fetchone()[0]
+    injected = manager._client.request("fake/last-injected-items").get("items", [])
+    check("compact exposes in-progress state and preserves its guidance",
+          manager.is_busy("ag1") and compacting == "compacting"
+          and injected and "Keep the migration decisions" in injected[0]["content"][0]["text"])
     check("hibernate unloads but retains the thread", manager.hibernate("ag1")
           and not manager.is_running("ag1"))
     with sqlite3.connect(str(db_path)) as check_db:

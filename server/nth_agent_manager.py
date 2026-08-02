@@ -120,9 +120,9 @@ class UnifiedAgentSupervisor:
         # the truthful equivalent and retains its resumable session reference.
         return bool(manager and manager.stop(agent_id))
 
-    def compact(self, agent_id: str) -> bool:
+    def compact(self, agent_id: str, message: str = "") -> bool:
         manager = self.manager_for(agent_id)
-        return bool(manager and manager.compact(agent_id))
+        return bool(manager and manager.compact(agent_id, message=message))
 
     def clear(self, agent_id: str, **kwargs):
         manager = self.manager_for(agent_id)
@@ -174,9 +174,7 @@ class UnifiedAgentSupervisor:
 
     def is_busy(self, agent_id: str) -> bool:
         manager = self.manager_for(agent_id)
-        if manager is self.codex:
-            return self.codex.is_busy(agent_id)
-        return False
+        return bool(manager and manager.is_busy(agent_id))
 
     def activity(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         manager = self.manager_for(agent_id)

@@ -191,8 +191,9 @@ try:
     time.sleep(0.3)
     check("wake endpoint -> 200 + agent live again",
           st == 200 and web.get_supervisor().is_running(wid))
-    st, _ = http(port, f"/api/agents/{wid}/compact", "POST")
-    check("compact endpoint -> 200 for live agent", st == 200)
+    st, _ = http(port, f"/api/agents/{wid}/compact", "POST",
+                 {"message": "Keep the current plan"})
+    check("compact endpoint accepts guidance for a live agent", st == 200)
     old_proc = web.get_supervisor()._procs.get(wid)
     st, _ = http(port, f"/api/agents/{wid}/clear", "POST")
     new_proc = web.get_supervisor()._procs.get(wid)

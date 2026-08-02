@@ -60,6 +60,7 @@ MANAGED_ALLOWED_TOOLS = ",".join(
 ST_SPAWNING = "spawning"
 ST_RUNNING = "running"
 ST_IDLE = "idle"
+ST_COMPACTING = "compacting"
 ST_SLEEPING = "sleeping"
 ST_STOPPED = "stopped"
 ST_ERRORED = "errored"
@@ -365,6 +366,7 @@ class AgentSupervisor:
         self.runtime = runtime or ClaudeRuntime()
         self._procs: Dict[str, AgentProc] = {}
         self._pending: Dict[str, Deque[Dict[str, Any]]] = {}
+        self._compacting: set[str] = set()
         self._agent_locks: Dict[str, threading.RLock] = {}
         self._lock = threading.Lock()
         self._accepting = True
@@ -386,14 +388,23 @@ class AgentSupervisor:
     def _forget_pending(self, agent_id: str) -> None:
         with self._lock:
             self._pending.pop(agent_id, None)
+            self._compacting.discard(agent_id)
 
-    def _handle_event(self, agent_id: str, evt: Dict[str, Any]) -> None:
+    def _handle_event(self, agent_id: str, evt: Dict[str, Any],
+                      source: Optional[AgentProc] = None) -> None:
         """Keep activity/state current, then forward the event to the hub.
 
         Claude emits a terminal ``result`` event after a turn.  Treat that as
         idle (eligible for hibernation); all other output is active work.
         """
-        state = ST_IDLE if evt.get("type") == "result" else ST_RUNNING
+        with self._lock:
+            if source is not None and self._procs.get(agent_id) is not source:
+                return
+            compacting = agent_id in self._compacting
+            if evt.get("type") == "result":
+                self._compacting.discard(agent_id)
+        state = ST_IDLE if evt.get("type") == "result" else (
+            ST_COMPACTING if compacting else ST_RUNNING)
         # A reader thread can deliver its final buffered event while stop() /
         # shutdown() is tearing the process down. Never let that late event
         # resurrect a deliberately stopped DB row.
@@ -538,8 +549,10 @@ class AgentSupervisor:
             argv = self.runtime.build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
                 resume_session_id=resume_session_id, effort=effort)
-            proc = AgentProc(agent_id, argv, on_event=self._handle_event,
-                             on_session=self._persist_session)
+            proc = AgentProc(
+                agent_id, argv,
+                on_event=lambda aid, evt: self._handle_event(aid, evt, source=proc),
+                on_session=self._persist_session)
             self._set_state(agent_id, ST_SPAWNING)
             proc.start()
             with self._lock:
@@ -639,16 +652,23 @@ class AgentSupervisor:
                 resume_session_id="",
             )
 
-    def compact(self, agent_id: str) -> bool:
-        """Ask a live Claude Code session to run its built-in /compact flow."""
-        with self._lock:
-            proc = self._procs.get(agent_id)
-        if not proc or not proc.alive():
-            return False
-        ok = proc.send_user("/compact")
-        if ok:
+    def compact(self, agent_id: str, message: str = "") -> bool:
+        """Compact a live Claude session, optionally guiding its summary."""
+        with self._plock(agent_id):
+            with self._lock:
+                proc = self._procs.get(agent_id)
+                if proc and proc.alive():
+                    self._compacting.add(agent_id)
+            if not proc or not proc.alive():
+                return False
+            self._set_state(agent_id, ST_COMPACTING)
+            command = "/compact" + (" " + message.strip() if message.strip() else "")
+            if proc.send_user(command):
+                return True
+            with self._lock:
+                self._compacting.discard(agent_id)
             self._set_state(agent_id, ST_RUNNING)
-        return ok
+            return False
 
     def feed(self, agent_id: str, channel: str, text: str,
              attachments: Optional[List[str]] = None,
@@ -704,6 +724,10 @@ class AgentSupervisor:
         with self._lock:
             proc = self._procs.get(agent_id)
         return bool(proc and proc.alive())
+
+    def is_busy(self, agent_id: str) -> bool:
+        with self._lock:
+            return agent_id in self._compacting
 
     def live_ids(self) -> List[str]:
         with self._lock:

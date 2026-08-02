@@ -127,10 +127,11 @@ def main() -> int:
 
     # ── compact + clear context ──
     got_echo.clear()
-    check("compact: sends Claude Code's /compact command", s.compact("ag1"))
+    check("compact: sends Claude Code's /compact command", s.compact(
+        "ag1", message="Keep the current plan"))
     got_echo.wait(3.0)
-    check("compact: command reaches the live session",
-          any("/compact" in e for e in echoes))
+    check("compact: guidance reaches the live session",
+          any("/compact Keep the current plan" in e for e in echoes))
     before_clear = woke
     fresh = s.clear("ag1", system_prompt="fresh", mcp_config="{}")
     check("clear: launches a replacement process", fresh is not None and fresh is not before_clear)
