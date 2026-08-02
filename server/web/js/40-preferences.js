@@ -9,17 +9,17 @@
   // presets can lean into a moodier color cast.
   const themes = [
     { id: 'light-bone', mode: 'light', label: 'Bone' },
+    { id: 'light-frost', mode: 'light', label: 'Frost' },
     { id: 'light-cloud', mode: 'light', label: 'Cloud' },
+    { id: 'light-linen', mode: 'light', label: 'Linen' },
     { id: 'light-birch', mode: 'light', label: 'Birch' },
     { id: 'light-dune', mode: 'light', label: 'Dune' },
-    { id: 'light-linen', mode: 'light', label: 'Linen' },
-    { id: 'light-frost', mode: 'light', label: 'Frost' },
-    { id: 'dark-graphite', mode: 'dark', label: 'Graphite' },
-    { id: 'dark-midnight', mode: 'dark', label: 'Midnight' },
-    { id: 'dark-slate', mode: 'dark', label: 'Slate' },
     { id: 'dark-carbon', mode: 'dark', label: 'Carbon' },
     { id: 'dark-onyx', mode: 'dark', label: 'Onyx' },
+    { id: 'dark-graphite', mode: 'dark', label: 'Graphite' },
+    { id: 'dark-slate', mode: 'dark', label: 'Slate' },
     { id: 'dark-cobalt', mode: 'dark', label: 'Cobalt' },
+    { id: 'dark-midnight', mode: 'dark', label: 'Midnight' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
