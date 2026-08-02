@@ -185,9 +185,10 @@
   function showActivity(id, events = [], offset = 0) {
     let panel = $('trio-activity');
     if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-activity'; panel.className = 'activity-panel'; document.body.append(panel); }
+    Trio.ui.configureDialog(panel);
     const pageSize = 20;
     const page = events.slice(offset, offset + pageSize);
-    if (!offset) panel.innerHTML = '<form method="dialog"><button class="modal-close" aria-label="Close">×</button><h2>Agent activity</h2><div class="activity-list"></div></form>';
+    if (!offset) panel.innerHTML = '<form method="dialog"><button type="submit" formnovalidate class="modal-close" aria-label="Close">×</button><h2>Agent activity</h2><div class="activity-list"></div></form>';
     const list = panel.querySelector('.activity-list');
     if (!page.length && !offset) { list.innerHTML = '<p class="home-empty">No activity.</p>'; }
     else { list.insertAdjacentHTML('beforeend', page.map(renderActivityEvent).join('')); }

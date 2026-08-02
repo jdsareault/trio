@@ -240,7 +240,8 @@
   function showLightbox(url, alt) {
     let dialog = document.getElementById('trio-lightbox');
     if (!dialog) { dialog = document.createElement('dialog'); dialog.id = 'trio-lightbox'; dialog.className = 'lightbox'; document.body.append(dialog); }
-    dialog.innerHTML = `<form method="dialog"><button class="modal-close" aria-label="Close">×</button><img src="${M.escapeHtml(url)}" alt="${M.escapeHtml(alt || '')}" loading="lazy"></form>`;
+    Trio.ui.configureDialog(dialog);
+    dialog.innerHTML = `<form method="dialog"><button type="submit" formnovalidate class="modal-close" aria-label="Close">×</button><img src="${M.escapeHtml(url)}" alt="${M.escapeHtml(alt || '')}" loading="lazy"></form>`;
     dialog.showModal();
   }
   function cardFor(msg) {

@@ -352,7 +352,8 @@
       const [channels, dms] = await Promise.all([api.get('/api/channels?archived=1'), api.get('/api/dms?archived=1')]);
       const archivedChannels = channels.channels || []; const archivedDms = dms.your_dms || [];
       let panel = $('trio-archives'); if (!panel) { panel = document.createElement('dialog'); panel.id = 'trio-archives'; panel.className = 'archive-modal'; document.body.append(panel); }
-      panel.innerHTML = '<form method="dialog"><button class="modal-close" value="cancel">×</button><h2>Archives</h2><input class="archive-search" placeholder="Filter archived…" aria-label="Filter archived"><section><h3>Channels</h3><ul class="archive-channel-list"></ul></section><section><h3>Direct messages</h3><ul class="archive-dm-list"></ul></section></form>';
+      Trio.ui.configureDialog(panel);
+      panel.innerHTML = '<form method="dialog"><button type="submit" formnovalidate class="modal-close" value="cancel">×</button><h2>Archives</h2><input class="archive-search" placeholder="Filter archived…" aria-label="Filter archived"><section><h3>Channels</h3><ul class="archive-channel-list"></ul></section><section><h3>Direct messages</h3><ul class="archive-dm-list"></ul></section></form>';
       const cList = panel.querySelector('.archive-channel-list'); const dList = panel.querySelector('.archive-dm-list');
       buildArchiveList(cList, archivedChannels, 'channel'); buildArchiveList(dList, archivedDms, 'dm');
       const input = panel.querySelector('.archive-search');
@@ -461,7 +462,8 @@
   }
   function openSearch() {
     if (!searchDialog) { searchDialog = document.createElement('dialog'); searchDialog.id = 'trio-search'; searchDialog.className = 'search-modal'; document.body.append(searchDialog); }
-    searchDialog.innerHTML = '<form method="dialog"><button class="modal-close" value="cancel">×</button><input class="search-input" placeholder="Search messages…" aria-label="Search"><div class="search-results"></div></form>';
+    Trio.ui.configureDialog(searchDialog);
+    searchDialog.innerHTML = '<form method="dialog"><button type="submit" formnovalidate class="modal-close" value="cancel">×</button><input class="search-input" placeholder="Search messages…" aria-label="Search"><div class="search-results"></div></form>';
     searchDialog.showModal();
     const input = searchDialog.querySelector('.search-input');
     input.focus();
