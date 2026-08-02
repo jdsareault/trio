@@ -1982,13 +1982,13 @@ def clear_agent(agent_id: str, supervisor, db_path: Path):
 
 
 def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
-    """Resume agents that were live/sleeping when the prior hub exited."""
+    """Recover agents interrupted while active; leave hibernated agents asleep."""
     db = sqlite3.connect(str(db_path), timeout=5)
     db.row_factory = sqlite3.Row
     try:
         ids = [r["id"] for r in db.execute(
-            "SELECT id FROM agents WHERE managed=1 AND state IN (?,?,?,?)",
-            (nsup.ST_SPAWNING, nsup.ST_RUNNING, nsup.ST_IDLE, nsup.ST_SLEEPING)
+            "SELECT id FROM agents WHERE managed=1 AND state IN (?,?,?)",
+            (nsup.ST_SPAWNING, nsup.ST_RUNNING, nsup.ST_IDLE)
         ).fetchall()]
     finally:
         db.close()
@@ -4733,7 +4733,7 @@ def main() -> int:
                     default=float(os.environ.get("NTH_AGENT_IDLE_MINUTES", "10")),
                     help="Hibernate managed agents after this many idle minutes (0 disables; default 10).")
     ap.add_argument("--no-agent-resume", action="store_true",
-                    help="Do not resume agents that were running/sleeping before hub restart.")
+                    help="Do not recover agents that were active when the hub stopped unexpectedly.")
     args = ap.parse_args()
 
     db_path = Path(args.db).expanduser()

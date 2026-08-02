@@ -29,7 +29,7 @@ Managed delivery is event-driven and token-efficient. One plain-Python router wa
 - `about` — everything in `at`, plus `#references`
 - `all` — every new message in a placed channel
 
-There is no model timer or token-consuming poll turn. Hibernated agents resume on matching events; deliberately stopped agents stay stopped.
+There is no model timer or token-consuming poll turn. Hibernated agents stay unloaded across hub restarts and resume only on a matching event or an explicit Wake action; deliberately stopped agents stay stopped.
 
 Channels and direct messages can be archived without deleting their history.
 Archived conversations disappear from the everyday workspace rail and DM inbox;

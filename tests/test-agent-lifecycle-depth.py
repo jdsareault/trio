@@ -55,8 +55,16 @@ check("graceful hub shutdown preserves a resumable sleeping row",
 
 second = sup.AgentSupervisor(db_path=srv.DB_PATH)
 resumed = web.resume_managed_agents(srv.DB_PATH, second)
-check("daemon restart resumes previously-live managed agent",
-      resumed == [aid] and second.is_running(aid))
+db = sqlite3.connect(str(srv.DB_PATH))
+sleep_state = db.execute("SELECT state FROM agents WHERE id=?", (aid,)).fetchone()[0]
+db.close()
+check("daemon restart leaves hibernated agents unloaded",
+      resumed == [] and not second.is_running(aid)
+      and sleep_state == "sleeping")
+
+web.wake_agent(aid, second, srv.DB_PATH)
+check("explicit wake resumes a hibernated agent",
+      second.is_running(aid))
 
 old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
 db = sqlite3.connect(str(srv.DB_PATH))
