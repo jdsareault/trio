@@ -602,6 +602,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .hcard:hover{ transform:translateY(-3px); box-shadow:var(--shadow-md); border-color:var(--line); }
 .hcard.static{ cursor:default; } .hcard.static:hover{ transform:none; box-shadow:var(--shadow-sm); border-color:var(--line-soft); }
 .hcard .hc-top{ display:flex; align-items:center; gap:11px; }
+.hcard .hc-top > span:last-child{ display:grid; gap:3px; min-width:0; }
 .hcard .hc-ic{ width:38px; height:38px; border-radius:12px; display:grid; place-items:center; flex:none; background:var(--accent-tint); color:var(--accent-strong); }
 .hcard .hc-ic svg{ width:20px; height:20px; }
 .hcard .hc-ic.warn{ background:var(--warn-tint); color:color-mix(in oklab,var(--warn) 72%,var(--ink)); }
