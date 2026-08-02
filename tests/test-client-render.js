@@ -50,6 +50,17 @@ check('operator messages omit the agent role badge', () => {
   const agentCard = H.cardFor({ id: 15, member_id: 'agent-1', member_name: 'Atlas', content: 'from Atlas' });
   assert.strictEqual(agentCard.querySelector('.message-role').textContent, 'agent');
 });
+check('repeating the message long press hides its action menu', () => {
+  H.Trio.state.operator = { id: 'operator' };
+  const card = H.cardFor({ id: 16, member_id: 'operator', member_name: 'me', content: 'toggle me' });
+  const contextmenu = card._listeners.contextmenu[0];
+  const event = { target: card, preventDefault() {} };
+  contextmenu(event);
+  const menu = card.querySelector('.message-actions-menu');
+  assert.ok(menu && !menu.classList.contains('hidden'));
+  contextmenu(event);
+  assert.ok(menu.classList.contains('hidden'));
+});
 check('id sigils render with the current display name', () => {
   H.state.members.set('a1', { id: 'a1', name: 'alice' });
   assert.strictEqual(H.humanizeIdSigils('@a1'), '@alice');

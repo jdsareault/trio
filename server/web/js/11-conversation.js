@@ -250,8 +250,13 @@
   }
   function showMessageActions(card, content, msg, body) {
     if (!isOwn(msg) || msg.retracted_at || state.readOnly) return;
+    const existing = content.querySelector('.message-actions-menu');
+    if (existing && state.activeMessageActions === existing && !existing.classList.contains('hidden')) {
+      closeMessageActions();
+      return;
+    }
     closeMessageActions();
-    let menu = content.querySelector('.message-actions-menu');
+    let menu = existing;
     if (!menu) {
       menu = document.createElement('div'); menu.className = 'message-actions-menu hidden';
       for (const [label, fn] of [['Edit', () => edit(msg, body)], ['Delete', () => retract(msg)]]) {
