@@ -47,6 +47,25 @@
   }
   function read() { return Trio.store ? Trio.store.get('preferences') : (Trio.state.preferences || readFromStorage()); }
   function requestNotifications() { if (typeof Notification !== 'undefined' && Notification.permission === 'default') { Notification.requestPermission().then(p => { if (p !== 'granted') save({ notifications: false }); }); } }
+  // Moon = "click to go dark" (currently light); Sun = "click to go light"
+  // (currently dark). The icon always previews the theme you'll switch TO.
+  const MOON_PATH = 'M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z';
+  const SUN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
+  function syncToggleIcon(themeId) {
+    const btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+    const selected = themes.find(t => t.id === themeId);
+    const isDark = selected ? selected.mode === 'dark' : String(themeId || '').startsWith('dark-');
+    if (isDark) {
+      btn.innerHTML = SUN_SVG;
+      btn.setAttribute('aria-label', 'Switch to light theme');
+      btn.title = 'Switch to light theme';
+    } else {
+      btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${MOON_PATH}"/></svg>`;
+      btn.setAttribute('aria-label', 'Switch to dark theme');
+      btn.title = 'Switch to dark theme';
+    }
+  }
   function apply(next = readFromStorage()) {
     const root = document.documentElement;
     root.dataset.theme = next.theme;
@@ -56,6 +75,7 @@
     if (next.notifications) requestNotifications();
     if (Trio.store) Trio.store.set('preferences', next);
     else Trio.state.preferences = next;
+    syncToggleIcon(next.theme);
     return next;
   }
   function save(change) {
