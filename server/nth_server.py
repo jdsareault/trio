@@ -1414,6 +1414,14 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
                     "AND active=1 ORDER BY joined_at", (channel,)).fetchall()]
             if recipient_ids:
                 recipients_json = json.dumps(list(dict.fromkeys(recipient_ids)))
+            else:
+                # Fail closed: no prior private sender and no human member to
+                # address. Storing [] would broadcast the message to every
+                # managed agent in the shared hidden inbox. Reject instead.
+                return json.dumps({
+                    "error": "trio_send in the agent inbox has no recipient: "
+                             "no prior private sender and no human member was "
+                             "found. Use trio_dm with an explicit recipient."})
 
         now = now_iso()
         task_id = None
