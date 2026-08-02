@@ -28,7 +28,8 @@
   };
   function host() { let n = $('trio-agents'); if (!n) { n = document.createElement('aside'); n.id = 'trio-agents'; n.className = 'agent-drawer'; n.hidden = true; document.body.append(n); } return n; }
   function viewModel(agent = {}) {
-    const lifecycle = agent.live ? (agent.busy ? 'working' : 'idle') : (agent.state || 'offline');
+    const lifecycle = agent.state === 'compacting' ? 'compacting' :
+      (agent.live ? (agent.busy ? 'working' : 'idle') : (agent.state || 'offline'));
     return {
       id: agent.id,
       name: agent.name || agent.id,
@@ -46,15 +47,18 @@
       wakePolicy: agent.wake_mode || agent.filter_mode || 'all',
       cwd: agent.cwd || '',
       permissions: agent.permission_profile || agent.permissions || '',
+      compacting: lifecycle === 'compacting',
       needsAttention: lifecycle === 'blocked' || lifecycle === 'errored' || lifecycle === 'error' || !!agent.error,
     };
   }
   function actionCaps(vm) {
     const caps = [];
+    if (vm.lifecycle === 'compacting') return ['stop', 'delete'];
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('stop');
     if (!vm.live && (vm.lifecycle === 'idle' || vm.lifecycle === 'sleeping' || vm.lifecycle === 'stopped' || vm.lifecycle === 'offline' || vm.lifecycle === 'stale')) caps.push('wake');
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('interrupt');
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active' || vm.lifecycle === 'idle') caps.push('hibernate');
+    if (vm.lifecycle === 'idle') caps.push('compact');
     if (!['errored','blocked'].includes(vm.lifecycle)) caps.push('clear');
     caps.push('delete');
     return caps;
@@ -64,6 +68,7 @@
       stop: 'Stop',
       interrupt: 'Interrupt',
       hibernate: 'Hibernate',
+      compact: 'Compact context',
       wake: 'Wake',
       clear: 'Clear context',
       delete: 'Delete agent',
@@ -99,7 +104,19 @@
     finally { pendingAgentActions.delete(key); }
   }
   function agentCard(vm) {
-    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '');
+    const article = document.createElement('article'); article.className = 'agent-card agent-card-openable' + (vm.needsAttention ? ' needs-attention' : '');
+    article.tabIndex = 0;
+    article.setAttribute('aria-label', 'Manage agent ' + vm.name);
+    const openDetails = event => {
+      if (event?.target?.closest?.('button')) return;
+      showDetail(vm);
+    };
+    article.addEventListener('click', openDetails);
+    article.addEventListener('keydown', event => {
+      if ((event.key === 'Enter' || event.key === ' ') && !event.target?.closest?.('button')) {
+        event.preventDefault(); showDetail(vm);
+      }
+    });
     article.innerHTML = `<b>${esc(vm.name)} ${esc(statusIcon(vm))}</b><small>${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''} · ${esc(vm.lifecycle)}</small><p>${esc((vm.placements || []).join(', ') || 'No public rooms')}</p>`;
     const row = document.createElement('div'); row.className = 'agent-actions';
     const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); row.append(detail);
@@ -126,9 +143,8 @@
     const initials = (vm.name || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     const tone = vm.needsAttention ? 'var(--danger)' : vm.busy ? 'var(--warn)' : vm.live ? 'var(--ok)' : 'var(--accent)';
     article.style.setProperty('--card-accent', tone);
-    article.innerHTML = `<div class="ac-top"><span class="directory-avatar">${esc(initials)}</span><span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
+    article.innerHTML = `<div class="ac-top"><span class="directory-avatar">${esc(initials)}</span><span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.compacting || vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.compacting ? 'Compacting context…' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
     const actions = document.createElement('div'); actions.className = 'agent-actions';
-    const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Manage'; detail.addEventListener('click', () => showDetail(vm)); actions.append(detail);
     const message = document.createElement('button'); message.type = 'button'; message.textContent = 'Message'; message.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); actions.append(message);
     article.append(actions); return article;
   }
@@ -241,7 +257,19 @@
     })();
     return discoveryPromise;
   }
-  async function refresh() { try { const data = await Trio.api.get('/api/agents'); state.agents = data.agents || []; Trio.store.set('agents.list', data.agents || []); Trio.store.set('agents.loading', false); render(data.agents); } catch (e) { console.warn(e); } }
+  async function refresh() {
+    try {
+      const data = await Trio.api.get('/api/agents');
+      state.agents = data.agents || [];
+      Trio.store.set('agents.list', data.agents || []);
+      Trio.store.set('agents.loading', false);
+      render(data.agents);
+      if (state.view === 'roster') {
+        const roster = document.getElementById('trio-roster-view');
+        if (roster && !roster.hidden) renderPage(roster);
+      }
+    } catch (e) { console.warn(e); }
+  }
   function renderActivityEvent(e) {
     const time = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '';
     const t = (e.type || 'event').toLowerCase();
