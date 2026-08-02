@@ -639,6 +639,9 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .att-card.k-approval{ border-left-color:var(--warn); }
 .att-card.k-error{ border-left-color:var(--danger); }
 .att-card.k-question{ border-left-color:var(--accent); }
+.att-card.k-mention{ border-left-color:var(--accent); }
+.att-card.k-mention.unread{ background:color-mix(in oklab,var(--accent-tint) 40%,var(--surface)); }
+.att-card.k-mention.unread .reason{ font-weight:600; }
 .att-card.k-usage{ border-left-color:var(--info); }
 .att-card.k-lock{ border-left-color:var(--sleep); }
 .att-card .ac-h{ display:flex; align-items:center; gap:11px; margin-bottom:10px; }

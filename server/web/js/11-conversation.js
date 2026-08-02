@@ -67,7 +67,29 @@
   }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
   function convId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
-  function markRead() { const list = ordered(); const last = list[list.length - 1]; if (last && Number(last.id) > Number(state.lastSeenId)) state.lastSeenId = last.id; }
+  function markRead() { const list = ordered(); const last = list[list.length - 1]; if (last && Number(last.id) > Number(state.lastSeenId)) state.lastSeenId = last.id; flushRead(); }
+  let flushRefreshTimer = null;
+  function flushRead() {
+    if (state.readOnly) return;
+    const op = state.operator?.id;
+    if (!op) return;
+    state.readFlushByConv = state.readFlushByConv || {};
+    const key = convId();
+    const lastFlushed = Number(state.readFlushByConv[key]) || 0;
+    const ids = [];
+    for (const msg of ordered()) {
+      if (Number(msg.id) <= lastFlushed) continue;
+      if (msg.member_id !== op) ids.push(msg.id);
+    }
+    if (!ids.length) return;
+    state.readFlushByConv[key] = Math.max(...ids);
+    Trio.api.post('/api/messages/mark-read', { ids }).then(() => {
+      if (Trio.workspace?.refresh) {
+        clearTimeout(flushRefreshTimer);
+        flushRefreshTimer = setTimeout(() => Trio.workspace.refresh(), 1500);
+      }
+    }).catch(err => console.warn('flush read failed', err));
+  }
 
   function decorateSigils(root, vm) {
     const ids = new Set([...(vm.mentions || []), ...(vm.refs || []), ...(vm.bangs || [])]);

@@ -27,7 +27,7 @@
     blockedAgents(src = state) { return listOf(src.agents).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
     activeAgents(src = state) { return listOf(src.agents).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
-    unreadMentions(src = state) { return listOf(src.mentions).length; },
+    unreadMentions(src = state) { return listOf(src.mentions).filter(m => !m.read).length; },
     pendingQuestions(src = state) { return listOf(src.questions).length; },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     taskItems(src = state) {
@@ -172,6 +172,7 @@
       home: '<path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9"/>',
       attention: '<path d="M4 13h4l2 3h4l2-3h4"/><path d="M5 13 7 5h10l2 8v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1Z"/>',
       tasks: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="m4 6 1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>',
+      messages: '<path d="M22 7L12 13 2 7"/><path d="M2 7v10h20V7z"/>',
       plus: '<path d="M12 5v14M5 12h14"/>',
       roster: '<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M16 6a3 3 0 0 1 0 6M21 20a5 5 0 0 0-4-4.9"/>',
       settings: '<circle cx="12" cy="12" r="3"/><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/>'
@@ -207,7 +208,7 @@
     pile.classList.toggle('hidden', !members.length);
   }
   function navigateView(view) {
-    const route = { home: 'home', attention: 'attention', tasks: 'tasks', roster: 'roster', prefs: 'prefs' }[view] || 'home';
+    const route = { home: 'home', attention: 'attention', messages: 'messages', tasks: 'tasks', roster: 'roster', prefs: 'prefs' }[view] || 'home';
     if (Trio.router?.navigate) Trio.router.navigate(route);
     else showView(view);
   }
@@ -242,6 +243,7 @@
     const workspaceItems = [
       navItem('Home', 'home', () => navigateView('home'), '', state.view === 'home'),
       navItem('Attention', 'attention', () => navigateView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
+      navItem('Messages', 'messages', () => navigateView('messages'), String(selectors.unreadDms() + selectors.unreadMentions() || ''), state.view === 'messages'),
       itemWithAdd(navItem('Agent roster', 'roster', () => navigateView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
       navItem('Tasks', 'tasks', () => navigateView('tasks'), '', state.view === 'tasks'),
       navItem('Preferences', 'settings', () => navigateView('prefs'), '', state.view === 'prefs'),
@@ -271,6 +273,12 @@
     header.innerHTML = `<h2>${esc(title)}</h2><p>${esc(subtitle)}</p>`;
     return header;
   }
+  async function markMessagesRead(ids, read = true) {
+    if (!ids || !ids.length) return;
+    try {
+      await api.post('/api/messages/mark-read', { ids, read });
+    } catch (error) { console.warn('mark read failed', error); }
+  }
   function statusLabel(agent) {
     const status = String(agent.status || agent.state || (agent.busy ? 'working' : agent.live ? 'active' : 'offline')).toLowerCase();
     return status === 'working' || status === 'active' ? status : status === 'error' || status === 'errored' ? 'errored' : status;
@@ -285,7 +293,7 @@
     const grid = document.createElement('div'); grid.className = 'home-grid';
     const cards = [
       { title: 'Attention inbox', count: selectors.attention(), subtitle: 'Need a decision', tone: 'warn', detail: `${selectors.pendingApprovals()} approvals · ${selectors.pendingQuestions()} questions`, action: () => navigateView('attention') },
-      { title: 'Messages for you', count: selectors.unreadDms() + selectors.unreadMentions(), subtitle: 'Unread & mentions', tone: 'accent', detail: `${selectors.unreadDms()} DMs · ${selectors.unreadMentions()} mentions`, action: () => { const d = (state.dms?.your_dms || []).find(x => x.unread); if (d) openDm(d); } },
+      { title: 'Messages for you', count: selectors.unreadDms() + selectors.unreadMentions(), subtitle: 'Unread & mentions', tone: 'accent', detail: `${selectors.unreadDms()} DMs · ${selectors.unreadMentions()} mentions`, action: () => navigateView('messages') },
       { title: 'Tasks in flight', count: selectors.openTasks(), subtitle: 'Across every channel', tone: 'ok', detail: `${listOf(state.tasks).filter(t => t.status === 'claimed').length} claimed · ${listOf(state.tasks).filter(t => t.status === 'blocked').length} blocked`, action: () => navigateView('tasks') },
     ];
     for (const { title, count, subtitle, tone, detail, action } of cards) {
@@ -369,6 +377,78 @@
     const count = document.createElement('p'); count.className = 'task-count'; count.textContent = `open ${counts.open} · claimed ${counts.claimed} · blocked ${counts.blocked} · done ${counts.done}`;
     panel.append(count);
   }
+  function renderMessages(panel) {
+    panel.replaceChildren(); panel.append(viewHeader('Messages', 'Mentions and direct messages, with read/unread state'));
+    const tabs = document.createElement('div'); tabs.className = 'att-tabs';
+    const tabKeys = [['all','All'],['mentions','Mentions'],['dms','DMs']];
+    const filter = tabKeys.map(t => t[0]).includes(state.messagesTab) ? state.messagesTab : 'all';
+    for (const [key, label] of tabKeys) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+      const count = key === 'all' ? selectors.unreadDms() + selectors.unreadMentions() : key === 'mentions' ? selectors.unreadMentions() : selectors.unreadDms();
+      if (count) { const badge = document.createElement('span'); badge.className = 'mini-badge'; badge.textContent = String(count); b.append(badge); }
+      b.className = filter === key ? 'on' : '';
+      b.addEventListener('click', () => { state.messagesTab = key; showView('messages'); });
+      tabs.append(b);
+    }
+    const tabsWrap = document.createElement('div'); tabsWrap.className = 'att-tabs-wrap'; tabsWrap.append(tabs); panel.append(tabsWrap);
+    const list = document.createElement('section'); list.className = 'attention-list';
+
+    function mentionCard(m) {
+      const article = document.createElement('article'); article.className = 'att-card k-mention' + (m.read ? '' : ' unread');
+      const source = m.member_name || m.member_id || 'Unknown';
+      const head = `<div class="ac-h"><span class="avatar-fallback">${esc(source.slice(0,2).toUpperCase())}</span><span><span class="who">${esc(source)}</span><span class="sub">#${esc(m.channel)} · ${esc(timeAgo(m.created_at) || 'now')}</span></span>${m.read ? '' : '<span class="waiting"><span class="p"></span>unread</span>'}</div>`;
+      const body = `<div class="reason">${esc(m.content || '')}</div>`;
+      const actions = document.createElement('div'); actions.className = 'att-actions';
+      if (!m.read) {
+        const readBtn = document.createElement('button'); readBtn.type = 'button'; readBtn.className = 'abtn ok'; readBtn.textContent = 'Mark read';
+        readBtn.addEventListener('click', (e) => { e.stopPropagation(); markMessagesRead([m.id]).then(() => { m.read = true; if (state.messagesTab === 'all' || state.messagesTab === 'mentions') renderMessages(panel); else showView('messages'); }); });
+        actions.append(readBtn);
+      }
+      article.innerHTML = head + body;
+      article.append(actions);
+      article.addEventListener('click', () => { markMessagesRead([m.id]).then(() => { m.read = true; openChannel(m.channel); setTimeout(() => { const card = document.querySelector(`[data-message-id="${m.id}"]`); if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.focus(); } }, 300); }); });
+      return article;
+    }
+
+    function dmCard(dm) {
+      const article = document.createElement('article'); article.className = 'att-card k-mention' + (dm.unread ? ' unread' : '');
+      const label = dm.name || dm.key || 'Conversation';
+      const head = `<div class="ac-h"><span class="avatar-fallback">${esc((label).slice(0,2).toUpperCase())}</span><span><span class="who">${esc(label)}</span><span class="sub">Direct message · ${esc(timeAgo(dm.last_at) || 'now')}</span></span>${dm.unread ? `<span class="waiting"><span class="p"></span>${Number(dm.unread) || ''} unread</span>` : ''}</div>`;
+      const body = `<div class="reason">${esc(dm.from || 'Someone')}: ${esc(dm.preview || '')}</div>`;
+      article.innerHTML = head + body;
+      article.addEventListener('click', () => { openDm(dm); });
+      return article;
+    }
+
+    const showMentions = filter === 'all' || filter === 'mentions';
+    const showDms = filter === 'all' || filter === 'dms';
+    let items = [];
+    if (showMentions) { for (const m of listOf(state.mentions)) items.push({ ...m, kind: 'mention' }); }
+    if (showDms) { for (const d of (state.dms?.your_dms || [])) if (!d.archived) items.push({ ...d, kind: 'dm' }); }
+    items.sort((a, b) => new Date(b.created_at || b.last_at || 0) - new Date(a.created_at || a.last_at || 0));
+
+    if (!items.length) {
+      const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No messages.';
+      list.append(p);
+    } else {
+      for (const item of items) {
+        list.append(item.kind === 'mention' ? mentionCard(item) : dmCard(item));
+      }
+    }
+    if (filter === 'mentions' && listOf(state.mentions).some(m => !m.read)) {
+      const footer = document.createElement('div'); footer.className = 'att-actions';
+      const allBtn = document.createElement('button'); allBtn.type = 'button'; allBtn.className = 'abtn ok'; allBtn.textContent = 'Mark all mentions read';
+      allBtn.addEventListener('click', async () => {
+        const ids = listOf(state.mentions).filter(m => !m.read).map(m => m.id);
+        await markMessagesRead(ids);
+        listOf(state.mentions).forEach(m => m.read = true);
+        renderMessages(panel);
+        renderRail();
+      });
+      footer.append(allBtn); panel.append(footer);
+    }
+    panel.append(list);
+  }
   function showView(view) {
     state.view = view;
     state.channel = '';
@@ -397,6 +477,7 @@
     if (view === 'home') { renderHome(panel); }
     else if (view === 'tasks') { renderTasks(panel); }
     else if (view === 'attention') { renderAttention(panel); }
+    else if (view === 'messages') { renderMessages(panel); }
     else if (view === 'roster') { Trio.agents?.renderPage?.(panel); }
     else if (view === 'prefs') { Trio.preferences?.renderPage?.(panel); }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
@@ -528,7 +609,7 @@
   let drawerResizeStart = null, drawerResizeMove = null, drawerResizeEnd = null;
   let unroute = null;
   let wsl = null;
-  function onWorkspaceUpdate() { if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
+  function onWorkspaceUpdate() { if (['home','attention','messages','tasks'].includes(state.view)) showView(state.view); }
   function onRoute(route) {
     if (!route) return;
     if (route.name === 'channel') {
@@ -539,6 +620,7 @@
     else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
     else if (route.name === 'home') showView('home');
     else if (route.name === 'attention') showView('attention');
+    else if (route.name === 'messages') showView('messages');
     else if (route.name === 'tasks') showView('tasks');
     else if (route.name === 'roster') showView('roster');
     else if (route.name === 'prefs') showView('prefs');
@@ -564,7 +646,7 @@
     state.workspaceLoading = false;
     renderRail();
     Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
-    if (['home','attention','tasks'].includes(state.view)) showView(state.view);
+    if (['home','attention','messages','tasks'].includes(state.view)) showView(state.view);
   }
   let searchDialog = null, searchController = null, searchTimer = null, searchKeydown = null, detailsClick = null;
   function onSearchKey(event) { if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); openSearch(); } }

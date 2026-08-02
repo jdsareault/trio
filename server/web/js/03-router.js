@@ -8,6 +8,7 @@
     '/': 'home',
     '/inbox': 'attention',
     '/attention': 'attention',
+    '/messages': 'messages',
     '/tasks': 'tasks',
     '/agents': 'roster',
     '/roster': 'roster',
@@ -17,6 +18,7 @@
   const pagePaths = {
     home: '/',
     attention: '/inbox',
+    messages: '/messages',
     tasks: '/tasks',
     roster: '/agents',
     prefs: '/settings',
