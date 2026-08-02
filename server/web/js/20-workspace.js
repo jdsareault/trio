@@ -561,7 +561,7 @@
   function closeDetails() {
     const drawer = $('channel-drawer');
     if (!drawer) return;
-    drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true'); $('details-btn')?.classList.remove('menu-active');
+    drawer.classList.remove('open'); $('app')?.classList.remove('channel-details-open'); drawer.setAttribute('aria-hidden', 'true'); $('details-btn')?.classList.remove('menu-active');
   }
   function showDetails() {
     const drawer = $('channel-drawer'); const body = $('channel-drawer-body');
@@ -577,7 +577,7 @@
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
     body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v">${state.messages?.size || 0}</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="end-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : 'End channel'}</button>` : ''}</div></section>`;
-    drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
+    $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
     $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); showView('tasks'); });
     $('edit-channel-objective')?.addEventListener('click', () => toast('Objective editing is coming soon'));
