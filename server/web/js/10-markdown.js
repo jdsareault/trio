@@ -278,8 +278,9 @@
   // "[word]" event, rendering them as markdown instead of muted system lines.)
   const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
     'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
-    'pinned', 'renamed', 'culled', 'objective', 'channel', 'superseded']);
+    'pinned', 'renamed', 'culled', 'objective', 'superseded']);
   function isSystemContent(s) {
+    if (/^\[channel created\](?:\s|$)/.test(s || '')) return true;
     // "[word " (the #id family) OR "[word]" followed by a space/end. Requiring
     // space-or-end after the "]" avoids muting a markdown link like [done](url).
     const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');

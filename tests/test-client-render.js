@@ -16,6 +16,7 @@ check('markdown escapes HTML and renders emphasis', () => {
 check('system events are plain and links are not system events', () => {
   assert.strictEqual(H.isSystemContent('[joined] alice'), true);
   assert.strictEqual(H.isSystemContent('[channel created] Testing'), true);
+  assert.strictEqual(H.isSystemContent('[channel update] Testing'), false);
   assert.strictEqual(H.isSystemContent('[done](https://example.test)'), false);
 });
 check('system events collapse to concise human-readable copy', () => {
