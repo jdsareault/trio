@@ -28,17 +28,8 @@
     root.state.operator = meta.operator || null;
     root.state.channel = root.state.channel || meta.default_channel || meta.channel || '';
     if (root.store) { root.store.set('session.operator', root.state.operator); root.store.set('session.channel', root.state.channel); }
-    if (!root.state.channel && meta.multi) {
-      const channels = await root.api.get('/api/channels', false);
-      if (channels.channels?.[0]?.code) {
-        // Always a full reload here, even when the router module is loaded:
-        // router.replace only rewrites history without reloading, and boot()
-        // returning false then aborts 90-boot.js's feature-mounting pass,
-        // leaving the page on an unmounted shell.
-        location.replace('/?channel=' + encodeURIComponent(channels.channels[0].code));
-        return false;
-      }
-    }
+    // No channel selected on load; stay on the workspace home view instead of
+    // forcing the first channel open.
     document.getElementById('h-channel').textContent = root.state.channel ? `#${root.state.channel}` : 'Atrium';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
     mountFeatures?.();

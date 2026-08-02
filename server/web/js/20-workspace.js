@@ -81,6 +81,14 @@
     document.getElementById('h-channel').textContent = title;
     document.getElementById('h-meta').textContent = subtitle;
     renderFacePile();
+    const detailsBtn = $('details-btn');
+    const moreBtn = $('channel-more-btn');
+    const searchBtn = $('search-btn');
+    const conn = $('h-conn');
+    if (detailsBtn) detailsBtn.classList.remove('hidden');
+    if (moreBtn) moreBtn.classList.remove('hidden');
+    if (searchBtn) searchBtn.classList.remove('hidden');
+    if (conn) conn.classList.remove('hidden');
     const banner = document.getElementById('private-banner');
     if (banner) { banner.classList.toggle('hidden', !isDm); banner.classList.toggle('audit', !!isAudit); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
@@ -175,6 +183,8 @@
   function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
   function renderFacePile() {
     const pile = $('face-pile'); if (!pile) return;
+    if (!state.channel) { pile.classList.add('hidden'); return; }
+    pile.classList.remove('hidden');
     pile.replaceChildren();
     const members = [...(state.members?.values?.() || [])];
     const operator = state.operator || state.meta?.operator;
@@ -194,7 +204,7 @@
       more.setAttribute('aria-label', `${members.length - visible.length} more channel members`);
       pile.append(more);
     }
-    pile.hidden = !members.length;
+    pile.classList.toggle('hidden', !members.length);
   }
   function navItem(label, icon, onClick, badge = '', active = false) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'nav-item'; button.classList.toggle('active', active);
@@ -225,7 +235,7 @@
     const nav = groupNavigation(state.channels || [], state.dms || {});
     rail.textContent = '';
     const workspaceItems = [
-      navItem('Home', 'home', () => showView('home'), '', state.view === 'home'),
+      navItem('Home', 'home', () => { if (Trio.router?.navigate) Trio.router.navigate('home'); else showView('home'); }, '', state.view === 'home'),
       navItem('Attention', 'attention', () => showView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
       itemWithAdd(navItem('Agent roster', 'roster', () => showView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
       navItem('Tasks', 'tasks', () => showView('tasks'), '', state.view === 'tasks'),
@@ -356,6 +366,22 @@
   }
   function showView(view) {
     state.view = view;
+    state.channel = '';
+    state.dmKey = '';
+    state.dmName = '';
+    state.readOnly = false;
+    state.members = new Map();
+    Trio.stopEvents?.();
+    closeDetails();
+    $('app')?.classList.remove('channel-details-open');
+    const detailsBtn = $('details-btn');
+    const moreBtn = $('channel-more-btn');
+    const searchBtn = $('search-btn');
+    const conn = $('h-conn');
+    if (detailsBtn) detailsBtn.classList.add('hidden');
+    if (moreBtn) moreBtn.classList.add('hidden');
+    if (searchBtn) searchBtn.classList.add('hidden');
+    if (conn) conn.classList.add('hidden');
     const shell = document.querySelector('.conversation-shell');
     shell?.classList.add('workspace-page');
     updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
@@ -369,6 +395,7 @@
     else if (view === 'roster') { Trio.agents?.renderPage?.(panel); }
     else if (view === 'prefs') { Trio.preferences?.renderPage?.(panel); }
     else panel.innerHTML = `<h2>Home</h2><p>${(state.channels || []).length} active channels · ${(state.dms?.your_dms || []).length} direct conversations</p>`;
+    renderFacePile();
     renderRail();
   }
   async function createChannel() {
