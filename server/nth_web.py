@@ -816,7 +816,12 @@ class EventHub:
         only broadcasts, its own messages, and DMs addressed to it — real DMs
         are withheld from a guest's live feed, not just hidden client-side.
         Defaults keep the operator (and existing callers/tests) all-seeing."""
-        q: queue.Queue = queue.Queue(maxsize=200)
+        # Size for the prime burst: one roster payload plus up to HISTORY_LIMIT
+        # message payloads, plus headroom for live events that interleave
+        # during priming (the sub is registered before the snapshot, so a
+        # concurrent broadcast also enqueues here). A 200-entry queue dropped
+        # the 201st prime payload — the newest message — at full history.
+        q: queue.Queue = queue.Queue(maxsize=HISTORY_LIMIT + 1 + 16)
         sub = (q, viewer_id, all_seeing)
         # Register the subscriber BEFORE building the prime snapshot. A
         # message committed between the snapshot query and registration used
