@@ -2345,6 +2345,45 @@ class NthWebHandler(BaseHTTPRequestHandler):
             pass
         return OPERATOR_REGISTRY.new_token(), True
 
+    def _check_same_origin(self) -> bool:
+        """Reject cross-origin mutations (CSRF defense).
+
+        A malicious webpage can otherwise mint a loopback operator identity
+        via a simple text/plain POST that avoids CORS preflight: the browser
+        connects from loopback, _resolve_identity trusts the OS user, and the
+        request is honored even without the existing cookie. fetch()/XHR
+        always send Origin on POST; we compare its host:port against the
+        request's Host header (which reflects the address the client used to
+        reach us). Absent Origin AND Referer means a non-browser caller
+        (curl, MCP) — allow, since the loopback-mint attack requires a
+        credentialed browser context. Writes a 403 and returns False on
+        denial."""
+        origin = self.headers.get("Origin")
+        referer = self.headers.get("Referer")
+        if not origin and not referer:
+            return True
+        parsed = urlparse(origin or referer)
+        cand_host = (parsed.hostname or "").lower()
+        if not cand_host:
+            self._error(403, "cross-origin request not allowed")
+            return False
+        cand_port = parsed.port
+        if cand_port is None:
+            cand_port = 443 if (parsed.scheme or "http").lower() == "https" else 80
+        host_header = (self.headers.get("Host") or "").lower()
+        if ":" in host_header:
+            req_host, _, req_port_str = host_header.rpartition(":")
+            try:
+                req_port = int(req_port_str)
+            except ValueError:
+                req_host, req_port = host_header, self.server.server_address[1]
+        else:
+            req_host, req_port = host_header, self.server.server_address[1]
+        if cand_host == req_host and cand_port == req_port:
+            return True
+        self._error(403, "cross-origin request not allowed")
+        return False
+
     def _resolve_identity(self) -> Tuple[str, OperatorIdentity, bool]:
         """Resolve (token, identity, is_new_cookie). Trust ladder:
         Tailscale whois → loopback-OS-user → pending (browser must POST
@@ -2480,6 +2519,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._resolved_channel = None
+        # CSRF defense: a cross-origin webpage can otherwise mint a loopback
+        # operator identity via a simple text/plain POST. See _check_same_origin.
+        if not self._check_same_origin():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/channels":
             self._handle_channel_create()
@@ -2671,6 +2714,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return None
         if length <= 0 or length > max_bytes:
             self._error(400, "missing or oversized body")
+            return None
+        # Restrict JSON endpoints to an application/json content type. A
+        # cross-origin simple request with text/plain avoids CORS preflight;
+        # requiring application/json forces a preflight the server does not
+        # grant, blocking the request. Defense-in-depth alongside the Origin
+        # check in do_POST. Empty Content-Type is allowed for same-origin
+        # callers that omit it; a cross-origin attacker cannot send a JSON
+        # body without a non-JSON simple content type.
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype and ctype != "application/json":
+            self._error(415, "Content-Type must be application/json")
             return None
         try:
             raw = self.rfile.read(length)
