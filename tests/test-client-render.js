@@ -103,6 +103,14 @@ check('sidebar paints the selected channel immediately', () => {
   assert.strictEqual(active.length, 1);
   assert.strictEqual(active[0].querySelector('.nav-label').textContent, 'research');
 });
+check('A2A sidebar rows render a paired avatar stack', () => {
+  H.Trio.state.dms = { your_dms: [], agent_dms: [{ key: 'ag_a,ag_b', name: 'Atlas ↔ Nova', member_ids: ['ag_a', 'ag_b'] }] };
+  H.Trio.workspace.render();
+  const rail = cx.document.getElementById('workspace-rail');
+  const pair = rail.querySelector('.dm-pair');
+  assert.ok(pair);
+  assert.strictEqual(pair.querySelectorAll('.av').length, 2);
+});
 check('agent roster panel is not force-hidden by a later render()', () => {
   H.Trio.agents.render([]);
   const panel = cx.document.getElementById('trio-agents');
