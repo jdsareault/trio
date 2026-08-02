@@ -9,6 +9,7 @@
   state.providers = state.providers || ['codex', 'claude'];
   state.agentModels = state.agentModels || { codex: ['o4-mini', 'gpt-4.1'], claude: ['claude-sonnet-4-20250801', 'claude-opus-4-20250801'] };
   state.discoveryLoading = false;
+  let discoveryPromise = null;
   const pendingAgentActions = new Set();
   const typeInfo = {
     plan: { label: 'Plan', cls: 'type-plan' },
@@ -163,15 +164,41 @@
     const html = '<label>Wake policy <select name="wake"><option value="all" ' + (vm.wakePolicy === 'all' ? 'selected' : '') + '>all</option><option value="about" ' + (vm.wakePolicy === 'about' ? 'selected' : '') + '>about</option><option value="at" ' + (vm.wakePolicy === 'at' ? 'selected' : '') + '>at</option></select></label>';
     Trio.ui.modal('Wake policy for ' + vm.name, html, node => { const v = node.querySelector('[name="wake"]').value; action(vm.id, 'wake-mode', { mode: v }); });
   }
+  function normalizeModels(models) {
+    if (!Array.isArray(models)) return [];
+    return models.map(model => {
+      if (typeof model === 'string') return { id: model, name: model };
+      if (!model || typeof model !== 'object') return null;
+      const id = model.id || model.model;
+      return id ? { ...model, id, name: model.name || model.displayName || id } : null;
+    }).filter(Boolean);
+  }
+  function modelOptions(models) {
+    return normalizeModels(models).map(model => `<option value="${esc(model.id)}">${esc(model.name)}</option>`).join('');
+  }
   async function loadDiscovery() {
-    if (state.discoveryLoading) return;
-    state.discoveryLoading = true;
-    try {
-      const [health, models] = await Promise.all([Trio.api.get('/api/health').catch(() => ({})), Trio.api.get('/api/agent-models').catch(() => ({}))]);
-      if (Array.isArray(health.providers)) state.providers = health.providers;
-      if (models && typeof models.models === 'object' && Object.keys(models.models).length) state.agentModels = models.models;
-    } catch (e) { console.warn('discovery failed', e); }
-    finally { state.discoveryLoading = false; }
+    if (discoveryPromise) return discoveryPromise;
+    discoveryPromise = (async () => {
+      state.discoveryLoading = true;
+      try {
+        const health = await Trio.api.get('/api/health').catch(() => ({}));
+        const providers = Array.isArray(health.providers) ? health.providers : Object.keys(health.runtimes || {});
+        if (providers.length) state.providers = [...new Set(providers.map(p => String(p).toLowerCase()))];
+        const discovered = await Promise.all(state.providers.map(async provider => {
+          const data = await Trio.api.get(`/api/agent-models?provider=${encodeURIComponent(provider)}`).catch(() => null);
+          return data && Array.isArray(data.models) ? [provider, normalizeModels(data.models)] : null;
+        }));
+        const nextModels = { ...state.agentModels };
+        discovered.filter(Boolean).forEach(([provider, models]) => { nextModels[provider] = models; });
+        state.agentModels = nextModels;
+      } catch (e) { console.warn('discovery failed', e); }
+      finally {
+        state.discoveryLoading = false;
+        discoveryPromise = null;
+      }
+      return state.agentModels;
+    })();
+    return discoveryPromise;
   }
   async function refresh() { try { const data = await Trio.api.get('/api/agents'); state.agents = data.agents || []; Trio.store.set('agents.list', data.agents || []); Trio.store.set('agents.loading', false); render(data.agents); } catch (e) { console.warn(e); } }
   function renderActivityEvent(e) {
@@ -206,9 +233,10 @@
   function mount() { init(); }
   function unmount() {}
   async function create() {
+    await loadDiscovery();
     const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
     const defaultProvider = state.providers[0] || 'codex';
-    const models = (state.agentModels[defaultProvider] || []).map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+    const models = modelOptions(state.agentModels[defaultProvider]);
     const html = `<label class="field">Name <input name="name" required pattern="[A-Za-z0-9_]{1,32}"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile <input name="permissions" placeholder="operator,guest"></label>`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
@@ -230,6 +258,12 @@
       } catch (e) { Trio.ui.toast(e.message || 'Could not create agent'); }
       finally { pendingAgentActions.delete(key); }
     });
+    const panel = document.getElementById('trio-control-modal');
+    const providerField = panel?.querySelector('select[name="provider"]');
+    const modelField = panel?.querySelector('select[name="model"]');
+    providerField?.addEventListener('change', () => {
+      if (modelField) modelField.innerHTML = modelOptions(state.agentModels[providerField.value]);
+    });
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, viewModel, actionCaps, statusIcon, action, create };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, viewModel, actionCaps, statusIcon, action, create };
 })();
