@@ -83,9 +83,11 @@
     renderFacePile();
     const detailsBtn = $('details-btn');
     const moreBtn = $('channel-more-btn');
+    const searchBtn = $('search-btn');
     const conn = $('h-conn');
     if (detailsBtn) detailsBtn.classList.remove('hidden');
     if (moreBtn) moreBtn.classList.remove('hidden');
+    if (searchBtn) searchBtn.classList.remove('hidden');
     if (conn) conn.classList.remove('hidden');
     const banner = document.getElementById('private-banner');
     if (banner) { banner.classList.toggle('hidden', !isDm); banner.classList.toggle('audit', !!isAudit); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
@@ -374,9 +376,11 @@
     $('app')?.classList.remove('channel-details-open');
     const detailsBtn = $('details-btn');
     const moreBtn = $('channel-more-btn');
+    const searchBtn = $('search-btn');
     const conn = $('h-conn');
     if (detailsBtn) detailsBtn.classList.add('hidden');
     if (moreBtn) moreBtn.classList.add('hidden');
+    if (searchBtn) searchBtn.classList.add('hidden');
     if (conn) conn.classList.add('hidden');
     const shell = document.querySelector('.conversation-shell');
     shell?.classList.add('workspace-page');
