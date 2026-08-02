@@ -419,6 +419,59 @@
       }
     });
   }
+  const menuIcon = {
+    details: '<path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M9 9h5M9 13h6M9 17h4"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/>',
+    mute: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="m9 21h6"/>',
+    archive: '<path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/>',
+    end: '<path d="m18 6-12 12M6 6l12 12"/>',
+  };
+  function menuSvg(name) { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${menuIcon[name] || ''}</svg>`; }
+  function closeChannelMenu() {
+    const menu = $('channel-menu'); const button = $('channel-more-btn');
+    if (!menu) return;
+    menu.hidden = true; menu.classList.remove('open');
+    button?.classList.remove('menu-active'); button?.setAttribute('aria-expanded', 'false');
+  }
+  function endCurrentChannel() {
+    closeChannelMenu();
+    if (!state.channel) return;
+    Trio.ui.confirmAction(`End #${state.channel}?`, 'The channel will be archived and become read-only.', () => {
+      archive('channel', state.channel, true).then(() => loadConversation(state.channel, '#' + state.channel, 'Archived channel — read only', true, false));
+    });
+  }
+  function openChannelMenu() {
+    const menu = $('channel-menu'); const button = $('channel-more-btn');
+    if (!menu || !button) return;
+    if (!menu.hidden) { closeChannelMenu(); return; }
+    const isChannel = !!state.channel && !state.dmKey;
+    const archived = !!state.readOnly;
+    const rows = [
+      `<button type="button" role="menuitem" data-menu-action="details">${menuSvg('details')}<span>${isChannel ? 'Channel details' : 'Conversation details'}</span></button>`,
+      `<button type="button" role="menuitem" data-menu-action="search">${menuSvg('search')}<span>${isChannel ? 'Search this channel' : 'Search this conversation'}</span></button>`,
+      `<button type="button" role="menuitem" data-menu-action="mute">${menuSvg('mute')}<span>Mute notifications</span></button>`,
+      '<div class="menu-sep" role="separator"></div>',
+      isChannel
+        ? `<button type="button" role="menuitem" class="danger" data-menu-action="end">${menuSvg('end')}<span>End channel</span></button>`
+        : `<button type="button" role="menuitem" data-menu-action="archive">${menuSvg('archive')}<span>${archived ? 'Restore conversation' : 'Archive conversation'}</span></button>`,
+    ];
+    menu.innerHTML = rows.join(''); menu.hidden = false; menu.classList.add('open');
+    button.classList.add('menu-active'); button.setAttribute('aria-expanded', 'true');
+    const rect = button.getBoundingClientRect();
+    const width = menu.offsetWidth || 218;
+    const top = Math.min(window.innerHeight - 12 - (menu.offsetHeight || 190), rect.bottom + 8);
+    menu.style.left = Math.max(12, rect.right - width) + 'px'; menu.style.top = Math.max(12, top) + 'px';
+    menu.querySelectorAll('[data-menu-action]').forEach(item => item.addEventListener('click', () => {
+      const action = item.dataset.menuAction;
+      if (action === 'details') showDetails();
+      if (action === 'search') openSearch();
+      if (action === 'mute') { closeChannelMenu(); toast('Notifications muted for this conversation'); }
+      if (action === 'end') endCurrentChannel();
+      if (action === 'archive') { closeChannelMenu(); archiveCurrent(); }
+    }));
+    menu.querySelector('button')?.focus();
+  }
+  let menuClick = null, menuKeydown = null, menuButtonClick = null;
   let unroute = null;
   let wsl = null;
   function onWorkspaceUpdate() { if (['home','attention','tasks'].includes(state.view)) showView(state.view); }
@@ -512,7 +565,7 @@
     input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
   }
   let refreshInterval = null;
-  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') closeChannelMenu(); }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { closeChannelMenu(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast};
 })();

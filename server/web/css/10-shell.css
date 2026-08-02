@@ -151,6 +151,23 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .topbar h1 .h,.topbar h2 .h{ color:var(--ink-3); font-weight:500; }
 .topbar .topic{ font-size:12.5px; color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:1px; }
 .topbar-actions{ display:flex; align-items:center; gap:6px; }
+.topbar-actions .conn{ margin-right:2px; }
+.channel-menu{
+  position:fixed; z-index:var(--z-menu); min-width:218px; padding:6px;
+  background:var(--surface-2); border:1px solid var(--line); border-radius:16px;
+  box-shadow:var(--shadow-lg); opacity:0; pointer-events:none;
+  transform:translateY(-4px) scale(.98); transform-origin:top right;
+  transition:opacity .14s var(--ease), transform .14s var(--ease-soft);
+}
+.channel-menu:not([hidden]){ opacity:1; pointer-events:auto; transform:none; }
+.channel-menu button{ display:flex; align-items:center; gap:11px; width:100%; padding:10px 11px; border-radius:10px; color:var(--ink-2); text-align:left; font-size:13.5px; font-weight:500; }
+.channel-menu button:hover,.channel-menu button:focus-visible{ background:var(--surface-hover); color:var(--ink); outline:none; }
+.channel-menu button svg{ width:17px; height:17px; flex:none; color:var(--ink-3); }
+.channel-menu button.danger{ color:var(--danger); }
+.channel-menu button.danger svg{ color:var(--danger); }
+.channel-menu .menu-sep{ height:1px; margin:6px 4px; background:var(--line-soft); }
+.channel-menu .menu-label{ padding:6px 11px 4px; color:var(--ink-3); font-size:10.5px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; }
+#channel-more-btn.menu-active{ background:var(--accent-tint); color:var(--accent-strong); box-shadow:0 0 0 2px color-mix(in oklab,var(--accent) 52%,transparent); }
 
 .face-pile{ display:flex; align-items:center; padding-right:6px; }
 .face-pile .av{ width:34px; height:34px; font-size:14px; margin-left:-8px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2.5px var(--bg); }
