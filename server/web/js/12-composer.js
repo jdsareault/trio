@@ -55,7 +55,15 @@
     const names = [...state.selectedTargets].map(id => '@' + targetName(id));
     return (names.length ? names.join(' ') + ' ' : '') + text;
   }
-  function validate() { if (state.readOnly) return false; return !!renderedContent() || state.pendingAttachments.length > 0; }
+  function validate() {
+    if (state.readOnly) return false;
+    // An in-flight upload's placeholder has id:0 and gets silently dropped by
+    // buildSendPayload's `id > 0` filter — sending mid-upload used to eat the
+    // attachment with no warning (LOTC/Frodo). Block send until every pending
+    // attachment has resolved (succeeded or been removed).
+    if (state.pendingAttachments.some(a => a.loading)) return false;
+    return !!renderedContent() || state.pendingAttachments.length > 0;
+  }
   function buildSendPayload() {
     const body = {
       content: renderedContent(),
@@ -93,8 +101,13 @@
       const index = state.pendingAttachments.indexOf(placeholder);
       if (index >= 0) { state.pendingAttachments.splice(index, 1); }
       throw error;
+    } finally {
+      // Must run on the error path too — otherwise a failed upload leaves
+      // validate()'s loading-guard with nothing left to clear and the send
+      // button stays stuck disabled (every caller re-throws past this point
+      // to a bare .catch(toast), never re-calling updateSendState itself).
+      renderAttachments(); updateSendState();
     }
-    renderAttachments(); updateSendState();
   }
   function renderAttachments() {
     const strip = byId('attachment-strip'); if (!strip) return;
@@ -107,7 +120,14 @@
       img.src = attachment.url || '';
       img.alt = attachment.filename || 'attachment';
       img.loading = 'lazy';
-      img.onclick = () => showLightbox(img.src, img.alt);
+      // A bare onclick <img> is unreachable by keyboard/screen-reader users
+      // (LOTC/Frodo) — the remove button next to it already does this right.
+      img.tabIndex = 0;
+      img.setAttribute('role', 'button');
+      img.setAttribute('aria-label', 'View full image: ' + img.alt);
+      const openLightbox = () => showLightbox(img.src, img.alt);
+      img.onclick = openLightbox;
+      img.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openLightbox(); } };
       const rm = document.createElement('button');
       rm.type = 'button'; rm.className = 'rm'; rm.title = 'remove';
       rm.setAttribute('aria-label', 'remove attachment');

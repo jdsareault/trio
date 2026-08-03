@@ -214,14 +214,16 @@ def build_spawn_argv(
             argv += ["--permission-prompt-tool", PERMISSION_PROMPT_TOOL]
     if resume_session_id:
         argv += ["--resume", resume_session_id]
-    # Make sure uploaded attachments are accessible to the headless agent's
-    # Read tool without a manual permission prompt. Create the dir now so it
-    # always appears on the allowlist even before the first upload.
+    # Attachments live under one shared ATTACH_DIR root, but --add-dir grants
+    # the agent's raw Read tool filesystem access with NO trio-level
+    # visibility check — trio's can_see/DM-withholding model doesn't apply to
+    # it. Adding the WHOLE root here (as this used to do) let any agent read
+    # every OTHER channel's uploaded attachments too, not just its own
+    # (LOTC/Aragorn). Callers must pass the specific channel-scoped
+    # subdirectories this agent is actually allowed to see; ATTACH_DIR itself
+    # is still ensured so uploads have somewhere to land.
     ATTACH_DIR.mkdir(parents=True, exist_ok=True)
-    add_dirs = {str(ATTACH_DIR)}
-    for d in extra_dirs or []:
-        if d:
-            add_dirs.add(d)
+    add_dirs = {d for d in (extra_dirs or []) if d}
     for d in add_dirs:
         argv += ["--add-dir", d]
     return argv
@@ -655,6 +657,7 @@ class AgentSupervisor:
             effort=spawn_kw.get("effort",
                                 row["effort"] if "effort" in row.keys() else ""),
             cwd=spawn_kw.get("cwd", row["cwd"] or ""),
+            extra_dirs=spawn_kw.get("extra_dirs"),
             resume_session_id=row["session_id"] or "")
 
     def stop(self, agent_id: str) -> bool:
@@ -699,6 +702,7 @@ class AgentSupervisor:
                 system_prompt=spawn_kw.get("system_prompt", ""),
                 mcp_config=spawn_kw.get("mcp_config", ""),
                 cwd=spawn_kw.get("cwd", row["cwd"] or ""),
+                extra_dirs=spawn_kw.get("extra_dirs"),
                 resume_session_id="",
             )
 

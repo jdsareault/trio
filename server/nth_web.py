@@ -56,8 +56,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, ATTACH_DIR,
-                           animal_for, animal_for_channel, can_see, is_all_seeing,
-                           parse_recipients)
+                           animal_for, animal_for_channel, can_see, channel_attach_dir,
+                           is_all_seeing, parse_recipients)
 import nth_supervisor as nsup
 import nth_agent_manager as nam
 
@@ -2052,7 +2052,8 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
         build_agent_preamble(row["name"], channels, member_id=agent_id,
                              reclaim_secret=reclaim_secret)
     return supervisor.wake(agent_id, system_prompt=preamble,
-                           mcp_config=build_mcp_config_for_hub())
+                           mcp_config=build_mcp_config_for_hub(),
+                           extra_dirs=[str(channel_attach_dir(c, base=ATTACH_DIR)) for c in channels])
 
 
 def clear_agent(agent_id: str, supervisor, db_path: Path):
@@ -2075,7 +2076,8 @@ def clear_agent(agent_id: str, supervisor, db_path: Path):
         build_agent_preamble(row["name"], channels, member_id=agent_id,
                              reclaim_secret=reclaim_secret)
     return supervisor.clear(agent_id, system_prompt=preamble,
-                            mcp_config=build_mcp_config_for_hub())
+                            mcp_config=build_mcp_config_for_hub(),
+                            extra_dirs=[str(channel_attach_dir(c, base=ATTACH_DIR)) for c in channels])
 
 
 def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
@@ -4196,11 +4198,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             build_agent_preamble(name, all_channels, member_id=agent_id,
                                  reclaim_secret=reclaim_secret)
         mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
+        # Grant Read access ONLY to this agent's own channels' attachment
+        # dirs — build_spawn_argv no longer adds the whole shared ATTACH_DIR
+        # root, which used to let any agent read every other channel's
+        # uploaded images regardless of membership (LOTC/Aragorn).
+        attach_dirs = [str(channel_attach_dir(c, base=ATTACH_DIR)) for c in all_channels]
         try:
             proc = get_supervisor().spawn(agent_id, provider=provider, model=model,
                                           system_prompt=preamble, mcp_config=mcp_config,
                                           effort=effort, cwd=cwd,
-                                          permission_profile=permission_profile)
+                                          permission_profile=permission_profile,
+                                          extra_dirs=attach_dirs)
         except Exception as e:
             # Spawn threw — don't leave the row stuck at 'spawning'.
             try:
@@ -4884,7 +4892,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             fpath = None
             try:
                 ATTACH_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
-                chan_dir = ATTACH_DIR / re.sub(r"[^\w.\-]", "_", self.channel)
+                chan_dir = channel_attach_dir(self.channel, base=ATTACH_DIR)
                 chan_dir.mkdir(mode=0o755, exist_ok=True)
                 fpath = chan_dir / f"{att_id}{ext}"
                 fpath.write_bytes(data)
@@ -5065,7 +5073,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, "not found")
                 return
         try:
-            chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", self.channel)).resolve()
+            chan_root = channel_attach_dir(self.channel, base=ATTACH_DIR).resolve()
             resolved = Path(row["path"]).resolve()
             # Defense in depth: only serve files under THIS channel's dir.
             if not resolved.is_relative_to(chan_root):

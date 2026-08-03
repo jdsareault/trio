@@ -92,6 +92,19 @@ def main() -> int:
     check("build_spawn_argv: no permission-prompt-tool under bypassPermissions",
           "--permission-prompt-tool" not in argv_bypass)
 
+    # LOTC/Aragorn: build_spawn_argv used to grant every agent --add-dir on
+    # the WHOLE shared attachments root, letting any agent Read every other
+    # channel's uploads. Must now grant nothing unless the caller explicitly
+    # scopes it via extra_dirs (the caller is responsible for passing only
+    # the channels this specific agent is actually a member of).
+    argv_no_extra = sup.build_spawn_argv(mcp_config="{}")
+    check("build_spawn_argv: NO --add-dir grant without explicit extra_dirs",
+          "--add-dir" not in argv_no_extra)
+    argv_scoped = sup.build_spawn_argv(mcp_config="{}", extra_dirs=["/tmp/x/chanA", "/tmp/x/chanB"])
+    add_dirs = [argv_scoped[i + 1] for i, a in enumerate(argv_scoped) if a == "--add-dir"]
+    check("build_spawn_argv: --add-dir grants EXACTLY the passed extra_dirs, nothing more",
+          sorted(add_dirs) == ["/tmp/x/chanA", "/tmp/x/chanB"])
+
     import json as _json
     cfg = _json.loads(sup.build_mcp_config("/x/nth_server.py", python_cmd="py3"))
     check("build_mcp_config: registers nth-trio stdio server pointed at nth_server",

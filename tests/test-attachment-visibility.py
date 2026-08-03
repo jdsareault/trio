@@ -135,6 +135,21 @@ def fetch(att_id, token=None):
         return e.code, e.read()
 
 
+# LOTC/Sauron + LOTC/Aragorn: channel_attach_dir is the single sanitizer both
+# the upload/serve paths (above/below) and the per-agent --add-dir grant
+# (nth_supervisor.build_spawn_argv) route through — verify it directly.
+import nth_constants as nc  # noqa: E402
+_probe_root = Path(tempfile.mkdtemp(prefix="nth-attach-dir-probe-"))
+check("channel_attach_dir: normal channel code resolves under base",
+      nc.channel_attach_dir("attest", base=_probe_root) == _probe_root / "attest")
+check("channel_attach_dir: '..' cannot escape the root (hardened regex strips dots)",
+      nc.channel_attach_dir("..", base=_probe_root) == _probe_root / "__")
+check("channel_attach_dir: '../../etc' collapses to a literal in-root name, not a traversal",
+      nc.channel_attach_dir("../../etc", base=_probe_root).resolve().parent == _probe_root.resolve())
+check("channel_attach_dir: defaults to nth_constants.ATTACH_DIR when base omitted",
+      nc.channel_attach_dir("attest") == nc.ATTACH_DIR / "attest")
+shutil.rmtree(_probe_root, ignore_errors=True)
+
 hub = web.EventHub(srv.DB_PATH, CH)
 server = None
 try:
