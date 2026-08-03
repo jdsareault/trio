@@ -37,8 +37,10 @@
   }
 
   // Wrap candidate tokens the caller marks valid (isValid(token) === true) in a
-  // .file-link. Skips code/pre/existing links, the @/#/! sigil spans, and
-  // already-linkified paths, so we never double-wrap or touch literal code.
+  // .file-link. Skips pre/existing links, the @/#/! sigil spans, and
+  // already-linkified paths, so we never double-wrap or touch code blocks.
+  // Inline <code> (e.g. backtick-wrapped paths) IS linkified — agents commonly
+  // wrap file paths in backticks, and those are legitimate click targets.
   // onClick (optional) is attached to each created link.
   function linkifyValidatedPaths(root, isValid, onClick) {
     if (!root) return;
@@ -48,7 +50,7 @@
       const node = walker.currentNode;
       const parent = node.parentElement;
       if (!parent || parent.closest(
-        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+        'pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
       if (detectFilePathCandidates(node.nodeValue || '').some(c => isValid(c.token)))
         nodes.push(node);
     }
@@ -124,7 +126,7 @@
       const node = walker.currentNode;
       const parent = node.parentElement;
       if (!parent || parent.closest(
-        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+        'pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
       for (const c of detectFilePathCandidates(node.nodeValue || '')) tokens.add(c.token);
     }
     if (!tokens.size) return;
