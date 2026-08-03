@@ -17,10 +17,10 @@
 
   function member(id) { return state.members.get(id) || {}; }
   function nameFor(id, fallback) { return member(id).name || fallback || id || 'unknown'; }
-  function avatarTone(label) {
-    const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum'];
-    return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length];
-  }
+  // Shared with 20-workspace.js via Trio.avatarTone (00-core.js) — a bare
+  // per-label hash used to duplicate this logic in both files with no
+  // collision avoidance, so two members could land on the identical tone.
+  const avatarTone = Trio.avatarTone;
   function avatarUrlFor(id) {
     const fromMember = member(id).avatar_url;
     if (fromMember) return fromMember;
