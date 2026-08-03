@@ -95,22 +95,42 @@
   }
 
   // ── Desktop notification ─────────────────────────────────────────────
-  function showDesktopNotification(msg, tier) {
+  function showDesktopNotification(msg, tier, inCurrentChannel) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
-      const title = tier === 'dm' ? `DM — ${msg.member_name || msg.member_id}` : `#${state.channel || ''} — ${msg.member_name || msg.member_id}`;
+      const where = tier === 'dm' ? 'DM' : (!inCurrentChannel && msg.channel) ? `#${msg.channel}` : `#${state.channel || ''}`;
+      const title = `${where} — ${msg.member_name || msg.member_id}`;
       const n = new Notification(title, {
         body: String(msg.content || '').slice(0, 140),
         tag: 'trio-' + msg.id,
         silent: true, // the chime (if enabled) already covers sound; avoid a second, uncontrolled OS ding
       });
-      n.onclick = () => { window.focus(); n.close(); };
+      n.onclick = () => { window.focus(); if (msg.channel) Trio.workspace?.openChannel?.(msg.channel); n.close(); };
     } catch { /* best-effort */ }
+  }
+
+  // ── Cross-stream de-dup ───────────────────────────────────────────────
+  // The currently-open channel is covered by TWO independent SSE
+  // connections at once once the workspace-wide stream is running: the
+  // per-channel one (/api/events, scoped to state.channel) AND the
+  // cross-channel one (/api/workspace/events, multiplexing every channel's
+  // hub — see 00-core.js). Both dispatch the identical message through the
+  // same Trio.events target, so without de-dup the open channel's own
+  // messages would chime/notify TWICE. Message ids are globally unique and
+  // monotonic, so a bounded "seen" set is enough — no per-stream tagging
+  // needed. Capped so a long session can't grow this unboundedly.
+  const SEEN_CAP = 500;
+  const seenIds = new Set();
+  function alreadySeen(id) {
+    if (seenIds.has(id)) return true;
+    seenIds.add(id);
+    if (seenIds.size > SEEN_CAP) seenIds.delete(seenIds.values().next().value);
+    return false;
   }
 
   function onMessage(event) {
     const msg = event.detail;
-    if (!msg || msg.id == null || isPrimedHistory(msg)) return;
+    if (!msg || msg.id == null || isPrimedHistory(msg) || alreadySeen(msg.id)) return;
     const operatorId = (state.operator || state.meta?.operator)?.id;
     const tier = classify(msg, operatorId);
     if (!tier) return;
@@ -118,10 +138,15 @@
     if (!prefs) return;
     const Tier = tier.charAt(0).toUpperCase() + tier.slice(1);
     if (prefs.chime && prefs['chimeTier' + Tier]) playPreset(prefs['chimeSound' + Tier], prefs.chimeVolume);
-    // Desktop popups are only useful when you're not already looking at the
-    // conversation — unlike the chime, which should still play so an
-    // audible cue reaches you even with the tab focused elsewhere.
-    if (prefs.notifications && prefs['notifyTier' + Tier] && document.hidden) showDesktopNotification(msg, tier);
+    // A message in a channel you're not currently viewing deserves a popup
+    // regardless of tab focus — you can't see it just by looking at the
+    // screen. For the channel you ARE viewing, keep the original behavior:
+    // only pop up while the tab itself is hidden (the chime already covers
+    // the tab-focused-elsewhere case).
+    const inCurrentChannel = !msg.channel || msg.channel === state.channel;
+    if (prefs.notifications && prefs['notifyTier' + Tier] && (document.hidden || !inCurrentChannel)) {
+      showDesktopNotification(msg, tier, inCurrentChannel);
+    }
   }
   events.addEventListener('message', onMessage);
 

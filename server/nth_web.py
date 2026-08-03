@@ -922,6 +922,13 @@ class EventHub:
             ).fetchall()
             for r in reversed(rows):
                 ev = _message_event(db, r)
+                # Stamp the channel this hub is scoped to. Needed so the
+                # cross-channel workspace SSE stream (_serve_workspace_sse,
+                # which multiplexes every channel's hub into one connection)
+                # gives the client a way to tell which channel a message
+                # belongs to — mirrors the existing pattern in the DM-search
+                # path below (evt["channel"] = r["channel"]).
+                ev["channel"] = self.channel
                 # Withhold a non-recipient's DMs from the primed history too —
                 # else a guest sees every past DM on first page load.
                 if not _event_visible_to(ev, viewer_id, all_seeing):
@@ -1127,7 +1134,9 @@ class EventHub:
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast(_message_event(db, r))
+                        ev = _message_event(db, r)
+                        ev["channel"] = self.channel  # see prime-payload comment above
+                        self._broadcast(ev)
                         self.last_msg_id = r["id"]
 
                     # Edits/retractions to messages already sent (id <= prev_last)
@@ -1145,6 +1154,7 @@ class EventHub:
                     for r in changed:
                         ev = _message_event(db, r)
                         ev["type"] = "message_update"
+                        ev["channel"] = self.channel
                         self._broadcast(ev)
                     self._change_scan = scan_now
 

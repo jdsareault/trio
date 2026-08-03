@@ -411,5 +411,56 @@ check('notifications: real message-event dispatch never throws for an old or a l
   assert.doesNotThrow(() => H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: live })));
 });
 
+// Cross-channel chimes: the workspace-wide SSE stream (00-core.js's
+// startWorkspaceEvents, operator-only) delivers messages from every channel,
+// not just the one currently open — including the open channel itself,
+// which the per-channel stream ALSO delivers. Two things follow: (1) a
+// message not in the currently-open channel deserves a desktop popup
+// regardless of tab focus (chime already fires unconditionally either way),
+// (2) the open channel's own messages must not double-fire from arriving on
+// both streams.
+check('notifications: a message in a channel you are NOT viewing pops up even with the tab focused', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 301, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanB', member_name: 'Bob', content: 'hi',
+  } }));
+  assert.strictEqual(created.length, 1);
+  assert.ok(created[0].title.includes('DM'));
+});
+check('notifications: a message in the currently-open channel does NOT pop up while the tab is focused', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 302, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanA', member_name: 'Bob', content: 'hi',
+  } }));
+  assert.strictEqual(created.length, 0);
+});
+check('notifications: the SAME message id delivered twice (per-channel + workspace stream) only fires once', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  const detail = {
+    id: 303, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanB', member_name: 'Bob', content: 'hi',
+  };
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail }));
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail }));
+  assert.strictEqual(created.length, 1);
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);

@@ -80,7 +80,9 @@ try:
                     (race_msg_id[0],),
                 ).fetchone()
                 if row:
-                    hub._broadcast(web._message_event(db, row))
+                    race_ev = web._message_event(db, row)
+                    race_ev["channel"] = CH  # mirrors the real broadcast call sites in nth_web.py
+                    hub._broadcast(race_ev)
             finally:
                 if db is not None:
                     db.close()
@@ -111,6 +113,15 @@ try:
     seed_ids = [m["id"] for m in seeds.get("messages", [])]
     check("prime: seeded history still delivered to subscriber",
           all(sid in ids for sid in seed_ids if sid != rid))
+
+    # Every message event this hub emits (prime AND live) must carry the
+    # channel it belongs to — the cross-channel workspace SSE stream
+    # (_serve_workspace_sse) multiplexes several hubs' queues into one
+    # connection with no other way for the client to tell which channel a
+    # given message came from (see nth_web.py's _build_prime_payloads /
+    # _watch_loop comments).
+    check("every message event in the feed is stamped with this hub's channel",
+          all(e.get("channel") == CH for e in got if e.get("type") == "message"))
 finally:
     hub.stop()
 

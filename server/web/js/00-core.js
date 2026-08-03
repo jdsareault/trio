@@ -34,6 +34,15 @@
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
     mountFeatures?.();
     if (root.startEvents) root.startEvents(root.state.channel);
+    // Cross-channel notifications (chime/desktop popup for a channel you're
+    // NOT currently viewing) need the workspace-wide SSE stream — but
+    // /api/workspace/events is operator-only server-side (403 for anyone
+    // else), so only the authenticated operator (loopback/tailscale — the
+    // same is_all_seeing check the server itself applies) opens it. A
+    // guest/pending viewer opening it anyway would just retry against a
+    // permanent 403 forever.
+    const isOperator = root.state.operator?.source === 'loopback' || root.state.operator?.source === 'tailscale';
+    if (isOperator && root.startWorkspaceEvents) root.startWorkspaceEvents();
     root.events.dispatchEvent(new CustomEvent('boot', {detail: meta})); return true;
   };
 })();
