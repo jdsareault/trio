@@ -142,6 +142,54 @@ check('dictation control disables itself when no speech engine is available', ()
   assert.strictEqual(button.disabled, true);
   assert.strictEqual(button.title, 'Dictation is unavailable in this browser');
 });
+check('dictation button: active recording shows no redundant status text (the meter already signals it)', () => {
+  H.Trio.composer.setDictationButtonState(true);
+  const status = cx.document.getElementById('dictate-status');
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(status.hidden, true);
+  assert.strictEqual(status.textContent, '');
+  assert.strictEqual(button.classList.contains('recording'), true);
+});
+check('dictation button: processing (transcribing) still shows its status text — that IS invisible work the meter can\'t represent', () => {
+  H.Trio.composer.setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
+  const status = cx.document.getElementById('dictate-status');
+  assert.strictEqual(status.hidden, false);
+  assert.strictEqual(status.textContent, 'Transcribing (local Whisper)…');
+});
+check('dictation button: back to idle clears both the recording state and any status text', () => {
+  H.Trio.composer.setDictationButtonState(false);
+  const status = cx.document.getElementById('dictate-status');
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(status.hidden, true);
+  assert.strictEqual(button.classList.contains('recording'), false);
+});
+// LOTC/Frodo: the visible "Recording…"/"Listening…" text was removed as
+// redundant clutter for sighted users, but it was also a screen reader's
+// only chance at a state announcement — reinstate that via the existing
+// #trio-aria-live region instead of visible text, and keep aria-label in
+// sync with the visible tooltip (it used to stay "Dictate" even mid-recording).
+check('dictation button: recording state is announced via the aria-live region, not visible text', () => {
+  H.Trio.composer.setDictationButtonState(true);
+  const live = cx.document.getElementById('trio-aria-live');
+  assert.strictEqual(live.textContent, 'Recording');
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(button.getAttribute('aria-label'), 'Stop dictation');
+});
+check('dictation button: transcribing state reuses its visible status text for the aria-live announcement too', () => {
+  H.Trio.composer.setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
+  const live = cx.document.getElementById('trio-aria-live');
+  assert.strictEqual(live.textContent, 'Transcribing (local Whisper)…');
+});
+check('dictation button: returning to idle clears the aria-live announcement', () => {
+  H.Trio.composer.setDictationButtonState(false);
+  const live = cx.document.getElementById('trio-aria-live');
+  assert.strictEqual(live.textContent, '');
+  // This test harness's fake browser env has no speech engine (see the very
+  // first dictation check in this file), so the idle label reflects that —
+  // not a plain "Dictate" — but it must still be kept out of aria-label sync.
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(button.getAttribute('aria-label'), 'Dictation is unavailable in this browser');
+});
 check('task filters default to open and all shows every row', () => {
   H.Trio.state.tasks = [{ id: 1, message: 'Open task', status: 'open' }, { id: 2, message: 'Claimed task', status: 'claimed' }];
   H.Trio.workspace.showView('tasks');

@@ -234,13 +234,23 @@
       button.disabled = processing || button.dataset.unavailable === 'true';
       button.querySelector('.mic-icon')?.toggleAttribute('hidden', active);
       button.querySelector('.stop-icon')?.toggleAttribute('hidden', !active);
-      button.title = processing ? (statusText || 'Transcribing…')
+      const label = processing ? (statusText || 'Transcribing…')
         : active ? 'Stop dictation' : (button.disabled ? 'Dictation is unavailable in this browser' : 'Dictate');
+      button.title = label;
+      // LOTC/Frodo: aria-label was static ("Dictate") regardless of state, so
+      // a screen reader's announced name never matched the visible tooltip.
+      button.setAttribute('aria-label', label);
     }
     if (status) {
       status.hidden = !statusText;
       status.textContent = statusText;
     }
+    // LOTC/Frodo: the visible status text was removed for the recording-start
+    // case (redundant with the red button + waveform for sighted users), but
+    // that text was a screen reader's only chance at a state announcement.
+    // #trio-aria-live already exists for exactly this — announce here
+    // without reinstating any visible clutter. Idle state clears it.
+    Trio.ui?.setLive?.(processing ? (statusText || 'Transcribing') : active ? 'Recording' : '');
   }
   function stopDictation() {
     dictationGen++; // invalidate any in-flight async callback from this session (LOTC/Aragorn)
@@ -270,7 +280,10 @@
         meterStream = s; startMeter(s);
       }).catch(() => {});
     };
-    recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Listening (browser speech)…' });
+    // No statusText here — the level meter already shows "I'm recording";
+    // a redundant "Listening…" label next to a red pulsing button and a
+    // waveform is one signal too many (jdsareault).
+    recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
   }
   async function localDictation() {
     if (!hasLocalDictation()) throw new Error('Local dictation is unavailable in this browser');
@@ -319,7 +332,10 @@
         if (!fellBack) { document.body.classList.remove('dictating'); setDictationButtonState(false); }
       }
     };
-    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Recording (local Whisper)…' });
+    // No statusText while actively recording (see browserDictation) — the
+    // "Transcribing (local Whisper)…" text right after IS still useful,
+    // since that's invisible processing time the waveform can't represent.
+    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
     startMeter(stream);
   }
   async function toggleDictation() {
@@ -472,5 +488,5 @@
   }
   function mount() { init(); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly };
+  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
 })();
