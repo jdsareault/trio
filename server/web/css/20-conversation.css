@@ -20,6 +20,26 @@ body.message-numbers .message-id { display:inline; }
 .message-body p:first-child { margin-top:0; }.message-body p:last-child { margin-bottom:0; }
 .message-body pre,.message-body code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code-bg); color:var(--code-ink); border-radius:6px; }.message-body pre { overflow:auto; padding:10px; }
 .message-body a { color:inherit; text-decoration:underline; }.message-body.system,.message.retracted { color:var(--ink-3); font-size:13px; background:transparent; border-style:dashed; }
+/* Validated file paths — clickable "reveal in Finder" links. Distinct from
+   plain links: code-tinted chip + a subtle 📁 affordance, dotted underline.
+   The JS layer (13-file-links.js) creates <a class="file-link" role="button">
+   with NO href, so without this block they render as inert-looking plain
+   text and the reveal interaction is effectively invisible. */
+.message-body a.file-link {
+  color: var(--accent-strong); text-decoration: underline; text-decoration-style: dotted;
+  text-underline-offset: 2px; cursor: pointer;
+  background: var(--accent-tint); border-radius: var(--r-sm); padding: 0 3px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.message-body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
+.message-body a.file-link:hover { background: color-mix(in srgb, var(--accent-tint) 75%, var(--accent)); }
+.message-body a.file-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.message-body a.file-link.file-link-ok { background: #dcecdf; }
+.message-body a.file-link.file-link-err { color: #a34444; background: #f8dddd; text-decoration-style: wavy; }
+/* Own-message bubbles are accent-colored with light ink — keep the chip readable. */
+.message.own .message-body a.file-link { color: var(--bubble-me-ink, #fff); background: color-mix(in srgb, var(--bubble-me-ink, #fff) 18%, transparent); }
+.message.own .message-body a.file-link:hover { background: color-mix(in srgb, var(--bubble-me-ink, #fff) 28%, transparent); }
+.message.own .message-body a.file-link.file-link-err { color: #fff; background: rgba(163, 68, 68, 0.55); }
 .edited-mark { opacity:.7; font-size:.82em; }.private-badge,.confidence { border-radius:99px; padding:1px 7px; font-size:10px; font-weight:700; text-transform:uppercase; }.private-badge { background:var(--warm-soft); color:var(--warm); }.confidence-low { background:#f8dddd; color:#a34444; }.confidence-medium { background:#f6eac5; color:#806216; }.confidence-high { background:#dcecdf; color:#37724a; }
 .message-targets { display:flex; flex-wrap:wrap; gap:5px; margin:0 0 8px; }.target-group { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--ink-3); }.target-chip,.attachment-pill { border:0; border-radius:99px; padding:3px 8px; background:var(--accent-tint); color:var(--accent-strong); font:inherit; font-size:12px; }.sigil { font-weight:700; }.sigil-mention { color:var(--accent-strong); }.sigil-ref { color:#96701d; }.sigil-bang { color:var(--warm); }
 .day-separator { align-self:center; margin:8px 0; padding:3px 10px; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }

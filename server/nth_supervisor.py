@@ -228,11 +228,13 @@ class AgentProc:
 
     def __init__(self, agent_id: str, argv: List[str],
                  on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-                 on_session: Optional[Callable[[str, str], None]] = None):
+                 on_session: Optional[Callable[[str, str], None]] = None,
+                 cwd: str = ""):
         self.agent_id = agent_id
         self.argv = argv
         self.on_event = on_event
         self.on_session = on_session
+        self.cwd = cwd
         self.session_id: str = ""
         self._session_evt = threading.Event()
         self.proc: Optional[subprocess.Popen] = None
@@ -247,6 +249,7 @@ class AgentProc:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # line-buffered
+            cwd=(self.cwd or None),
         )
         self._readers = [
             threading.Thread(target=self._read_loop, daemon=True),
@@ -534,11 +537,16 @@ class AgentSupervisor:
     # ── lifecycle ──
     def spawn(self, agent_id: str, *, model: str = "", system_prompt: str = "",
               mcp_config: str = "", resume_session_id: str = "", effort: str = "",
+              cwd: str = "",
               session_timeout: float = 10.0) -> AgentProc:
         """Launch (or resume) an agent process and sync its DB row. Serialized
         per-agent. Blocks briefly to capture the session_id from the init
         event; the reader thread also persists it directly, so a slow init
-        doesn't lose --resume continuity."""
+        doesn't lose --resume continuity.
+
+        cwd, when non-empty, becomes the spawned process's working directory
+        (Popen cwd=). Empty falls back to the supervisor's inherited cwd, the
+        pre-cwd-threading behavior."""
         with self._plock(agent_id):
             if not self._accepting:
                 raise RuntimeError("agent supervisor is shutting down")
@@ -552,7 +560,8 @@ class AgentSupervisor:
             proc = AgentProc(
                 agent_id, argv,
                 on_event=lambda aid, evt: self._handle_event(aid, evt, source=proc),
-                on_session=self._persist_session)
+                on_session=self._persist_session,
+                cwd=cwd)
             self._set_state(agent_id, ST_SPAWNING)
             # Register the proc BEFORE start() so the reader thread's early
             # events find themselves in _procs and pass the stale-source guard
@@ -595,7 +604,8 @@ class AgentSupervisor:
         db = self._db()
         try:
             row = db.execute(
-                "SELECT session_id, model, base_prompt, effort FROM agents WHERE id = ?",
+                "SELECT session_id, model, base_prompt, effort, cwd "
+                "FROM agents WHERE id = ?",
                 (agent_id,)).fetchone()
         finally:
             db.close()
@@ -612,6 +622,7 @@ class AgentSupervisor:
             mcp_config=spawn_kw.get("mcp_config", ""),
             effort=spawn_kw.get("effort",
                                 row["effort"] if "effort" in row.keys() else ""),
+            cwd=spawn_kw.get("cwd", row["cwd"] or ""),
             resume_session_id=row["session_id"] or "")
 
     def stop(self, agent_id: str) -> bool:
@@ -637,7 +648,7 @@ class AgentSupervisor:
             db = self._db()
             try:
                 row = db.execute(
-                    "SELECT model, effort FROM agents WHERE id = ?", (agent_id,)
+                    "SELECT model, effort, cwd FROM agents WHERE id = ?", (agent_id,)
                 ).fetchone()
             finally:
                 db.close()
@@ -655,6 +666,7 @@ class AgentSupervisor:
                 effort=spawn_kw.get("effort", row["effort"] or ""),
                 system_prompt=spawn_kw.get("system_prompt", ""),
                 mcp_config=spawn_kw.get("mcp_config", ""),
+                cwd=spawn_kw.get("cwd", row["cwd"] or ""),
                 resume_session_id="",
             )
 
