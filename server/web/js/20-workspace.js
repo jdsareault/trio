@@ -212,18 +212,24 @@
       : allMembers;
     const operator = state.operator || state.meta?.operator;
     if (operator?.id && !members.some(member => member.id === operator.id)) members.push(operator);
+    // Merge the supervisor's {live,busy,state} over the roster member — the same
+    // source the channel drawer uses — so the face-pile dot agrees with the
+    // drawer/roster instead of reading only the heartbeat-based roster status.
+    const agentsById = new Map((state.agents || []).map(a => [a.id, a]));
+    const withAgent = member => { const agent = agentsById.get(member.id); return agent ? { ...member, ...agent } : member; };
     const visible = members.slice(0, 4);
     visible.forEach(member => {
+      const merged = withAgent(member);
       const node = document.createElement('span');
       // The human operator viewing this dashboard is inherently present —
       // their bare {id,name,source} shape carries no status/live/state for
       // channelStatus to read, which previously fell through to 'offline'.
-      const status = (operator?.id && member.id === operator.id) ? 'active' : channelStatus(member);
-      node.innerHTML = avatarFor(member, status);
+      const status = (operator?.id && member.id === operator.id) ? 'active' : channelStatus(merged);
+      node.innerHTML = avatarFor(merged, status);
       const face = node.firstElementChild;
       const label = member.name || member.id || 'Channel member';
       face.setAttribute('aria-label', label + (status === 'working' ? ' — actively working' : ''));
-      face.title = label + toolSuffix(member, status);
+      face.title = label + toolSuffix(merged, status);
       pile.append(face);
     });
     if (members.length > visible.length) {
@@ -765,7 +771,9 @@
     // heartbeat-based channel roster status (which reads stale/dead for a
     // sleeping agent because no monitor is running to heartbeat).
     if (member?.live != null && member?.state != null) {
-      if (member.state === 'compacting') return 'sleeping';
+      // Compaction is its own state — surface it as "Compacting", not
+      // "Sleeping", so the drawer/face-pile agree with the Agent roster card.
+      if (member.state === 'compacting') return 'compacting';
       if (member.live) return member.busy ? 'working' : 'idle';
       const raw = String(member.state).toLowerCase();
       if (raw === 'error' || raw === 'errored') return 'errored';
@@ -775,7 +783,7 @@
     const raw = String(member?.status || (member?.busy ? 'working' : member?.live ? 'active' : 'offline')).toLowerCase();
     if (raw === 'error') return 'errored';
     if (raw === 'stale' || raw === 'dead') return 'offline';
-    return ['working','blocked','errored','sleeping','active','idle','offline'].includes(raw) ? raw : 'offline';
+    return ['working','blocked','errored','sleeping','active','idle','offline','compacting'].includes(raw) ? raw : 'offline';
   }
   function channelStatusLabel(status) { return status === 'errored' ? 'Errored' : status[0].toUpperCase() + status.slice(1); }
   function channelStatusChip(status) { return `<span class="channel-status-chip ${status}"><span class="dot"></span>${channelStatusLabel(status)}</span>`; }
@@ -1008,5 +1016,5 @@
   let refreshInterval = null;
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, messageCountLabel};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, messageCountLabel};
 })();
