@@ -815,6 +815,43 @@ check('roster clobber: the roster CustomEvent still dispatches even when not app
   }
 });
 
+// Connection pill: for the operator the workspace-wide stream is the live feed,
+// so the pill must follow IT — otherwise landing on Home / an inbox DM (no
+// per-channel stream) leaves the pill stuck "offline" while events flow. Bug:
+// startWorkspaceEvents never called setConnection, so a live workspace stream
+// couldn't clear the offline set by startEvents(no-channel).
+check('connection pill: workspace stream open sets it live', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents();
+  const ws = ES.instances.find(s => String(s.url).includes('/api/workspace/events'));
+  assert.ok(ws, 'workspace EventSource should be created');
+  ws.fireOpen();
+  const conn = cx.document.getElementById('h-conn');
+  assert.ok(String(conn.className).includes('live') && !String(conn.className).includes('offline'),
+    'workspace open should set the pill live, got: ' + conn.className);
+});
+check('connection pill: no per-channel stream does NOT clobber a live workspace pill', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents();
+  ES.instances.find(s => String(s.url).includes('/api/workspace/events')).fireOpen();
+  H.Trio.startEvents('');            // Home view / inbox DM — no channel
+  const conn = cx.document.getElementById('h-conn');
+  assert.ok(!String(conn.className).includes('offline'),
+    'no-channel must not flip a live workspace pill offline: ' + conn.className);
+  assert.ok(String(conn.className).includes('live'));
+});
+check('connection pill: workspace error shows reconnecting, then recovers to live', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents();
+  const ws = ES.instances.find(s => String(s.url).includes('/api/workspace/events'));
+  ws.fireOpen(); ws.fireError();
+  const conn = cx.document.getElementById('h-conn');
+  assert.ok(String(conn.className).includes('reconnect'), 'workspace error should show reconnecting: ' + conn.className);
+  ws.fireOpen();
+  assert.ok(String(conn.className).includes('live') && !String(conn.className).includes('offline'));
+  H.Trio.stopWorkspaceEvents();       // reset module workspaceLive for later tests
+});
+
 // The workspace refresh loop (15s interval + on-message) must re-poll
 // /api/agents so state.agents — read by the drawer, face-pile, and roster card
 // — stays fresh between Agent-roster page visits, and repaint the face-pile.
