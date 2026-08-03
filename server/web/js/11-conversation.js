@@ -557,10 +557,12 @@
     // 04-events.js::dispatch guards its own state.members write the same way
     // (exact channel match, so a missing channel fails closed), but listeners
     // re-derive from the raw detail and bypass it — so re-check identically.
+    // Ignore a foreign-channel tick WITHOUT re-rendering: only the open
+    // channel's roster changes what this view paints (name/sigil resolution),
+    // and these ticks arrive constantly on the multiplexed stream.
     const detail = event.detail;
-    if (detail && detail.channel === state.channel && Array.isArray(detail.members)) {
-      state.members = new Map(detail.members.map(m => [m.id, m]));
-    }
+    if (!detail || detail.channel !== state.channel) return;
+    if (Array.isArray(detail.members)) state.members = new Map(detail.members.map(m => [m.id, m]));
     render();
   }
   function onBoot(event) { state.operator = event.detail?.operator || state.operator; }
