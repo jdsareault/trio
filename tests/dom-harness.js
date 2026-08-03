@@ -448,9 +448,13 @@ function makeLocalStorage() {
 }
 
 class FakeEventSource {
-  constructor() { this.readyState = 0; }
-  addEventListener() {} removeEventListener() {} close() {}
+  constructor(url) { this.url = url; this.readyState = 0; this.closed = false; FakeEventSource.instances.push(this); }
+  addEventListener() {} removeEventListener() {} close() { this.closed = true; }
+  // Test helpers to drive the connection lifecycle the real EventSource fires.
+  fireOpen() { this.readyState = 1; if (this.onopen) this.onopen(); }
+  fireError() { if (this.onerror) this.onerror(); }
 }
+FakeEventSource.instances = [];
 
 function buildSandbox() {
   const document = makeDocument();
