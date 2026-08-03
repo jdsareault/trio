@@ -913,7 +913,16 @@ class EventHub:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             members = self._fetch_roster(db)
-            payloads.append(json.dumps({"type": "roster", "members": members}))
+            # Stamped for the same reason as message events (see the comment
+            # a few lines below on _message_event's channel field): the
+            # cross-channel workspace stream multiplexes every hub's roster
+            # into one connection, and the client must be able to tell which
+            # channel a roster snapshot belongs to before applying it —
+            # otherwise viewing channel A while channel B's roster ticks
+            # replaces A's member list with B's (LOTC bug: a viewer briefly
+            # saw AGENT_INBOX_CHANNEL's full roster — every agent ever
+            # created — while looking at an unrelated channel).
+            payloads.append(json.dumps({"type": "roster", "channel": self.channel, "members": members}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
                 "choices, selection, reply_to, confidence, recipients, retracted_at, retraction_reason, edited_at, created_at "
@@ -1162,7 +1171,7 @@ class EventHub:
                     snapshot = json.dumps(members, sort_keys=True)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
-                        self._broadcast({"type": "roster", "members": members})
+                        self._broadcast({"type": "roster", "channel": self.channel, "members": members})
 
                 except sqlite3.Error as e:
                     sys.stderr.write(f"[nth_web] poll error: {e}\n")

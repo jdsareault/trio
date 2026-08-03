@@ -122,6 +122,15 @@ try:
     # _watch_loop comments).
     check("every message event in the feed is stamped with this hub's channel",
           all(e.get("channel") == CH for e in got if e.get("type") == "message"))
+
+    # Same requirement for the roster event the prime snapshot includes —
+    # LOTC bug: this was unstamped, so the client's dispatch() applied ANY
+    # roster tick (from any multiplexed channel) unconditionally, letting
+    # a viewer's member list get replaced by a completely different
+    # channel's (worst case: AGENT_INBOX_CHANNEL's — every agent ever
+    # created) roster mid-view.
+    check("the roster event in the feed is stamped with this hub's channel",
+          any(e.get("type") == "roster" and e.get("channel") == CH for e in got))
 finally:
     hub.stop()
 

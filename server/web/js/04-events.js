@@ -24,7 +24,15 @@
   function dispatch(payload) {
     if (payload == null) return;
     const type = payload.type || 'message';
-    if (type === 'roster' && Array.isArray(payload.members)) {
+    // Cross-channel chimes wired up a second, multiplexed SSE stream
+    // (/api/workspace/events) that emits a 'roster' event per channel's
+    // hub, not just the one currently open. This used to overwrite
+    // Trio.state.members unconditionally on ANY roster event — so another
+    // channel's roster tick (worse, AGENT_INBOX_CHANNEL's, which lists
+    // every agent ever created) could replace the currently-viewed
+    // channel's member list out from under the user. Only apply it when
+    // the event is actually FOR the channel being viewed.
+    if (type === 'roster' && Array.isArray(payload.members) && payload.channel === Trio.state.channel) {
       Trio.state.members = new Map(payload.members.map(member => [member.id, member]));
     }
     events.dispatchEvent(new CustomEvent(type, { detail: payload }));
@@ -64,4 +72,9 @@
   Trio.startWorkspaceEvents = startWorkspaceEvents;
   Trio.stopWorkspaceEvents = stopWorkspaceEvents;
   Trio.events = events;
+  // Exposed for testability — the DOM test harness has no real EventSource,
+  // so this is the entry point tests use to simulate an SSE payload arriving
+  // (from either stream; dispatch() itself doesn't know which one a given
+  // payload came from, by design — see the cross-channel roster-clobber fix).
+  Trio.dispatchSSEEvent = dispatch;
 })();
