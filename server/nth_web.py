@@ -473,40 +473,63 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
               (members.last_seen/messenger_heartbeat, ~10s) and the activity
               hooks / trio RPCs (sessions.last_seen) keep it fresh, so a busy
               agent with either signal stays live; a crash clears it in ~1 min.
-    working — mid-turn per member_status: acted since its last turn end. Uses the
-              RAW session activity (sessions.last_seen), never the
-              Monitor-inflated members.last_seen — mirrors _fetch_roster. MAX over
-              the agent's sessions is correct: one process shares one timeline, so
-              the latest event across its channels being activity (vs a turn end)
-              is exactly "working".
+    working — mid-turn per member_status: acted since its last turn end, AND that
+              session is itself fresh. Uses the RAW session activity
+              (sessions.last_seen), never the Monitor-inflated
+              members.last_seen — mirrors _fetch_roster.
+
+    Aggregation is PER SESSION, not a column-wise MAX: last_turn_end is written
+    per channel by the turn hook, so MAX(activity) vs MAX(turn_end) across an
+    agent's channels would compare activity in one channel against a turn-end in
+    another (false idle/working for a multi-channel agent). Instead each
+    member/session row is classified on its own (activity vs its own turn-end)
+    and the agent is fresh/working if ANY of its rows is. Gating `working` on the
+    row's own freshness keeps the tuple coherent: working ⇒ fresh (never a
+    live:false, busy:true payload downstream).
     """
     out: Dict[str, Tuple[bool, bool]] = {}
     try:
         rows = db.execute(
-            "SELECT m.id AS aid, "
-            "  MAX(m.last_seen) AS m_ls, MAX(m.messenger_heartbeat) AS m_hb, "
-            "  MAX(m.status_text) AS status_text, "
-            "  MAX(s.last_seen) AS s_ls, MAX(s.last_turn_end) AS s_turn_end, "
-            "  MAX(s.blocked_since) AS blocked_since "
+            "SELECT m.id AS aid, m.last_seen AS m_ls, "
+            "  m.messenger_heartbeat AS m_hb, m.status_text AS status_text, "
+            "  s.last_seen AS s_ls, s.last_turn_end AS s_turn_end, "
+            "  s.blocked_since AS blocked_since "
             "FROM members m "
             "LEFT JOIN sessions s "
-            "  ON s.member_id = m.id AND s.channel = m.channel AND s.revoked_at IS NULL "
-            "GROUP BY m.id"
+            "  ON s.member_id = m.id AND s.channel = m.channel AND s.revoked_at IS NULL"
         ).fetchall()
     except sqlite3.Error:
         return out
     now = datetime.now(timezone.utc).timestamp()
     for r in rows:
-        effective = max(r["m_ls"] or "", r["m_hb"] or "", r["s_ls"] or "") or None
-        secs = _iso_secs(effective)
-        fresh = secs is not None and (now - secs) < LIVE_SECONDS
+        # This channel's own freshest heartbeat, from any source.
+        hb = max(r["m_ls"] or "", r["m_hb"] or "", r["s_ls"] or "") or None
+        secs = _iso_secs(hb)
+        row_fresh = secs is not None and (now - secs) < LIVE_SECONDS
         status = member_status(
-            effective, r["status_text"] or "",
+            hb, r["status_text"] or "",
             session_activity_iso=(r["s_ls"] or None),
             last_turn_end_iso=(r["s_turn_end"] or None),
             blocked_since_iso=(r["blocked_since"] or None))
-        out[r["aid"]] = (fresh, status == "working")
+        row_working = row_fresh and status == "working"
+        prev_fresh, prev_working = out.get(r["aid"], (False, False))
+        out[r["aid"]] = (prev_fresh or row_fresh, prev_working or row_working)
     return out
+
+
+def _agent_is_live(is_running: bool, heartbeat_fresh: bool, state: str) -> bool:
+    """Whether /api/agents should report an agent connected.
+
+    Live if this process holds a running handle (is_running), OR it is
+    heartbeating AND its DB state says it should be up. Excluding sleeping/
+    stopped/errored is what stops a just-hibernated agent — whose last heartbeat
+    is still <LIVE_SECONDS old — from flashing "connected" for a minute before it
+    settles to Sleeping/Resting.
+    """
+    if is_running:
+        return True
+    return heartbeat_fresh and (state or "").lower() not in (
+        nsup.ST_SLEEPING, nsup.ST_STOPPED, nsup.ST_ERRORED)
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -3919,6 +3942,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 dm_ready = (not archived) and db.execute(
                     "SELECT 1 FROM agent_channels WHERE agent_id=? AND channel=?",
                     (r["id"], AGENT_INBOX_CHANNEL)).fetchone() is not None
+                _hb_fresh, _agent_working = alive_map.get(r["id"], (False, False))
+                _agent_live = _agent_is_live(
+                    sup.is_running(r["id"]), _hb_fresh, r["state"] or "")
                 agents.append({
                     "id": r["id"], "name": r["name"], "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
@@ -3936,10 +3962,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "archived_at": r["archived_at"],
                     # Live if this process holds a live handle OR the agent is
                     # heartbeating (reclaim/cross-restart agents have no handle
-                    # here). Busy if compacting OR mid-turn — is_busy alone is
-                    # compaction-only, so "Working" never showed for real work.
-                    "live": sup.is_running(r["id"]) or alive_map.get(r["id"], (False, False))[0],
-                    "busy": sup.is_busy(r["id"]) or alive_map.get(r["id"], (False, False))[1],
+                    # here) AND its DB state says it should be up — so a just-
+                    # hibernated/stopped/errored agent whose last heartbeat is
+                    # still <60s old reads sleeping/offline immediately, not a
+                    # 60s "Active" flash. Busy if compacting OR mid-turn (is_busy
+                    # alone is compaction-only, so "Working" never showed for real
+                    # work), gated on live so the pair can never be
+                    # live:false/busy:true.
+                    "live": _agent_live,
+                    "busy": sup.is_busy(r["id"]) or (_agent_working and _agent_live),
                     "queued": sup.queued_count(r["id"]),
                     "created_at": r["created_at"],
                     "last_active_at": r["last_active_at"],
