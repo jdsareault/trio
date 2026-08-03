@@ -251,6 +251,41 @@ try:
     finally:
         web.ensure_operator_row = _orig_eor
 
+    # Sustained lock: every attempt hits a lock -> the retries exhaust and the
+    # endpoint returns a distinct 503 "busy, retry" (NOT a misleading 500), and
+    # it actually made the full set of attempts.
+    persist = {"n": 0}
+
+    def _always_locked(db, channel, ident):
+        persist["n"] += 1
+        raise _s3.OperationalError("database is locked")
+
+    web.ensure_operator_row = _always_locked
+    try:
+        st, d = http(port, "/api/channels", method="POST",
+                     body={"code": "never-lands", "topic": ""})
+        check("create: sustained lock exhausts retries -> 503 (not 500)", st == 503)
+        check("create: sustained lock tried the full 4 attempts", persist["n"] == 4)
+    finally:
+        web.ensure_operator_row = _orig_eor
+    _db = _s3.connect(str(srv.DB_PATH))
+    ghost = _db.execute("SELECT COUNT(*) FROM channels WHERE code='never-lands'").fetchone()[0]
+    _db.close()
+    check("create: a fully-failed create leaves no channel row", ghost == 0)
+
+    # Race loser: a UNIQUE-violation on the code PK (two operators, same code,
+    # both past the pre-check) is reported as a clean 409, not a raw 500.
+    def _integrity_clash(db, channel, ident):
+        raise _s3.IntegrityError("UNIQUE constraint failed: channels.code")
+
+    web.ensure_operator_row = _integrity_clash
+    try:
+        st, d = http(port, "/api/channels", method="POST",
+                     body={"code": "race-loser", "topic": ""})
+        check("create: a race UNIQUE clash -> 409 (not 500)", st == 409)
+    finally:
+        web.ensure_operator_row = _orig_eor
+
     # Guest confinement: with a non-all-seeing identity, only the default channel
     # is reachable. Monkeypatch is_all_seeing (loopback always resolves operator
     # otherwise) and pin a default channel.

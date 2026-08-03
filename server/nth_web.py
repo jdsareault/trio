@@ -3694,11 +3694,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
                                    (created.lastrowid, code))
                 self._json({"ok": True, "channel": {"code": code, "topic": topic}}, status=201)
                 return
+            except sqlite3.IntegrityError:
+                # Lost a race to create the same code (the pre-check passed for
+                # both writers, one INSERT won the UNIQUE code PK). Report it as
+                # the same clean 409 the pre-check gives, not a raw 500.
+                self._error(409, "channel already exists")
+                return
             except sqlite3.OperationalError as e:
                 last_err = e
-                if _is_lock_error(e) and attempt < 3:
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
+                if _is_lock_error(e):
+                    if attempt < 3:
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    break  # retries exhausted -> 503 below
                 self._error(500, f"db error: {e}")
                 return
             except sqlite3.Error as e:

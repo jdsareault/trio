@@ -568,9 +568,11 @@
     // would therefore vanish silently ("modal closed, no channel"). To make
     // failure visible and retryable we surface the server's actual error and
     // reopen the form pre-filled with what the operator typed. The code is
-    // trimmed/lowercased before submit so a stray space or case can't slip
-    // past into a request the server would reject.
-    const body = `<label>Channel code<input name="code" required pattern="[a-z0-9][a-z0-9-]*" value="${esc(prefill.code || '')}"></label><label>Topic<input name="topic" value="${esc(prefill.topic || '')}"></label>`;
+    // trimmed/lowercased before submit so a stray space or capital just works
+    // instead of the browser's cryptic native-pattern bubble; anything the
+    // server still rejects comes back as a clear toast (and a reopened form),
+    // so we deliberately don't set an HTML `pattern` here.
+    const body = `<label>Channel code<input name="code" required value="${esc(prefill.code || '')}"></label><label>Topic<input name="topic" value="${esc(prefill.topic || '')}"></label>`;
     modal('Create channel', body, async node => {
       const f = new FormData(node.querySelector('form'));
       const code = String(f.get('code') || '').trim().toLowerCase();
