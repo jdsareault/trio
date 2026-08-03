@@ -35,7 +35,8 @@ CREATE TABLE agents (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
   base_prompt TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'stopped',
   managed INTEGER NOT NULL DEFAULT 1, session_id TEXT, pid INTEGER, owner TEXT,
-  effort TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_active_at TEXT);
+  effort TEXT NOT NULL DEFAULT '', cwd TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, last_active_at TEXT);
 """
 
 
@@ -67,7 +68,8 @@ def main() -> int:
     check("build_spawn_argv: non-blocking permission mode",
           "--permission-mode" in argv and "acceptEdits" in argv)
     check("build_spawn_argv: AskUserQuestion disallowed",
-          "--disallowedTools" in argv and "AskUserQuestion" in argv)
+          "--disallowedTools" in argv
+          and "AskUserQuestion" in argv[argv.index("--disallowedTools") + 1])
     check("build_spawn_argv: every Trio tool is pre-approved headlessly",
           "--allowedTools" in argv
           and "mcp__nth-trio__trio_dm" in argv[argv.index("--allowedTools") + 1]
@@ -76,6 +78,20 @@ def main() -> int:
           argv[argv.index("--model") + 1] == "sonnet"
           and argv[argv.index("--resume") + 1] == "sX"
           and "--mcp-config" in argv and "--append-system-prompt" in argv)
+    check("build_spawn_argv: permission-prompt-tool wired when mcp_config present",
+          "--permission-prompt-tool" in argv
+          and argv[argv.index("--permission-prompt-tool") + 1] == sup.PERMISSION_PROMPT_TOOL)
+    check("build_spawn_argv: permission-prompt-tool itself is model-disallowed",
+          sup.PERMISSION_PROMPT_TOOL in argv[argv.index("--disallowedTools") + 1])
+
+    argv_no_mcp = sup.build_spawn_argv(model="sonnet")
+    check("build_spawn_argv: no permission-prompt-tool without an mcp_config",
+          "--permission-prompt-tool" not in argv_no_mcp)
+
+    argv_bypass = sup.build_spawn_argv(mcp_config="{}", permission_mode="bypassPermissions")
+    check("build_spawn_argv: no permission-prompt-tool under bypassPermissions",
+          "--permission-prompt-tool" not in argv_bypass)
+
     import json as _json
     cfg = _json.loads(sup.build_mcp_config("/x/nth_server.py", python_cmd="py3"))
     check("build_mcp_config: registers nth-trio stdio server pointed at nth_server",
@@ -205,6 +221,34 @@ def main() -> int:
     check("reconcile flips stale running→errored", _row(db_path, "agconc")["state"] == "errored")
     check("reconcile clears the dead process's pending turn context",
           "agconc" not in s._pending)
+
+    # ── Claude-side approval inbox (DB-backed; see nth_server.approvals) ──
+    approvals_db = sqlite3.connect(str(db_path))
+    approvals_db.executescript("""
+        CREATE TABLE approvals (
+            id TEXT PRIMARY KEY, agent_id TEXT NOT NULL DEFAULT '',
+            agent_name TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'claude',
+            tool_name TEXT NOT NULL DEFAULT '', tool_input TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending', decision TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, resolved_at TEXT);
+    """)
+    approvals_db.execute(
+        "INSERT INTO approvals (id, agent_id, agent_name, tool_name, status, created_at) "
+        "VALUES ('cap_1', 'agconc', 'Concurrent', 'Bash', 'pending', ?)", (sup.now_iso(),))
+    approvals_db.commit()
+    approvals_db.close()
+    check("pending_approvals: surfaces the pending row",
+          [a["id"] for a in s.pending_approvals()] == ["cap_1"])
+    check("resolve_approval: rejects an unknown decision word",
+          s.resolve_approval("cap_1", "allow") is False)
+    check("resolve_approval: accept resolves it",
+          s.resolve_approval("cap_1", "accept") is True)
+    check("resolve_approval: no longer pending after resolve",
+          s.pending_approvals() == [])
+    check("resolve_approval: re-resolving an already-resolved row is a no-op",
+          s.resolve_approval("cap_1", "decline") is False)
+    check("resolve_approval: unknown id is a no-op",
+          s.resolve_approval("cap_missing", "accept") is False)
 
     # ── wake an agent that never spawned (no session_id) → cold start ──
     db5 = sqlite3.connect(str(db_path))

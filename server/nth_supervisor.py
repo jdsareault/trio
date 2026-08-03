@@ -54,6 +54,12 @@ TRIO_TOOL_NAMES = (
 MANAGED_ALLOWED_TOOLS = ",".join(
     f"mcp__nth-trio__trio_{name}" for name in TRIO_TOOL_NAMES)
 
+# The MCP tool Claude Code calls itself (never the model) to resolve a gated
+# tool call — see nth_server.nth_permission_prompt. Only meaningful when the
+# agent actually has the nth-trio MCP server wired in (mcp_config) and its
+# permission mode can actually produce a prompt (not bypassPermissions).
+PERMISSION_PROMPT_TOOL = "mcp__nth-trio__trio_permission_prompt"
+
 # Map the web dashboard permission profile to a `claude --permission-mode`.
 PERMISSION_MODES = {
     "observe": "manual",
@@ -167,7 +173,7 @@ def build_spawn_argv(
     resume_session_id: str = "",
     permission_mode: str = "auto",
     extra_dirs: Optional[List[str]] = None,
-    disallowed_tools: str = "AskUserQuestion",
+    disallowed_tools: str = f"AskUserQuestion,{PERMISSION_PROMPT_TOOL}",
     allowed_tools: str = MANAGED_ALLOWED_TOOLS,
     effort: str = "",
     _runtime: Optional[ClaudeRuntime] = None,
@@ -201,6 +207,11 @@ def build_spawn_argv(
         argv += ["--append-system-prompt", system_prompt]
     if mcp_config:
         argv += ["--mcp-config", mcp_config]
+        # Only wire the approval gate when there's an MCP server to resolve it
+        # against, and only when the mode can actually produce a prompt —
+        # bypassPermissions never asks, so the flag would be dead weight.
+        if permission_mode != "bypassPermissions":
+            argv += ["--permission-prompt-tool", PERMISSION_PROMPT_TOOL]
     if resume_session_id:
         argv += ["--resume", resume_session_id]
     # Make sure uploaded attachments are accessible to the headless agent's
@@ -758,6 +769,44 @@ class AgentSupervisor:
                         if not pending:
                             self._pending.pop(agent_id, None)
             return ok
+
+    # ── approvals ──
+    # DB-backed, unlike Codex's in-memory approval inbox (nth_codex_runtime.py)
+    # — trio_permission_prompt runs inside the spawned `claude` subprocess's
+    # own nth_server.py MCP child, a different OS process from whatever hub
+    # holds this AgentSupervisor, so the `approvals` table (nth_server.get_db)
+    # is the only thing both sides can see.
+    def pending_approvals(self) -> List[Dict[str, Any]]:
+        db = self._db()
+        try:
+            columns = {r[1] for r in db.execute("PRAGMA table_info(approvals)")}
+            if not columns:
+                return []
+            rows = db.execute(
+                "SELECT * FROM approvals WHERE provider='claude' AND status='pending' "
+                "ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def resolve_approval(self, approval_id: str, decision: str) -> bool:
+        if decision not in ("accept", "decline"):
+            return False
+        db = self._db()
+        try:
+            columns = {r[1] for r in db.execute("PRAGMA table_info(approvals)")}
+            if not columns:
+                # No such table yet (a hub-only DB nth_server.py hasn't
+                # migrated) — nothing to resolve, not an error (LOTC/Ents).
+                return False
+            cur = db.execute(
+                "UPDATE approvals SET status='resolved', decision=?, resolved_at=? "
+                "WHERE id=? AND provider='claude' AND status='pending'",
+                (decision, now_iso(), approval_id))
+            db.commit()
+            return cur.rowcount > 0
+        finally:
+            db.close()
 
     def is_running(self, agent_id: str) -> bool:
         with self._lock:

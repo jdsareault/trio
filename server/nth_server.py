@@ -68,6 +68,12 @@ def _find_free_port(preferred: int = 8000) -> int:
 SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# One nth_server.py subprocess is spawned per managed Claude agent (each
+# `claude` invocation gets its own --mcp-config stdio child), so this process
+# only ever speaks for one Trio identity. Captured on trio_connect so
+# trio_permission_prompt can tag approvals with who they're for.
+_AGENT_IDENTITY: dict[str, str] = {"id": "", "name": ""}
+
 # ── Console feed ──────────────────────────────────────────────────────
 # Human-readable live feed for the server terminal window.
 # ANSI colors: 90=gray, 32=green, 33=yellow, 35=magenta, 36=cyan, 31=red, 1=bold
@@ -586,6 +592,31 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass
 
+    # Claude-side permission approvals (mirrors the in-memory Codex approval
+    # inbox in nth_codex_runtime.py, but DB-backed: the tool that raises these
+    # runs in a headless `claude` subprocess, a different OS process from the
+    # hub that resolves them, so a shared table is the only thing both sides
+    # can see). See trio_permission_prompt below + nsup.AgentSupervisor's
+    # pending_approvals/resolve_approval.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS approvals (
+            id          TEXT PRIMARY KEY,
+            agent_id    TEXT NOT NULL DEFAULT '',
+            agent_name  TEXT NOT NULL DEFAULT '',
+            provider    TEXT NOT NULL DEFAULT 'claude',
+            tool_name   TEXT NOT NULL DEFAULT '',
+            tool_input  TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'pending',
+            decision    TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            resolved_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_approvals_status
+        ON approvals (status, id)
+    """)
+
     conn.commit()
     return conn
 
@@ -1074,6 +1105,16 @@ def nth_connect(
             db.commit()
             action = "created"
 
+        # Captured only now that join/reclaim has actually succeeded (not
+        # before reclaim_secret validation, which can reject this call) and
+        # using the FINAL member_id — the non-reclaim path can re-mint it on
+        # a collision (line ~1085), so an earlier snapshot could be stale.
+        # A rejected reclaim attempt must never poison this process's
+        # approval-inbox identity with someone else's spoofed member_id
+        # (Aragorn).
+        _AGENT_IDENTITY["id"] = member_id
+        _AGENT_IDENTITY["name"] = name
+
         # Record the self-reported model tier on the freshly-joined row (one
         # UPDATE covers both the join and create branches).
         if model:
@@ -1204,6 +1245,96 @@ def nth_connect(
 
     finally:
         db.close()
+
+
+# How long trio_permission_prompt waits for a human to resolve a pending
+# approval from the Atrium dashboard before auto-denying. Mirrors the Codex
+# approval-inbox timeout in nth_codex_runtime.py so both providers behave the
+# same from an operator's perspective.
+APPROVAL_TIMEOUT_SECONDS = 120.0
+APPROVAL_POLL_INTERVAL_SECONDS = 0.5
+
+# Caps mirroring MAX_SUMMARY_LENGTH/MAX_SKILLS_LENGTH above — a gated tool
+# call's name/input is driven by the CLI runtime rather than a user directly,
+# but nothing stops an oversized value from bloating this row and the
+# dashboard's /api/approvals payload (Aragorn).
+MAX_APPROVAL_FIELD_LENGTH = 200
+MAX_APPROVAL_INPUT_LENGTH = 4000
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_permission_prompt")
+def nth_permission_prompt(tool_name: str, input: dict | None = None) -> str:
+    """Framework-invoked permission gate — NOT a model-facing tool.
+
+    Claude Code calls this itself (via --permission-prompt-tool) whenever a
+    managed headless agent's tool call isn't auto-allowed; the model never
+    chooses to call it. Files a pending row in `approvals` and blocks, polling
+    the DB, until a human resolves it from the Atrium dashboard's approval
+    inbox (nsup.AgentSupervisor.resolve_approval) or the timeout denies it.
+
+    Returns the JSON text Claude Code's permission-prompt-tool protocol
+    expects: {"behavior": "allow"} or {"behavior": "deny", "message": str}.
+    """
+    approval_id = f"cap_{secrets.token_hex(6)}"
+    now = now_iso()
+    agent_id = (_AGENT_IDENTITY["id"] or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    agent_name = (_AGENT_IDENTITY["name"] or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    safe_tool_name = (tool_name or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    tool_input = json.dumps(input or {})[:MAX_APPROVAL_INPUT_LENGTH]
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO approvals (id, agent_id, agent_name, provider, "
+            "tool_name, tool_input, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (approval_id, agent_id, agent_name, "claude",
+             safe_tool_name, tool_input, "pending", now))
+        db.commit()
+    finally:
+        db.close()
+
+    decision = "decline"
+    deadline = time.monotonic() + APPROVAL_TIMEOUT_SECONDS
+    resolved = False
+    while time.monotonic() < deadline:
+        time.sleep(APPROVAL_POLL_INTERVAL_SECONDS)
+        db = get_db()
+        try:
+            row = db.execute(
+                "SELECT status, decision FROM approvals WHERE id = ?",
+                (approval_id,)).fetchone()
+        finally:
+            db.close()
+        if row and row["status"] == "resolved":
+            decision = row["decision"] or "decline"
+            resolved = True
+            break
+
+    if not resolved:
+        db = get_db()
+        try:
+            cur = db.execute(
+                "UPDATE approvals SET status='expired', resolved_at=? "
+                "WHERE id=? AND status='pending'", (now_iso(), approval_id))
+            db.commit()
+            if cur.rowcount == 0:
+                # A human resolved it in the gap between our last poll and
+                # this expiry write (WHERE status='pending' made it a no-op)
+                # — honor what's actually persisted rather than reporting a
+                # stale deny for a decision the operator already made (Sauron).
+                row = db.execute(
+                    "SELECT decision FROM approvals WHERE id = ?",
+                    (approval_id,)).fetchone()
+                if row and row["decision"]:
+                    decision = row["decision"]
+        finally:
+            db.close()
+
+    if decision == "accept":
+        return json.dumps({"behavior": "allow"})
+    return json.dumps({
+        "behavior": "deny",
+        "message": "Denied (or timed out waiting for a response) via the Atrium approval inbox.",
+    })
 
 
 def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
