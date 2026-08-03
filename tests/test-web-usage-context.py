@@ -105,6 +105,65 @@ finally:
         manager.stop(agent_id)
     os.environ.pop("FAKE_AGENT_USAGE_TOKENS", None)
 
+# ── Part A2: a multi-tool-call turn must read the LAST assistant event's own
+# usage, not accumulate across the turn's internal API calls. LOTC/Sauron:
+# `result.usage` sums every internal request in the turn (each tool
+# round-trip re-reports the same cached history), so deriving context size
+# from it overcounts by ~N× for an N-tool-call turn — a turn that only
+# actually grew context to 40k tokens would read as ~200k (100%) if it made
+# 5 internal API calls. Exercise _handle_event directly (same pattern as
+# test-supervisor-output-bridge.py's manager._bridge_result) since a fake
+# multi-step turn isn't something fake_agent.py's protocol shape covers.
+db = srv.get_db(srv.DB_PATH)
+db.execute("UPDATE agents SET context_pct=NULL, context_tokens=NULL WHERE id=?", (agent_id,))
+db.commit()
+db.close()
+manager2 = sup.AgentSupervisor(db_path=srv.DB_PATH)
+manager2._handle_event(agent_id, {
+    "type": "assistant",
+    "message": {"usage": {"input_tokens": 5000, "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": 0}}})
+manager2._handle_event(agent_id, {
+    "type": "assistant",
+    "message": {"usage": {"input_tokens": 5000, "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": 35000}}})
+manager2._handle_event(agent_id, {
+    "type": "result", "is_error": False, "result": "done",
+    # A real result event's usage is the SUM across every internal request
+    # this turn made (5000+35000 twice over here) — if this were mistakenly
+    # read as context size it would report ~90k/45%, not the true ~40k/20%.
+    "usage": {"input_tokens": 10000, "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 70000}})
+db = sqlite3.connect(str(srv.DB_PATH)); db.row_factory = sqlite3.Row
+r2 = db.execute("SELECT context_pct, context_tokens FROM agents WHERE id=?", (agent_id,)).fetchone()
+db.close()
+check("context reflects the LAST assistant event's own usage (40k/20%), "
+      "not the result event's turn-accumulated usage (80k/40%)",
+      r2 is not None and r2["context_tokens"] == 40000
+      and abs((r2["context_pct"] or 0) - 20.0) < 0.01)
+
+# Negative/malformed usage fields must clamp to 0, never a negative percentage.
+db = srv.get_db(srv.DB_PATH)
+db.execute("UPDATE agents SET context_pct=NULL, context_tokens=NULL WHERE id=?", (agent_id,))
+db.commit()
+db.close()
+manager2._handle_event(agent_id, {
+    "type": "assistant",
+    "message": {"usage": {"input_tokens": -50000, "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": 0}}})
+db = sqlite3.connect(str(srv.DB_PATH)); db.row_factory = sqlite3.Row
+r3 = db.execute("SELECT context_pct, context_tokens FROM agents WHERE id=?", (agent_id,)).fetchone()
+db.close()
+check("a negative usage field clamps to 0, never stores a negative percentage",
+      r3 is not None and r3["context_tokens"] == 0 and r3["context_pct"] == 0.0)
+
+# Restore a known reading for Part B, which tests the serialization plumbing
+# (endpoint/roster field wiring), not the capture math exercised above.
+db = srv.get_db(srv.DB_PATH)
+db.execute("UPDATE agents SET context_pct=30.0, context_tokens=60000 WHERE id=?", (agent_id,))
+db.commit()
+db.close()
+
 # ── Part B: /api/agents + channel roster surface the fields ─────────────────
 web.NthWebHandler._default_channel = ""
 web.NthWebHandler.db_path = srv.DB_PATH

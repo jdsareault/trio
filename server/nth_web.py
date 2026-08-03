@@ -1932,7 +1932,6 @@ def ensure_agents_schema(conn) -> None:
         "archived_by": "TEXT",
         "context_pct": "REAL",
         "context_tokens": "INTEGER",
-        "context_updated_at": "TEXT",
     }
     for column, definition in agent_columns.items():
         try:

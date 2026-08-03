@@ -510,7 +510,6 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         "archived_by": "TEXT",
         "context_pct": "REAL",
         "context_tokens": "INTEGER",
-        "context_updated_at": "TEXT",
     }
     for column, definition in agent_columns.items():
         try:

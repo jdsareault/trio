@@ -452,15 +452,25 @@ class AgentSupervisor:
                 self._set_state(agent_id, state)
             except Exception:
                 pass
-        if evt.get("type") == "result":
-            usage = evt.get("usage")
+        if evt.get("type") == "assistant":
+            # Context occupancy must come from a single API response's own
+            # usage, not the turn-level `result` event: `result.usage` is
+            # ACCUMULATED across every internal API call the turn made (tool
+            # round-trips each add another request's cache_read_input_tokens
+            # on top), so it overcounts by roughly the number of tool calls
+            # and can peg near 100% on a mostly-empty context window. Each
+            # `assistant` event's message.usage is that one request's actual
+            # prompt size — the freshest one before the turn ends is the
+            # turn's real end-of-turn context size.
+            message = evt.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
             if isinstance(usage, dict):
                 try:
-                    tokens = (int(usage.get("input_tokens") or 0)
-                              + int(usage.get("cache_creation_input_tokens") or 0)
-                              + int(usage.get("cache_read_input_tokens") or 0))
-                    pct = min(100.0, round(
-                        100.0 * tokens / DEFAULT_CONTEXT_WINDOW, 1))
+                    tokens = max(0, int(usage.get("input_tokens") or 0)
+                                 + int(usage.get("cache_creation_input_tokens") or 0)
+                                 + int(usage.get("cache_read_input_tokens") or 0))
+                    pct = max(0.0, min(100.0, round(
+                        100.0 * tokens / DEFAULT_CONTEXT_WINDOW, 1)))
                     self._set_context(agent_id, pct, tokens)
                 except Exception:
                     pass
@@ -591,9 +601,8 @@ class AgentSupervisor:
         db = self._db()
         try:
             db.execute(
-                "UPDATE agents SET context_pct = ?, context_tokens = ?, "
-                "context_updated_at = ? WHERE id = ?",
-                (pct, tokens, now_iso(), agent_id))
+                "UPDATE agents SET context_pct = ?, context_tokens = ? WHERE id = ?",
+                (pct, tokens, agent_id))
             db.commit()
         except sqlite3.Error:
             pass

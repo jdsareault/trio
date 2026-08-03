@@ -178,7 +178,7 @@
     const chipCls = vm.archived ? 'archived' : vm.needsAttention ? 'offline' : vm.compacting || vm.busy ? 'thinking' : vm.live ? 'online' : 'idle';
     const chipLabel = vm.archived ? 'Archived' : vm.needsAttention ? 'Needs attention' : vm.compacting ? 'Compacting context…' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting';
     const contextTag = vm.contextPct == null ? '' :
-      `<span class="context-badge ${Trio.workspace.usageTone(vm.contextPct)}" title="${esc(String(Math.round(vm.contextPct)))}% of context window used">${esc(String(Math.round(vm.contextPct)))}% ctx</span>`;
+      `<span class="context-badge ${Trio.workspace.usageTone(vm.contextPct)}" title="${esc(String(Math.round(vm.contextPct)))}% of context window used">${esc(String(Math.round(vm.contextPct)))}% full</span>`;
     article.innerHTML = `<div class="ac-top">${avatar}<span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.archived ? 'Archived — restore to rejoin.' : vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${chipCls}"><span class="st-dot"></span>${esc(chipLabel)}</span>${contextTag}${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
     const actions = document.createElement('div'); actions.className = 'agent-actions';
     if (!vm.archived) {

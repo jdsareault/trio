@@ -349,7 +349,7 @@
     const agentList = Array.isArray(Trio.store?.get('agents.list')) ? Trio.store.get('agents.list') : Array.isArray(state.agents) ? state.agents : [];
     [['Hub', 'ok', 'Live'], ['Agents', 'ok', String(agentList.length) + ' connected'], ['Database', 'ok', 'Ready']].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${tone}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
     health.append(healthRow);
-    panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, recent, usage, health);
+    panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, usage, recent, health);
   }
   function renderAttention(panel) {
     panel.replaceChildren(); panel.append(viewHeader('Attention', 'Everything waiting for you, in one calm place'));
@@ -379,16 +379,26 @@
   }
   function timeAgo(iso) { if (!iso) return ''; try { const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; return Math.floor(h / 24) + 'd'; } catch { return ''; } }
   function usageTone(pct) { return pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : 'ok'; }
+  // Floors rather than rounds so "resets in Nh" is always a safe lower bound
+  // (a user who waits N hours never finds the reset already overdue), and
+  // distinguishes an already-past reset ("resets now" — the cached quota
+  // read is just stale) from one genuinely under an hour out.
   function resetLabel(unixSeconds) {
     if (!unixSeconds) return '';
     const ms = unixSeconds * 1000 - Date.now();
-    if (ms <= 0) return 'resets soon';
-    const h = Math.round(ms / 3600000);
-    return h < 1 ? 'resets soon' : h < 24 ? `resets in ${h}h` : `resets in ${Math.round(h / 24)}d`;
+    if (ms <= 0) return 'resets now';
+    const h = Math.floor(ms / 3600000);
+    if (h < 1) return 'resets within the hour';
+    if (h < 24) return `resets in ${h}h`;
+    return `resets in ${Math.floor(h / 24)}d`;
   }
   function usageMeter(label, pct, resetsAt) {
     const wrap = document.createElement('div'); wrap.className = 'usage-meter';
-    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    if (pct == null) {
+      wrap.innerHTML = `<div class="usage-meter-head"><span>${esc(label)}</span><span class="usage-meter-pct">unknown</span></div>`;
+      return wrap;
+    }
+    const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
     wrap.innerHTML = `<div class="usage-meter-head"><span>${esc(label)}</span><span class="usage-meter-pct">${esc(String(p))}%${resetsAt ? ' · ' + esc(resetLabel(resetsAt)) : ''}</span></div><div class="usage-meter-track"><div class="usage-meter-fill ${usageTone(p)}" style="width:${p}%"></div></div>`;
     return wrap;
   }
@@ -402,7 +412,10 @@
       const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Claude Code usage data not available.'; wrap.append(p);
     }
     if (!usage?.codex?.available) {
-      const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Codex usage data not available.'; wrap.append(p);
+      // Framed as "not tracked yet" rather than an error/failure state —
+      // this is permanently true until a Codex quota source exists, so it
+      // must never read like something is broken.
+      const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Codex usage tracking isn’t available yet.'; wrap.append(p);
     }
     return wrap;
   }
@@ -762,14 +775,17 @@
     const when = member.last_tool_at ? ` (${timeAgo(member.last_tool_at) || 'now'})` : '';
     return ` — using ${member.last_tool_name}${target}${when}`;
   }
-  // A small numeric "context left" hint, shown wherever a member's context
-  // usage is known (nth_supervisor persists it from a Claude Code result
-  // event's token usage). Absent for anyone that hasn't completed a turn yet
-  // — humans, freshly-spawned agents, or non-Claude providers.
+  // A small numeric context-fullness hint, shown wherever a member's context
+  // usage is known (nth_supervisor persists it from a Claude Code turn's
+  // token usage). Absent for anyone that hasn't completed a turn yet —
+  // humans, freshly-spawned agents, or non-Claude providers.
+  // LOTC/Frodo: "43% ctx" alone reads as directionally ambiguous (used vs.
+  // remaining, battery-meter mental model) — "% full" states the direction
+  // in the face of the badge, not just the hover tooltip.
   function contextBadge(member) {
     if (member?.context_pct == null) return '';
     const pct = Math.round(Number(member.context_pct));
-    return `<span class="context-badge ${usageTone(pct)}" title="${esc(String(pct))}% of context window used">${esc(String(pct))}% ctx</span>`;
+    return `<span class="context-badge ${usageTone(pct)}" title="${esc(String(pct))}% of context window used">${esc(String(pct))}% full</span>`;
   }
   function detailMember(member) {
     const name = member.name || member.id || 'Unknown member';
