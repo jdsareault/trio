@@ -893,13 +893,24 @@
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
-    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v" id="channel-drawer-msgcount">${state.messages?.size || 0}</span></div>${dm ? '' : `<div class="kv"><span class="k">Channel size</span><span class="v" id="channel-drawer-size">…</span></div>`}<div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
+    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div>${dm ? `<div class="kv"><span class="k">Channel size</span><span class="v channel-drawer-empty-inline">not available for DMs</span></div>` : `<div class="kv"><span class="k">Channel size</span><span class="v" id="channel-drawer-size" title="Rough estimate of this channel's message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div>`}<div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
     $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });
     $('edit-channel-objective')?.addEventListener('click', () => toast('Objective editing is coming soon'));
     $('archive-channel-drawer')?.addEventListener('click', () => { closeDetails(); archiveCurrent(); });
     refreshDrawerActivity();
+  }
+  // LOTC/Frodo: "Messages loaded" is exactly what state.messages.size is —
+  // the currently in-memory set, capped at 11-conversation.js's
+  // pruneMessages(500) — NOT literally "today" (no date filter exists) and
+  // not the conversation's full history. A busy channel pins at 500 and
+  // stops moving even as more arrive; showing "500+" instead of a frozen
+  // "500" makes that cap visible instead of looking broken.
+  const LOADED_MESSAGES_CAP = 500;
+  function messageCountLabel() {
+    const size = state.messages?.size || 0;
+    return size >= LOADED_MESSAGES_CAP ? `${LOADED_MESSAGES_CAP}+` : String(size);
   }
   // 2-significant-figure K/M formatting (1.2K, 12K, 120K, 1.2M) — avoids
   // Number.toPrecision's exponential-notation quirk for 3-digit values
@@ -923,13 +934,21 @@
   // time this is called. Previously "Messages today" only reflected
   // whatever was true at the moment the drawer happened to open — a message
   // arriving while it stayed open just sat there stale until close+reopen.
-  async function refreshDrawerActivity() {
+  async function refreshDrawerActivity(messageChannel) {
     const drawer = $('channel-drawer');
     if (!drawer || !drawer.classList.contains('open')) return;
     const countEl = $('channel-drawer-msgcount');
-    if (countEl) countEl.textContent = String(state.messages?.size || 0);
+    if (countEl) countEl.textContent = messageCountLabel();
     const sizeEl = $('channel-drawer-size');
     if (!sizeEl || !state.channel) return;
+    // LOTC/Legolas: 'message' fires for the workspace-wide stream, not just
+    // the open channel — a message anywhere used to refire this fetch for
+    // whatever channel's drawer happened to be open. Skip the network
+    // round-trip when we KNOW the event was for a different channel; a
+    // missing/ambiguous channel field (or an explicit call with none, e.g.
+    // the drawer's own open-time refresh) still fetches, since that's the
+    // safe default.
+    if (messageChannel != null && messageChannel !== state.channel) return;
     const fetchToken = ++drawerActivityFetchToken;
     try {
       const data = await api.get('/api/channel-size?channel=' + encodeURIComponent(state.channel));
@@ -941,14 +960,25 @@
       if (!el) return;
       const tokens = data.estimated_tokens || 0;
       const warn = tokens > CHANNEL_SIZE_WARN_TOKENS;
-      el.innerHTML = `${esc(formatTokenEstimate(tokens))} tokens (est.)${warn ? ' ' + WARNING_TRIANGLE_SVG : ''}`;
+      el.title = 'Rough estimate — message + sender text ÷ 4, plus per-message JSON overhead. Not an exact tokenizer count.';
+      el.innerHTML = `${esc(formatTokenEstimate(tokens))} tokens (est.)${warn ? ` <span title="Approaching ${esc(formatTokenEstimate(CHANNEL_SIZE_WARN_TOKENS))} tokens — agents' context may compact soon">${WARNING_TRIANGLE_SVG}</span>` : ''}`;
       el.classList.toggle('size-warn', warn);
-    } catch { if (fetchToken === drawerActivityFetchToken && sizeEl) sizeEl.textContent = '—'; }
+    } catch (e) {
+      if (fetchToken !== drawerActivityFetchToken || !sizeEl) return;
+      // LOTC/Frodo: collapsing every failure (403/404/500) to the same bare
+      // "—" left a scoped/guest viewer unable to tell "forbidden" apart from
+      // "broken" apart from "empty". At minimum distinguish the one case
+      // that's a normal, expected outcome (not authorized for this channel)
+      // from a genuine error.
+      sizeEl.textContent = e?.status === 403 ? 'not visible to you' : 'unavailable';
+      sizeEl.title = '';
+    }
   }
   let drawerActivityDebounce = null;
-  function onMessageForDrawer() {
+  function onMessageForDrawer(event) {
     clearTimeout(drawerActivityDebounce);
-    drawerActivityDebounce = setTimeout(refreshDrawerActivity, 400);
+    const messageChannel = event?.detail?.channel;
+    drawerActivityDebounce = setTimeout(() => refreshDrawerActivity(messageChannel), 400);
   }
   function openSearch() {
     if (!searchDialog) { searchDialog = document.createElement('dialog'); searchDialog.id = 'trio-search'; searchDialog.className = 'search-modal'; document.body.append(searchDialog); }
@@ -962,5 +992,5 @@
   let refreshInterval = null;
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('message', onMessageForDrawer); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('message', onMessageForDrawer); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, messageCountLabel};
 })();

@@ -132,6 +132,18 @@ check('formatTokenEstimate: low millions round to 2 sig figs with an M suffix', 
 check('formatTokenEstimate: mid millions round to 2 sig figs with an M suffix', formatTokenEstimate(12345678) === '12M');
 check('formatTokenEstimate: zero renders as "0"', formatTokenEstimate(0) === '0');
 
+// LOTC/Frodo: "Messages loaded" (formerly mislabeled "Messages today") is
+// state.messages.size, which 11-conversation.js's pruneMessages(500) caps —
+// a busy channel pins at 500 and stops moving even as more arrive. "500+"
+// makes that cap visible instead of the counter looking frozen/broken.
+const messageCountLabel = base.Trio.workspace.messageCountLabel;
+base.Trio.state.messages = new Map([[1, {}], [2, {}], [3, {}]]);
+check('messageCountLabel: shows the exact count under the cap', messageCountLabel() === '3');
+base.Trio.state.messages = new Map(Array.from({ length: 500 }, (_, i) => [i, {}]));
+check('messageCountLabel: shows "500+" at the pruneMessages cap, not a frozen "500"', messageCountLabel() === '500+');
+base.Trio.state.messages = new Map();
+check('messageCountLabel: empty state reads "0"', messageCountLabel() === '0');
+
 base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
 check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');

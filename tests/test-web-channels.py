@@ -146,14 +146,22 @@ try:
     db = _sqlite3.connect(str(srv.DB_PATH))
     total_count, content_chars, name_chars = db.execute(
         "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)),0), COALESCE(SUM(LENGTH(member_name)),0) "
-        "FROM messages WHERE channel='chan-a'").fetchone()
+        "FROM messages WHERE channel='chan-a' "
+        "AND (recipients IS NULL OR recipients='' OR recipients='[]')").fetchone()
     db.close()
-    # Every message in the channel counts here (including the private DM
-    # sent above) — this is a total occupancy estimate, not the broadcast-
-    # only unread count from the /api/channels checks above.
-    check("channel-size: message_count matches the channel's actual row count "
-          "(all messages, including DMs — unlike the unread badge)",
+    # LOTC/Aragorn: the private DM sent above must NOT be folded into this
+    # total — every other aggregate in this file treats `recipients` as a
+    # hard visibility boundary, and this endpoint is reachable by any
+    # authorized channel member, not just an all-seeing operator.
+    check("channel-size: message_count excludes the private DM sent above "
+          "(broadcast-only, like the unread badge)",
           d.get("message_count") == total_count)
+    db = _sqlite3.connect(str(srv.DB_PATH))
+    all_count = db.execute("SELECT COUNT(*) FROM messages WHERE channel='chan-a'").fetchone()[0]
+    db.close()
+    check("channel-size: strictly fewer messages than the naive all-messages count "
+          "(the DM is genuinely excluded, not coincidentally equal)",
+          d.get("message_count") < all_count)
     expected_tokens = round((content_chars + name_chars + d["message_count"] * 80) / 4)
     check("channel-size: estimated_tokens matches char/4 + per-message JSON overhead",
           d.get("estimated_tokens") == expected_tokens)

@@ -4641,6 +4641,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
         punctuation) each message costs beyond its own content when actually
         delivered to a model, not just the raw text a human would count.
         Mirrors _handle_tasks' identity gate + short read-connection idioms.
+
+        Excludes private/DM-recipients-scoped messages (LOTC/Aragorn): every
+        other place this file aggregates over `messages` treats `recipients`
+        as a hard visibility boundary (the unread-count subquery, search,
+        the SSE broadcaster's can_see() gate) — this endpoint is reachable
+        by any authorized member of the channel, not just an all-seeing
+        operator, so folding DM lengths in would leak a metadata signal
+        (existence + approximate size of a private exchange) across that
+        boundary to someone who isn't a party to it. It's also simply wrong
+        as a context-size estimate: an agent's own context for a channel
+        never includes DMs addressed to other members.
         """
         qs = parse_qs(parsed.query)
         want = (qs.get("channel", [""])[0] or "").strip()
@@ -4663,7 +4674,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             count, content_chars, name_chars = db.execute(
                 "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0), "
                 "COALESCE(SUM(LENGTH(member_name)), 0) "
-                "FROM messages WHERE channel = ?",
+                "FROM messages WHERE channel = ? "
+                "AND (recipients IS NULL OR recipients = '' OR recipients = '[]')",
                 (self.channel,)).fetchone()
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
