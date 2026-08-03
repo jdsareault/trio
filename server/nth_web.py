@@ -64,6 +64,9 @@ import nth_agent_manager as nam
 
 # ───────── Config ─────────
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
+# Claude Code CLI's own statusline state — module-level so tests can point it
+# at a fixture instead of the real user's file.
+STATUSLINE_STATE_PATH = Path.home() / ".claude" / "statusline-state.json"
 DEFAULT_PORT = 8765
 DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
@@ -1007,12 +1010,20 @@ class EventHub:
         # keying on the emoji/name fields we ship instead of hashing.
         avatars = animal_for_channel([r["id"] for r in rows])
         character_avatars = {}
+        context_by_id = {}
         try:
             character_avatars = {
                 r["id"]: avatar_url(r["avatar_name"] or "")
                 for r in db.execute(
                     "SELECT id, avatar_name FROM agents "
                     "WHERE avatar_name != '' AND archived_at IS NULL"
+                ).fetchall()
+            }
+            context_by_id = {
+                r["id"]: (r["context_pct"], r["context_tokens"])
+                for r in db.execute(
+                    "SELECT id, context_pct, context_tokens FROM agents "
+                    "WHERE context_pct IS NOT NULL AND archived_at IS NULL"
                 ).fetchall()
             }
         except sqlite3.Error:
@@ -1039,6 +1050,7 @@ class EventHub:
             last_tool_at = (r["last_tool_at"] if "last_tool_at" in keys else None) or None
             blocked_since = (r["blocked_since"] if "blocked_since" in keys else None) or None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
+            context_pct, context_tokens = context_by_id.get(r["id"], (None, None))
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
@@ -1066,6 +1078,8 @@ class EventHub:
                 "last_tool_target": last_tool_target,
                 "last_tool_at": last_tool_at,
                 "blocked_since": blocked_since,
+                "context_pct": context_pct,
+                "context_tokens": context_tokens,
             })
         return out
 
@@ -1916,6 +1930,9 @@ def ensure_agents_schema(conn) -> None:
         "avatar_name": "TEXT NOT NULL DEFAULT ''",
         "archived_at": "TEXT",
         "archived_by": "TEXT",
+        "context_pct": "REAL",
+        "context_tokens": "INTEGER",
+        "context_updated_at": "TEXT",
     }
     for column, definition in agent_columns.items():
         try:
@@ -2606,6 +2623,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_agent_activity(path.split("/")[3], parsed)
         elif path == "/api/health":
             self._handle_health()
+        elif path == "/api/usage":
+            self._handle_usage()
         elif path == "/api/workspace/events":
             self._serve_workspace_sse()
         elif path == "/api/events":
@@ -3798,7 +3817,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             rows = db.execute(
                 "SELECT id, name, model, state, managed, session_id, pid, "
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
-                "wake_mode, avatar_name, created_at, last_active_at, archived_at "
+                "wake_mode, avatar_name, created_at, last_active_at, archived_at, "
+                "context_pct, context_tokens "
                 "FROM agents WHERE archived_at IS "
                 + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
@@ -3828,6 +3848,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "queued": sup.queued_count(r["id"]),
                     "created_at": r["created_at"],
                     "last_active_at": r["last_active_at"],
+                    "context_pct": r["context_pct"],
+                    "context_tokens": r["context_tokens"],
                 })
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
@@ -4051,6 +4073,44 @@ class NthWebHandler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._json({"ok": True, "updated": len(ids)})
+
+    def _handle_usage(self) -> None:
+        """Account-level rate-limit usage for the home screen.
+
+        Claude Code's own CLI maintains ~/.claude/statusline-state.json with
+        the same five-hour/seven-day percentages it renders in the terminal
+        statusline — read it rather than re-deriving usage from transcripts.
+        Codex has no equivalent documented, stable source at this repo's
+        current understanding, so it reports unavailable rather than
+        guessing at an undocumented file format.
+        """
+        if self._require_operator() is None:
+            return
+        claude: Dict[str, Any] = {"available": False}
+        try:
+            raw = json.loads(STATUSLINE_STATE_PATH.read_text())
+            limits = raw.get("_cached_rate_limits") or {}
+            five_hour = limits.get("five_hour") or {}
+            seven_day = limits.get("seven_day") or {}
+            if "used_percentage" in five_hour or "used_percentage" in seven_day:
+                claude = {
+                    "available": True,
+                    "five_hour": {
+                        "used_percentage": five_hour.get("used_percentage"),
+                        "resets_at": five_hour.get("resets_at"),
+                    },
+                    "seven_day": {
+                        "used_percentage": seven_day.get("used_percentage"),
+                        "resets_at": seven_day.get("resets_at"),
+                    },
+                }
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        self._json({
+            "ok": True,
+            "claude": claude,
+            "codex": {"available": False},
+        })
 
     def _handle_health(self) -> None:
         """Operator-facing app, database, and provider runtime readiness."""

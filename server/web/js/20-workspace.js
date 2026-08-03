@@ -342,12 +342,14 @@
     if (!chans.length) { const p = document.createElement('p'); p.textContent = 'No active channels.'; p.className = 'home-empty'; recentList.append(p); }
     for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.innerHTML = `<strong>#${esc(c.code)}</strong><span>${esc(c.topic || 'No topic')}</span><small>${esc(String(c.members?.length || 0))} members${c.unread ? ` · ${esc(String(c.unread))} unread` : ''}</small>`; b.addEventListener('click', () => openChannel(c.code)); recentList.append(b); }
     recent.append(recentList);
+    const usage = document.createElement('section'); usage.className = 'home-section'; usage.innerHTML = '<div class="sec-head"><h3>Usage</h3><span class="sh-line"></span></div>';
+    usage.append(usageMeters(state.usage));
     const health = document.createElement('section'); health.className = 'home-section'; health.innerHTML = '<div class="sec-head"><h3>Runtime health</h3><span class="sh-line"></span></div>';
     const healthRow = document.createElement('div'); healthRow.className = 'health-row';
     const agentList = Array.isArray(Trio.store?.get('agents.list')) ? Trio.store.get('agents.list') : Array.isArray(state.agents) ? state.agents : [];
     [['Hub', 'ok', 'Live'], ['Agents', 'ok', String(agentList.length) + ' connected'], ['Database', 'ok', 'Ready']].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${tone}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
     health.append(healthRow);
-    panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, recent, health);
+    panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, recent, usage, health);
   }
   function renderAttention(panel) {
     panel.replaceChildren(); panel.append(viewHeader('Attention', 'Everything waiting for you, in one calm place'));
@@ -376,6 +378,34 @@
     panel.append(list);
   }
   function timeAgo(iso) { if (!iso) return ''; try { const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; return Math.floor(h / 24) + 'd'; } catch { return ''; } }
+  function usageTone(pct) { return pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : 'ok'; }
+  function resetLabel(unixSeconds) {
+    if (!unixSeconds) return '';
+    const ms = unixSeconds * 1000 - Date.now();
+    if (ms <= 0) return 'resets soon';
+    const h = Math.round(ms / 3600000);
+    return h < 1 ? 'resets soon' : h < 24 ? `resets in ${h}h` : `resets in ${Math.round(h / 24)}d`;
+  }
+  function usageMeter(label, pct, resetsAt) {
+    const wrap = document.createElement('div'); wrap.className = 'usage-meter';
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    wrap.innerHTML = `<div class="usage-meter-head"><span>${esc(label)}</span><span class="usage-meter-pct">${esc(String(p))}%${resetsAt ? ' · ' + esc(resetLabel(resetsAt)) : ''}</span></div><div class="usage-meter-track"><div class="usage-meter-fill ${usageTone(p)}" style="width:${p}%"></div></div>`;
+    return wrap;
+  }
+  function usageMeters(usage) {
+    const wrap = document.createElement('div'); wrap.className = 'usage-meters';
+    const claude = usage?.claude;
+    if (claude?.available) {
+      wrap.append(usageMeter('Claude Code · 5 hour', claude.five_hour?.used_percentage, claude.five_hour?.resets_at));
+      wrap.append(usageMeter('Claude Code · weekly', claude.seven_day?.used_percentage, claude.seven_day?.resets_at));
+    } else {
+      const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Claude Code usage data not available.'; wrap.append(p);
+    }
+    if (!usage?.codex?.available) {
+      const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'Codex usage data not available.'; wrap.append(p);
+    }
+    return wrap;
+  }
   function renderTasks(panel) {
     panel.replaceChildren(); panel.append(viewHeader('Tasks', 'Claimable work across every channel'));
     const filters = ['open', 'claimed', 'blocked', 'done', 'all'];
@@ -656,6 +686,7 @@
       api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); }),
       api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); }),
       api.get('/api/mentions').then(data => { state.mentions = data.mentions || []; Trio.store.set('workspace.mentions', state.mentions); }),
+      api.get('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); }),
     ];
     const results = await Promise.allSettled(requests);
     const failures = results.filter(result => result.status === 'rejected');
@@ -731,13 +762,22 @@
     const when = member.last_tool_at ? ` (${timeAgo(member.last_tool_at) || 'now'})` : '';
     return ` — using ${member.last_tool_name}${target}${when}`;
   }
+  // A small numeric "context left" hint, shown wherever a member's context
+  // usage is known (nth_supervisor persists it from a Claude Code result
+  // event's token usage). Absent for anyone that hasn't completed a turn yet
+  // — humans, freshly-spawned agents, or non-Claude providers.
+  function contextBadge(member) {
+    if (member?.context_pct == null) return '';
+    const pct = Math.round(Number(member.context_pct));
+    return `<span class="context-badge ${usageTone(pct)}" title="${esc(String(pct))}% of context window used">${esc(String(pct))}% ctx</span>`;
+  }
   function detailMember(member) {
     const name = member.name || member.id || 'Unknown member';
     const status = channelStatus(member);
     const statusText = member.status_text || member.statusText || (status === 'active' ? 'Active in this channel' : channelStatusLabel(status));
     const hint = toolSuffix(member, status).replace(/^ — /, '');
     const tool = hint ? `<div class="channel-member-tool">${esc(hint)}</div>` : '';
-    return `<div class="channel-member">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}</div>${channelStatusChip(status)}</div>`;
+    return `<div class="channel-member">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}</div>${contextBadge(member)}${channelStatusChip(status)}</div>`;
   }
   function detailTask(task) {
     const status = ['open','claimed','blocked','done'].includes(task.status) ? task.status : 'open';
@@ -845,5 +885,5 @@
   let refreshInterval = null;
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge};
 })();

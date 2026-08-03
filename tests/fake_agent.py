@@ -62,8 +62,22 @@ def main() -> int:
               "message": {"role": "assistant",
                           "content": f"echo: {content}"},
               "session_id": session_id})
-        emit({"type": "result", "subtype": "success", "is_error": False,
-              "result": f"echo: {content}", "session_id": session_id})
+        result_evt = {"type": "result", "subtype": "success", "is_error": False,
+                      "result": f"echo: {content}", "session_id": session_id}
+        # Opt-in usage payload: exercises nth_supervisor's context-fullness
+        # capture without every other fake_agent-driven test needing to know
+        # about it. Format: "input,cache_creation,cache_read" (all ints).
+        usage_env = os.environ.get("FAKE_AGENT_USAGE_TOKENS")
+        if usage_env:
+            parts = [int(p) for p in usage_env.split(",")]
+            while len(parts) < 3:
+                parts.append(0)
+            result_evt["usage"] = {
+                "input_tokens": parts[0],
+                "cache_creation_input_tokens": parts[1],
+                "cache_read_input_tokens": parts[2],
+            }
+        emit(result_evt)
     return 0
 
 

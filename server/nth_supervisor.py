@@ -78,6 +78,11 @@ ST_SLEEPING = "sleeping"
 ST_STOPPED = "stopped"
 ST_ERRORED = "errored"
 
+# Context window used to turn a result event's token usage into a fullness
+# percentage. 200k is Claude's standard context window across the current
+# model family.
+DEFAULT_CONTEXT_WINDOW = 200_000
+
 _warned_override = False
 
 
@@ -448,6 +453,18 @@ class AgentSupervisor:
             except Exception:
                 pass
         if evt.get("type") == "result":
+            usage = evt.get("usage")
+            if isinstance(usage, dict):
+                try:
+                    tokens = (int(usage.get("input_tokens") or 0)
+                              + int(usage.get("cache_creation_input_tokens") or 0)
+                              + int(usage.get("cache_read_input_tokens") or 0))
+                    pct = min(100.0, round(
+                        100.0 * tokens / DEFAULT_CONTEXT_WINDOW, 1))
+                    self._set_context(agent_id, pct, tokens)
+                except Exception:
+                    pass
+        if evt.get("type") == "result":
             self._bridge_result(agent_id, evt)
         if self.on_event is not None:
             self.on_event(agent_id, evt)
@@ -562,6 +579,24 @@ class AgentSupervisor:
                 f"UPDATE agents SET {', '.join(sets)} WHERE id = ?", vals)
             db.commit()
             return cur.rowcount
+        finally:
+            db.close()
+
+    def _set_context(self, agent_id: str, pct: float, tokens: int) -> None:
+        """Persist a context-fullness reading from a turn's result event.
+
+        Best-effort: swallows DB errors rather than risking the reader
+        thread that's mid-delivery of the actual turn result.
+        """
+        db = self._db()
+        try:
+            db.execute(
+                "UPDATE agents SET context_pct = ?, context_tokens = ?, "
+                "context_updated_at = ? WHERE id = ?",
+                (pct, tokens, now_iso(), agent_id))
+            db.commit()
+        except sqlite3.Error:
+            pass
         finally:
             db.close()
 
