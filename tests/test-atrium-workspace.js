@@ -195,6 +195,58 @@ function routeFor(search) {
   return cx.Trio.state.conversation;
 }
 
+// --- createChannel: failure must not vanish silently -------------------
+// The create modal is a method="dialog" form that closes the instant Save
+// is clicked, before the async POST resolves. A failed create used to
+// disappear ("modal closed, no channel"). createChannel now surfaces the
+// error and reopens the form pre-filled so the operator can retry.
+(function testCreateChannel() {
+  // FormData polyfill: the vm context has none. Backed by a fake form whose
+  // fields the test sets to mimic operator input (incl. stray whitespace/case).
+  base.FormData = class {
+    constructor(form) { this._f = form._fields || {}; }
+    get(name) { return name in this._f ? this._f[name] : null; }
+  };
+  const fakeNode = fields => ({ querySelector: () => ({ _fields: fields }) });
+
+  // Capture every modal() call: (title, body, submitCallback).
+  const opened = [];
+  base.Trio.ui.modal = (title, body, submit) => { opened.push({ title, body, submit }); };
+  const toasts = [];
+  base.Trio.ui.toast = m => toasts.push(m);
+
+  const createChannel = base.Trio.workspace.createChannel;
+
+  // Case 1: server rejects -> toast the real error AND reopen pre-filled.
+  let postArgs = null;
+  base.Trio.api.post = (path, body) => { postArgs = { path, body }; return Promise.reject(new Error('503 /api/channels: busy')); };
+  opened.length = 0; toasts.length = 0;
+  createChannel();
+  check('createChannel: opens the create modal', opened.length === 1);
+  // Operator typed a code with stray case/space; submit it.
+  return opened[0].submit(fakeNode({ code: '  Global-Logout ', topic: ' hi ' })).then(() => {
+    check('createChannel: code is trimmed + lowercased before POST',
+      postArgs && postArgs.body.code === 'global-logout' && postArgs.body.topic === 'hi');
+    check('createChannel: failure surfaces the server error as a toast',
+      toasts.length === 1 && /503/.test(toasts[0]));
+    check('createChannel: failure reopens the modal (does not vanish)',
+      opened.length === 2);
+    check('createChannel: reopened modal is pre-filled with the entered values',
+      /value="global-logout"/.test(opened[1].body) && /value="hi"/.test(opened[1].body));
+
+    // Case 2: success path posts once and does NOT reopen.
+    let posts = 0;
+    base.Trio.api.post = (path, body) => { posts++; postArgs = { path, body }; return Promise.resolve({ ok: true }); };
+    opened.length = 0; toasts.length = 0;
+    createChannel();
+    return opened[0].submit(fakeNode({ code: 'units-pref-subpage', topic: '' })).then(() => {
+      check('createChannel: success posts exactly once', posts === 1);
+      check('createChannel: success does not reopen the modal or toast an error',
+        opened.length === 1 && toasts.length === 0);
+    });
+  });
+})().then(() => {
+
 const cases = [
   ['empty query', '', { kind: 'unknown', key: '' }],
   ['channel only', '?channel=general', { kind: 'channel', key: 'general' }],
@@ -213,3 +265,5 @@ for (const [name, search, expected] of cases) {
 
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);
+
+}).catch(err => { console.log('FAIL: createChannel test threw — ' + err.stack); process.exit(1); });
