@@ -322,5 +322,94 @@ check('channelStatus prefers roster-backed compacting/error states over heartbea
   assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false }), 'idle');
 });
 
+// Notification tier classification — DM > @mention/!bang > #ref > plain,
+// first match wins. See 45-notifications.js / 40-preferences.js's
+// NOTIFICATION_TIERS comment for the full rationale.
+check('classify: a DM to you outranks everything else', () => {
+  const msg = { member_id: 'ag_1', recipients: ['me'], mentions: [], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'dm');
+});
+check('classify: @mention when not a DM', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: ['me'], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'mention');
+});
+check('classify: !bang counts as the same tier as @mention', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: [], refs: [], bangs: ['me'] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'mention');
+});
+check('classify: #reference below mention, above plain', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: [], refs: ['me'], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'ref');
+});
+check('classify: untargeted channel message is plain', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: [], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'plain');
+});
+check('classify: a DM addressed to someone ELSE is not a DM tier for you', () => {
+  const msg = { member_id: 'ag_1', recipients: ['someone-else'], mentions: [], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'plain');
+});
+check('classify: your own message never classifies (no self-notify)', () => {
+  const msg = { member_id: 'me', recipients: [], mentions: ['me'], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), null);
+});
+check('classify: a system message never classifies', () => {
+  const msg = { member_id: 'ag_1', content: '[joined] Someone', mentions: ['me'], refs: [], bangs: [], recipients: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), null);
+});
+check('classify: DM still wins even if you were also @mentioned in it', () => {
+  const msg = { member_id: 'ag_1', recipients: ['me'], mentions: ['me'], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'dm');
+});
+check('notifications module exposes the 4-tier priority order and 3 sound presets', () => {
+  // Array.from() (not the raw sandboxed array) — the vm sandbox's Array is a
+  // different realm than this test's, so a bare literal comparison here
+  // fails deepStrictEqual's prototype check despite identical contents.
+  assert.deepStrictEqual(Array.from(H.Trio.notifications.TIERS), ['dm', 'mention', 'ref', 'plain']);
+  assert.deepStrictEqual(Object.keys(H.Trio.notifications.SOUNDS).sort(), ['alert', 'ping', 'tick']);
+});
+check('playPreset never throws even with no AudioContext available (headless/CI)', () => {
+  assert.doesNotThrow(() => H.Trio.notifications.playPreset('ping', 0.5));
+  assert.doesNotThrow(() => H.Trio.notifications.playPreset('nonexistent-preset', 0.5));
+  assert.doesNotThrow(() => H.Trio.notifications.playPreset('ping', 0)); // muted — should no-op, not throw
+});
+
+// LOTC/Sauron: the priming guard used to be a single timer-based flag shared
+// across the per-channel AND cross-channel SSE streams — a reconnect on
+// EITHER could silently suppress a genuinely live chime on an unrelated,
+// already-open channel. isPrimedHistory() replaces that with a per-message
+// age check (immune to which stream delivered it, no shared state at all).
+check('isPrimedHistory: a message from long ago is primed history', () => {
+  const old = new Date(Date.now() - 60_000).toISOString();
+  assert.strictEqual(H.Trio.notifications.isPrimedHistory({ created_at: old }), true);
+});
+check('isPrimedHistory: a message from right now is live, not primed', () => {
+  const now = new Date().toISOString();
+  assert.strictEqual(H.Trio.notifications.isPrimedHistory({ created_at: now }), false);
+});
+check('isPrimedHistory: missing/unparseable created_at fails open (treated as live)', () => {
+  assert.strictEqual(H.Trio.notifications.isPrimedHistory({}), false);
+  assert.strictEqual(H.Trio.notifications.isPrimedHistory({ created_at: 'not-a-date' }), false);
+});
+check('notifications: real message-event dispatch never throws for an old or a live DM', () => {
+  // onMessage's internal calls to classify()/isPrimedHistory()/playPreset are
+  // closures over the module's own function bindings, not live reads of
+  // Trio.notifications — so this can't spy on playPreset from the outside.
+  // What IS worth asserting end-to-end: dispatching a real 'message' event
+  // (the actual production code path, not just calling classify() directly)
+  // never throws for either an old or a live message, for every field shape
+  // onMessage touches (recipients/mentions/refs/bangs/created_at).
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.preferences.save({ chime: true, chimeTierDm: true });
+  const live = { id: 101, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [], created_at: new Date().toISOString() };
+  const old = { id: 100, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [], created_at: new Date(Date.now() - 60_000).toISOString() };
+  assert.strictEqual(H.Trio.notifications.classify(old, 'me'), 'dm');
+  assert.strictEqual(H.Trio.notifications.isPrimedHistory(old), true);
+  assert.strictEqual(H.Trio.notifications.classify(live, 'me'), 'dm');
+  assert.strictEqual(H.Trio.notifications.isPrimedHistory(live), false);
+  assert.doesNotThrow(() => H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: old })));
+  assert.doesNotThrow(() => H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: live })));
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);
