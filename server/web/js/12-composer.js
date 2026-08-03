@@ -28,6 +28,15 @@
     const channel = state.channel || '';
     return channel ? path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(channel) : path;
   }
+  function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function revokePreview(att) { if (att && att.url && att.url.startsWith('blob:')) { URL.revokeObjectURL(att.url); att.url = ''; } }
+  function showLightbox(url, alt) {
+    let dialog = document.getElementById('trio-lightbox');
+    if (!dialog) { dialog = document.createElement('dialog'); dialog.id = 'trio-lightbox'; dialog.className = 'lightbox'; document.body.append(dialog); }
+    Trio.ui.configureDialog(dialog);
+    dialog.innerHTML = `<form method="dialog"><button type="submit" formnovalidate class="modal-close" aria-label="Close">×</button><img src="${escHtml(url)}" alt="${escHtml(alt || '')}" loading="lazy"></form>`;
+    dialog.showModal();
+  }
   function renderTargets() {
     const bar = byId('target-bar'); if (!bar) return;
     bar.replaceChildren();
@@ -67,7 +76,8 @@
     if (!file) return;
     if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type || '')) throw new Error('Choose a PNG, JPEG, GIF, or WebP image');
     if (file.size > 10 * 1024 * 1024) throw new Error('Image must be 10 MB or smaller');
-    const placeholder = { id: 0, filename: 'Uploading…', loading: true };
+    const preview = URL.createObjectURL(file);
+    const placeholder = { id: 0, filename: file.name || 'image', loading: true, url: preview };
     state.pendingAttachments.push(placeholder); renderAttachments(); updateSendState();
     try {
       const response = await fetch(apiUrl('/api/upload'), {
@@ -76,8 +86,10 @@
       if (!response.ok) throw new Error('upload failed (' + response.status + ')');
       const attachment = await response.json();
       if (!attachment.ok || !Number.isInteger(attachment.id)) throw new Error('Upload did not return an attachment id');
-      Object.assign(placeholder, attachment, { name: attachment.filename, loading: false });
+      revokePreview(placeholder);
+      Object.assign(placeholder, attachment, { name: attachment.filename, loading: false, url: apiUrl(attachment.url) });
     } catch (error) {
+      revokePreview(placeholder);
       const index = state.pendingAttachments.indexOf(placeholder);
       if (index >= 0) { state.pendingAttachments.splice(index, 1); }
       throw error;
@@ -88,11 +100,28 @@
     const strip = byId('attachment-strip'); if (!strip) return;
     strip.replaceChildren();
     state.pendingAttachments.forEach((attachment, index) => {
-      const pill = document.createElement('button'); pill.type = 'button'; pill.className = 'attachment-pill' + (attachment.loading ? ' loading' : '');
-      pill.textContent = (attachment.name || attachment.filename || 'attachment') + (attachment.loading ? ' …' : ' ×');
-      pill.disabled = attachment.loading;
-      pill.onclick = () => { state.pendingAttachments.splice(index, 1); renderAttachments(); updateSendState(); };
-      strip.append(pill);
+      const thumb = document.createElement('div');
+      thumb.className = 'attachment-thumb';
+      thumb.title = attachment.filename || 'attachment';
+      const img = document.createElement('img');
+      img.src = attachment.url || '';
+      img.alt = attachment.filename || 'attachment';
+      img.loading = 'lazy';
+      img.onclick = () => showLightbox(img.src, img.alt);
+      const rm = document.createElement('button');
+      rm.type = 'button'; rm.className = 'rm'; rm.title = 'remove';
+      rm.setAttribute('aria-label', 'remove attachment');
+      rm.textContent = '×';
+      rm.disabled = attachment.loading;
+      rm.onclick = () => { revokePreview(attachment); state.pendingAttachments.splice(index, 1); renderAttachments(); updateSendState(); };
+      thumb.append(img, rm);
+      if (attachment.loading) {
+        const mask = document.createElement('div');
+        mask.className = 'loading-mask';
+        mask.textContent = '…';
+        thumb.append(mask);
+      }
+      strip.append(thumb);
     });
   }
   async function send() {

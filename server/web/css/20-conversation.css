@@ -124,3 +124,8 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .message.msg.system-message .message-content{width:100%;max-width:none;align-items:flex-start}
 .message.msg.system-message .message-body.system{width:100%;box-sizing:border-box;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink-3);font-size:13px;line-height:1.4;text-align:left}
 @media(max-width:640px){.message.msg.system-message .message-content{max-width:none}}
+.attachment-thumb{position:relative;width:72px;height:72px;border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);cursor:zoom-in}
+.attachment-thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.attachment-thumb .rm{position:absolute;top:2px;right:2px;width:20px;height:20px;padding:0;border:0;border-radius:999px;background:rgba(0,0,0,.55);color:#fff;font-size:14px;line-height:1;cursor:pointer}
+.attachment-thumb .rm:hover{background:rgba(0,0,0,.75)}
+.attachment-thumb .loading-mask{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg-sink);color:var(--ink-3);font-size:18px}
