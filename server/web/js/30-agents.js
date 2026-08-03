@@ -282,20 +282,47 @@
   // Efforts are per-MODEL (a Sonnet agent and a Haiku agent don't support the
   // same set) — look the agent's own model up in the already-discovered
   // provider model list rather than offering a fixed global list.
+  function effortModelEntry(provider, modelId) {
+    return normalizeModels(state.agentModels[provider]).find(m => m.id === modelId);
+  }
   function effortsForModel(provider, modelId) {
-    const model = normalizeModels(state.agentModels[provider]).find(m => m.id === modelId);
+    const model = effortModelEntry(provider, modelId);
     return Array.isArray(model?.efforts) && model.efforts.length ? model.efforts : ['low', 'medium', 'high'];
   }
-  function effortOptions(efforts, selected) {
-    return efforts.map(e => `<option value="${esc(e)}"${e === selected ? ' selected' : ''}>${esc(e)}</option>`).join('');
+  // LOTC/Frodo: with no "use the model's own default" option, the browser
+  // auto-selects the FIRST <option> whenever `selected` matches nothing —
+  // which silently downgraded every unedited agent to the lowest effort
+  // (both at creation and when merely opening-then-saving the edit dialog,
+  // since an agent at its default has vm.effort === ''). A real, always-
+  // present "Model default" option fixes both: it's what actually gets sent
+  // when the user doesn't touch the control, matching what the backend
+  // already does with an empty effort string.
+  // `current` (if given and not already in `efforts`) is kept as an option
+  // rather than dropped — an agent already running at "max" must not lose
+  // that from the list just because live discovery came back stale/thin.
+  function effortOptions(efforts, selected, { defaultLabel = 'Model default' } = {}) {
+    const all = current => current && !efforts.includes(current) ? [...efforts, current] : efforts;
+    const list = all(selected);
+    const opts = list.map(e => `<option value="${esc(e)}"${e === selected ? ' selected' : ''}>${esc(e)}</option>`).join('');
+    return `<option value=""${selected ? '' : ' selected'}>${esc(defaultLabel)}</option>` + opts;
   }
   async function editEffort(vm) {
     await loadDiscovery();
     const efforts = effortsForModel(vm.provider, vm.model);
-    const html = `<label class="field">Reasoning effort <span class="hint">applies next time the agent restarts (wake/clear) — a currently-running agent keeps its current effort until then</span><select name="effort">${effortOptions(efforts, vm.effort)}</select></label>`;
-    Trio.ui.modal('Reasoning effort for ' + vm.name, html, node => {
+    const model = effortModelEntry(vm.provider, vm.model);
+    const defaultLabel = model?.default_effort ? `Model default (${model.default_effort})` : 'Model default';
+    // Sauron: this claim differs by provider. Codex re-reads effort fresh on
+    // EVERY turn (no restart involved) — Claude fixes it in the process argv
+    // at spawn, so only Clear (a genuinely fresh session) is guaranteed to
+    // pick up a change; Wake resumes the existing session and may not.
+    const hint = vm.provider === 'codex'
+      ? 'applies to this agent’s next message — no restart needed'
+      : 'applies once this agent is Cleared (a fresh session) — Wake resumes the existing session and may not pick it up';
+    const html = `<label class="field">Reasoning effort <span class="hint">${esc(hint)}</span><select name="effort">${effortOptions(efforts, vm.effort, { defaultLabel })}</select></label>`;
+    Trio.ui.modal('Reasoning effort for ' + vm.name, html, async node => {
       const v = node.querySelector('[name="effort"]').value;
-      action(vm.id, 'effort', { effort: v });
+      await action(vm.id, 'effort', { effort: v });
+      Trio.ui.toast(v ? `Reasoning effort set to ${v} — ${hint}` : `Reasoning effort reset to ${defaultLabel.toLowerCase()} — ${hint}`);
     });
   }
   function normalizeModels(models) {

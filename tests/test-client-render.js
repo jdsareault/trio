@@ -208,6 +208,30 @@ check('effortOptions renders a <select>-ready option list with the current value
   assert.ok(html.includes('<option value="low">low</option>'));
   assert.ok(html.includes('<option value="high" selected>high</option>'));
 });
+// LOTC/Frodo (critical): with no explicit selection, browsers auto-select
+// the FIRST <option> — which, before this fix, silently created/edited
+// agents at the LOWEST effort whenever the user left the control alone
+// (create: always; edit: any agent still on its model default, since
+// vm.effort is '' there). A real "Model default" option, selected by
+// default, is what a blank/'' selection must resolve to.
+check('effortOptions: no selection defaults to a real "Model default" option, not the first effort', () => {
+  const html = H.Trio.agents.effortOptions(['low', 'medium', 'high'], '');
+  assert.ok(html.startsWith('<option value="" selected>Model default</option>'));
+  assert.ok(!html.includes('<option value="low" selected>'));
+});
+check('effortOptions: a custom default label can name the resolved level', () => {
+  const html = H.Trio.agents.effortOptions(['low', 'high'], '', { defaultLabel: 'Model default (medium)' });
+  assert.ok(html.includes('>Model default (medium)</option>'));
+});
+// LOTC/Frodo (warning): an agent already set to an effort that discovery
+// didn't return (stale/thin catalog, or a value valid at creation time but
+// since dropped from the model's advertised list) must not lose that value
+// from the dropdown — losing it meant opening-then-saving without any
+// change silently downgraded the agent to whatever option landed first.
+check('effortOptions: the agent\'s current value is kept as an option even if missing from the discovered list', () => {
+  const html = H.Trio.agents.effortOptions(['low', 'medium', 'high'], 'max');
+  assert.ok(html.includes('<option value="max" selected>max</option>'));
+});
 check('agent last-active timestamps are local and human-readable', () => {
   const iso = '2026-08-02T00:45:14+00:00';
   const options = { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
