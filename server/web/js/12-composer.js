@@ -5,9 +5,13 @@
   const { state, api, events, actions } = Trio;
   state.selectedTargets = state.selectedTargets instanceof Set ? state.selectedTargets : new Set();
   state.pendingAttachments = Array.isArray(state.pendingAttachments) ? state.pendingAttachments : [];
-  state.sttMode = state.sttMode || 'local';
   state.drafts = state.drafts || {};
   let recognition = null, recorder = null, stream = null, chunks = [];
+  // Metering is a SEPARATE stream from the one MediaRecorder/SpeechRecognition
+  // consumes — SpeechRecognition never exposes its underlying audio, so a
+  // level meter needs its own getUserMedia grab regardless of engine, and
+  // local mode keeps its recorder stream independent for a cleaner teardown.
+  let meterStream = null, audioCtx = null, analyser = null, meterRaf = null;
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   function inputValue(newValue) { const el = input(); if (!el) return ''; if (newValue !== undefined) el.value = newValue; return el.value; }
@@ -162,16 +166,76 @@
   function stopTracks() { stream?.getTracks?.().forEach(track => track.stop()); stream = null; }
   function hasBrowserDictation() { return typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function'; }
   function hasLocalDictation() { return !!window.navigator?.mediaDevices?.getUserMedia && typeof window.MediaRecorder === 'function'; }
-  function setDictationButtonState(active) {
+  // Simple 5-bar level meter driven by an AnalyserNode — enough to show
+  // "yes, your voice is registering" without a full waveform canvas. Reuses
+  // whatever MediaStream the caller already opened; browser-engine mode has
+  // no stream of its own (SpeechRecognition doesn't expose one) so it opens
+  // a metering-only one that captures nothing but the level display.
+  function startMeter(meterStreamSource) {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      audioCtx = new AudioContext();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 32;
+      audioCtx.createMediaStreamSource(meterStreamSource).connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const bars = byId('dictate-meter')?.querySelectorAll('.bar');
+      const meter = byId('dictate-meter');
+      if (meter) meter.hidden = false;
+      const tick = () => {
+        analyser.getByteFrequencyData(data);
+        if (bars) {
+          const step = Math.max(1, Math.floor(data.length / bars.length));
+          bars.forEach((bar, i) => {
+            const level = data[i * step] / 255; // 0..1
+            bar.style.setProperty('--level', String(0.15 + level * 0.85));
+          });
+        }
+        meterRaf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch { /* metering is a nice-to-have; dictation itself still works */ }
+  }
+  function stopMeter() {
+    if (meterRaf) cancelAnimationFrame(meterRaf);
+    meterRaf = null;
+    analyser = null;
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+    meterStream?.getTracks?.().forEach(track => track.stop());
+    meterStream = null;
+    const meter = byId('dictate-meter');
+    if (meter) meter.hidden = true;
+  }
+  // active: recording/listening (red stop icon + meter). processing: local
+  // mode's post-stop transcription request (button disabled, status text
+  // names the engine so it's clear this isn't the browser's own STT).
+  //
+  // button.dataset.unavailable (set once at mount(), see below) tracks the
+  // "no mic support in this browser" disablement, which is independent of
+  // and must survive the active/processing toggling done here.
+  function setDictationButtonState(active, { processing = false, statusText = '' } = {}) {
     const button = byId('dictate-btn');
-    if (!button) return;
-    button.setAttribute('aria-pressed', String(active));
-    button.title = active ? 'Stop dictation' : (button.disabled ? 'Dictation is unavailable in this browser' : 'Dictate');
+    const status = byId('dictate-status');
+    if (button) {
+      button.setAttribute('aria-pressed', String(active));
+      button.classList.toggle('recording', active);
+      button.classList.toggle('processing', processing);
+      button.disabled = processing || button.dataset.unavailable === 'true';
+      button.querySelector('.mic-icon')?.toggleAttribute('hidden', active);
+      button.querySelector('.stop-icon')?.toggleAttribute('hidden', !active);
+      button.title = processing ? (statusText || 'Transcribing…')
+        : active ? 'Stop dictation' : (button.disabled ? 'Dictation is unavailable in this browser' : 'Dictate');
+    }
+    if (status) {
+      status.hidden = !statusText;
+      status.textContent = statusText;
+    }
   }
   function stopDictation() {
     if (recognition) { recognition.stop(); recognition = null; }
     if (recorder?.state === 'recording') recorder.stop();
-    stopTracks(); document.body.classList.remove('dictating'); setDictationButtonState(false);
+    stopTracks(); stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false);
   }
   async function browserDictation() {
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -179,20 +243,38 @@
     recognition = new Speech(); recognition.continuous = true; recognition.interimResults = true;
     let finalText = '';
     recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; inputValue((inputValue() + ' ' + finalText + interim).trim()); updateSendState(); };
-    recognition.onend = () => { recognition = null; document.body.classList.remove('dictating'); setDictationButtonState(false); };
-    recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
+    recognition.onend = () => { recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false); };
+    recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Listening (browser speech)…' });
+    // Best-effort visualization only — SpeechRecognition owns its own audio
+    // capture internally and never exposes that stream to page JS.
+    window.navigator.mediaDevices?.getUserMedia?.({ audio: true }).then(s => { meterStream = s; startMeter(s); }).catch(() => {});
   }
   async function localDictation() {
     if (!hasLocalDictation()) throw new Error('Local dictation is unavailable in this browser');
     stream = await window.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
     recorder = new window.MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = async () => { try { const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }); const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio }); const data = await result.json(); if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed'); inputValue((inputValue() + ' ' + (data.text || '')).trim()); updateSendState(); } catch (error) { if (window.SpeechRecognition || window.webkitSpeechRecognition) { Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => Trio.ui.toast(fallback.message)); } else Trio.ui.toast(error.message || 'Transcription failed'); } finally { stopTracks(); document.body.classList.remove('dictating'); } };
-    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
+    recorder.onstop = async () => {
+      setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
+      try {
+        const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio });
+        const data = await result.json();
+        if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
+        inputValue((inputValue() + ' ' + (data.text || '')).trim()); updateSendState();
+      } catch (error) {
+        if (window.SpeechRecognition || window.webkitSpeechRecognition) { Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => Trio.ui.toast(fallback.message)); }
+        else Trio.ui.toast(error.message || 'Transcription failed');
+      } finally {
+        stopTracks(); document.body.classList.remove('dictating'); setDictationButtonState(false);
+      }
+    };
+    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Recording (local Whisper)…' });
+    startMeter(stream);
   }
   async function toggleDictation() {
     if (recognition || recorder?.state === 'recording') return stopDictation();
-    const mode = state.composer?.sttMode || state.sttMode || 'local';
+    const mode = Trio.preferences?.read?.().sttMode || 'local';
     if (mode === 'web') return browserDictation();
     try { return await localDictation(); }
     catch (error) {
@@ -316,6 +398,7 @@
     const dictationAvailable = hasLocalDictation() || hasBrowserDictation();
     if (dictateBtn) {
       dictateBtn.hidden = !dictation;
+      dictateBtn.dataset.unavailable = String(dictation && !dictationAvailable);
       dictateBtn.disabled = dictation && !dictationAvailable;
       if (!dictationAvailable) dictateBtn.title = 'Dictation is unavailable in this browser';
     }
@@ -324,7 +407,15 @@
     unroute = Trio.router?.on?.(() => { loadDraft(); setInputState(text); });
     renderTargets(); renderAttachments(); loadDraft();
   }
-  function unmount() { domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0; if (unroute) { unroute(); unroute = null; } if (recorder && recorder.state !== 'inactive') stopDictation(); }
+  function unmount() {
+    domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0;
+    if (unroute) { unroute(); unroute = null; }
+    // Browser-engine (web) mode only ever set `recognition`, never `recorder`
+    // — the old check here missed it entirely, leaking an open mic stream
+    // (recognition's own capture, plus this file's metering stream) past
+    // navigation away from the composer.
+    if (recognition || (recorder && recorder.state !== 'inactive')) stopDictation();
+  }
   function mount() { init(); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
   Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly };

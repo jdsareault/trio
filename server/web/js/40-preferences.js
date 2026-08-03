@@ -26,8 +26,8 @@
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
-  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true, messageHistoryDays: 3 };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean', messageHistoryDays: 'number' };
+  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true, sttMode: 'local', messageHistoryDays: 3 };
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean', sttMode: ['local','web'], messageHistoryDays: 'number' };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
     if (schema[key] === 'number') { const n = Number(value); return Number.isFinite(n) && n >= 0 ? n : defaults[key]; }
@@ -137,6 +137,12 @@
     historyOptions.forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = String(value); opt.textContent = label; if (Number(p.messageHistoryDays) === value) opt.selected = true; historySelect.append(opt); });
     historySelect.addEventListener('change', () => save({ messageHistoryDays: Number(historySelect.value) }));
     historyRow.append(historyText, historySelect); behavior.append(historyRow);
+    const sttRow = document.createElement('div'); sttRow.className = 'pref-row';
+    const sttText = document.createElement('div'); sttText.className = 'pr-txt'; sttText.innerHTML = '<div class="l">Speech-to-text engine</div><div class="d">Local runs Whisper on this machine and keeps audio off the network. Browser uses your browser\'s built-in speech recognition (routed through its vendor\'s cloud service) — faster to start, no local model needed.</div>';
+    const sttSelect = document.createElement('select'); sttSelect.className = 'pref-select'; sttSelect.setAttribute('aria-label', 'Speech-to-text engine');
+    [['local','Local (Whisper, on-device)'],['web','Browser (built-in speech recognition)']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.sttMode === value) opt.selected = true; sttSelect.append(opt); });
+    sttSelect.addEventListener('change', () => save({ sttMode: sttSelect.value }));
+    sttRow.append(sttText, sttSelect); behavior.append(sttRow);
     const diagnosticsGroup = document.createElement('section'); diagnosticsGroup.className = 'pref-group'; diagnosticsGroup.innerHTML = '<h3>Diagnostics</h3>';
     const diagnostic = diagnostics(); Object.entries(diagnostic).forEach(([key,value]) => { const row = document.createElement('div'); row.className = 'diag-card'; row.innerHTML = `<span class="di ${key === 'online' || key === 'stt' ? 'ok' : 'off'}">●</span><div class="dtxt"><div class="dl">${esc(key.replace(/([A-Z])/g,' $1'))}<span class="stat-chip-sm ${key === 'online' ? 'ok' : 'off'}">${esc(String(value))}</span></div></div>`; diagnosticsGroup.append(row); });
     const resetButton = document.createElement('button'); resetButton.type = 'button'; resetButton.className = 'reset-prefs'; resetButton.textContent = 'Reset to defaults'; resetButton.addEventListener('click', () => { reset(); renderPage(panel); }); diagnosticsGroup.append(resetButton);
