@@ -82,7 +82,14 @@
   function isDestructiveAction(action) { return action === 'clear' || action === 'archive'; }
   function confirmAction(vm, actionName) {
     if (!isDestructiveAction(actionName)) return true;
-    if (actionName === 'archive') return window.confirm('Archive ' + vm.name + '? It stops the agent and hides it from the roster, but can be restored later.');
+    if (actionName === 'archive') {
+      let msg = 'Archive ' + vm.name + '? It stops the agent and hides it from the roster, but can be restored later.';
+      if (vm.busy || vm.lifecycle === 'working' || vm.lifecycle === 'active')
+        msg += '\n\nWarning: this agent is working — archiving will interrupt any work in progress.';
+      else if (vm.lifecycle === 'compacting')
+        msg += '\n\nWarning: this agent is compacting its context — archiving will interrupt it.';
+      return window.confirm(msg);
+    }
     return window.confirm('Clear context for ' + vm.name + '?');
   }
   function statusIcon(vm) {
@@ -124,8 +131,8 @@
     if (agent?.state === 'compacting') compactionPolls.set(id, setTimeout(poll, 1500));
   }
   function agentCard(vm) {
-    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '');
-    article.innerHTML = `<b>${esc(vm.name)} ${esc(statusIcon(vm))}</b><small>${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''} · ${esc(vm.lifecycle)}</small><p>${esc((vm.placements || []).join(', ') || 'No public rooms')}</p>`;
+    const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '') + (vm.archived ? ' is-archived' : '');
+    article.innerHTML = `<b>${esc(vm.name)} ${esc(statusIcon(vm))}</b><small>${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''} · ${esc(vm.archived ? 'archived' : vm.lifecycle)}</small><p>${esc((vm.placements || []).join(', ') || 'No public rooms')}</p>`;
     const row = document.createElement('div'); row.className = 'agent-actions';
     const detail = document.createElement('button'); detail.type = 'button'; detail.textContent = 'Details'; detail.addEventListener('click', () => showDetail(vm)); row.append(detail);
     for (const a of actionCaps(vm).slice(0, 4)) {
@@ -134,7 +141,9 @@
       b.addEventListener('click', () => confirmAction(vm, a) && action(vm.id, a));
       row.append(b);
     }
-    const msg = document.createElement('button'); msg.type = 'button'; msg.textContent = 'Message'; msg.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); row.append(msg);
+    if (!vm.archived) {
+      const msg = document.createElement('button'); msg.type = 'button'; msg.textContent = 'Message'; msg.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); row.append(msg);
+    }
     article.append(row);
     return article;
   }
@@ -229,7 +238,9 @@
           setTimeout(() => showCompact(vm), 0);
         } else if (confirmAction(vm, actionName)) {
           panel.close('cancel');
-          Trio.ui.toast(actionLabel(actionName) + ' requested for ' + vm.name);
+          let toastMsg = actionLabel(actionName) + ' requested for ' + vm.name;
+          if (actionName === 'unarchive') toastMsg += ' — Wake it to resume';
+          Trio.ui.toast(toastMsg);
           action(vm.id, actionName);
         }
       }));

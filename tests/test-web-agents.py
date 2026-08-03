@@ -164,6 +164,37 @@ try:
     ids = [a["id"] for a in d.get("agents", [])]
     check("unarchive: visible in default roster again", aid in ids)
 
+    # ── archived agents are frozen: lifecycle actions rejected (W6-W8) ──
+    st, _ = http(port, f"/api/agents/{aid}/archive", "POST")  # re-archive first
+    st, _ = http(port, f"/api/agents/{aid}/wake", "POST")
+    check("archived agent: wake rejected with 409", st == 409)
+    st, _ = http(port, f"/api/agents/{aid}/clear", "POST")
+    check("archived agent: clear rejected with 409", st == 409)
+    st, _ = http(port, f"/api/agents/{aid}/stop", "POST")
+    check("archived agent: stop rejected with 409", st == 409)
+    http(port, f"/api/agents/{aid}/unarchive", "POST")  # clean up
+
+    # ── unarchive does NOT re-add a removed channel (C2) ──
+    # Create a fresh agent in chan-x, remove it from chan-x, then archive +
+    # unarchive. The agent should NOT be re-placed in chan-x.
+    st, d = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": ["chan-x"]})
+    rid = d.get("agent", {}).get("id")
+    http(port, f"/api/agents/{rid}/placement", "POST", {"channel": "chan-x", "present": False})
+    db = sqlite3.connect(str(srv.DB_PATH))
+    ac_before = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=? AND channel='chan-x'", (rid,)).fetchone()[0]
+    db.close()
+    check("C2: agent removed from chan-x before archive", ac_before == 0)
+    http(port, f"/api/agents/{rid}/archive", "POST")
+    http(port, f"/api/agents/{rid}/unarchive", "POST")
+    db = sqlite3.connect(str(srv.DB_PATH))
+    ac_after = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=? AND channel='chan-x'", (rid,)).fetchone()[0]
+    mem_active = db.execute("SELECT active FROM members WHERE id=? AND channel='chan-x'", (rid,)).fetchone()
+    db.close()
+    check("C2: unarchive does not re-add removed channel placement", ac_after == 0)
+    check("C2: unarchive does not reactivate removed channel presence",
+          mem_active is None or mem_active[0] == 0)
+    http(port, f"/api/agents/{rid}/archive", "POST")  # clean up
+
     # ── thinking-level (effort) ──
     st, d = http(port, "/api/agents", "POST",
                  {"model": "haiku", "channels": ["chan-x"], "effort": "high"})
@@ -280,6 +311,10 @@ try:
         check("guest: GET /api/agents -> 403", st == 403)
         st, _ = http(port, "/api/agents", "POST", {"model": "sonnet"})
         check("guest: POST /api/agents -> 403", st == 403)
+        st, _ = http(port, f"/api/agents/{aid}/archive", "POST")
+        check("guest: POST /api/agents/<id>/archive -> 403", st == 403)
+        st, _ = http(port, f"/api/agents/{aid}/unarchive", "POST")
+        check("guest: POST /api/agents/<id>/unarchive -> 403", st == 403)
         st, _ = http(port, "/api/health")
         check("guest: GET /api/health -> 403", st == 403)
     finally:

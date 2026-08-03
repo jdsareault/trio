@@ -215,6 +215,11 @@ check('archived agents expose only the unarchive action', () => {
   assert.strictEqual(vm.archived, true);
   assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['unarchive']);
 });
+check('viewModel derives archived from archived_at alone (server contract)', () => {
+  const vm = H.Trio.agents.viewModel({ id: 'ag_at', archived_at: '2026-08-01T12:00:00Z', live: false, state: 'stopped' });
+  assert.strictEqual(vm.archived, true);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['unarchive']);
+});
 check('agent compaction status outranks the ordinary live state', () => {
   const vm = H.Trio.agents.viewModel({ id: 'ag_compact', live: true, busy: false, state: 'compacting' });
   assert.strictEqual(vm.lifecycle, 'compacting');
