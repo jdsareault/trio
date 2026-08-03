@@ -786,9 +786,27 @@
     // Agent participants use the supervisor-backed {state, live, busy} from
     // state.agents (same source as the Agent roster page) so the status chip
     // agrees with the roster instead of the heartbeat-based channel status.
+    //
+    // LOTC: this merge used to run ONLY on the DM path (dmIds.map(...)) — a
+    // normal channel's member list (allMembers, the common case) fell straight
+    // through to the raw heartbeat-based rows with no {state,live,busy}, so
+    // channelStatus()'s "prefer the roster's fields" branch below never fired
+    // for it and the drawer permanently disagreed with the Agent roster page.
     const allMembers = [...(state.members?.values?.() || [])];
     const agentsById = new Map((state.agents || []).map(a => [a.id, a]));
-    const operator = state.operator || state.meta?.operator;
+    // The operator's raw object (from /api/... identity endpoints) carries no
+    // liveness field at all ({id,name,source,pending}), so channelStatus()'s
+    // fallback branch always landed on its hardcoded 'offline' default — not
+    // "usually" offline, ALWAYS, regardless of the operator actually viewing
+    // this exact page right now. Rendering this drawer at all means the
+    // operator's own client is live, so mark self-presence true.
+    const rawOperator = state.operator || state.meta?.operator;
+    const operator = rawOperator ? { ...rawOperator, live: true, state: rawOperator.state || 'running', busy: false } : rawOperator;
+    const mergeRosterInfo = member => {
+      const agent = agentsById.get(member.id);
+      if (agent) return { ...member, ...agent };
+      return operator?.id === member.id ? { ...member, ...operator } : member;
+    };
     const resolveDmMember = id => {
       const agent = agentsById.get(id);
       const rosterM = allMembers.find(m => m.id === id);
@@ -799,7 +817,11 @@
     if (operator?.id && !dmIds.includes(operator.id)) dmIds.push(operator.id);
     const members = dm && dmIds.length
       ? dmIds.map(resolveDmMember)
-      : allMembers;
+      : (() => {
+          const merged = allMembers.map(mergeRosterInfo);
+          if (operator?.id && !merged.some(m => m.id === operator.id)) merged.push(operator);
+          return merged;
+        })();
     const memberCount = dm ? dmIds.length : (members.length || Number(channel?.members) || 0);
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
@@ -823,5 +845,5 @@
   let refreshInterval = null;
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, channelStatus, toolSuffix};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix};
 })();

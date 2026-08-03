@@ -280,5 +280,47 @@ check('preferences save persists the dictation switch', () => {
   H.Trio.preferences.save({ dictation: true });
 });
 
+// LOTC: the channel drawer used to disagree with the Agent roster page
+// because the supervisor-backed {state,live,busy} merge only ran on the DM
+// code path — a normal channel's member list fell through to the raw
+// heartbeat-only rows, so channelStatus()'s "prefer the roster" branch never
+// fired for the common case. showDetails() must now merge state.agents into
+// EVERY channel's member list, not just DMs.
+check('channel drawer status agrees with the Agent roster for a regular (non-DM) channel', () => {
+  H.Trio.state.dmKey = null;
+  H.Trio.state.channel = 'atrium-test';
+  H.Trio.state.channels = [{ code: 'atrium-test', topic: 'Testing' }];
+  H.Trio.state.members = new Map([
+    ['ag_sleepy', { id: 'ag_sleepy', name: 'Sleepy', status: 'active' }],
+  ]);
+  H.Trio.state.agents = [{ id: 'ag_sleepy', name: 'Sleepy', state: 'sleeping', live: false, busy: false }];
+  H.Trio.workspace.showDetails();
+  const html = cx.document.getElementById('channel-drawer-body').innerHTML;
+  // The Agent roster page renders a sleeping (hibernated) agent as
+  // 'sleeping', not the heartbeat row's stale 'active' — the drawer must
+  // agree, matching channelStatus()'s own state==='sleeping' branch.
+  assert.ok(html.includes('channel-status-chip sleeping'),
+    'expected the roster-backed "sleeping" status, got: ' + html);
+  assert.ok(!html.includes('channel-status-chip active'),
+    'drawer still showed the stale heartbeat-only "active" status');
+});
+check('channel drawer never shows the operator as offline while they are viewing it', () => {
+  H.Trio.state.dmKey = null;
+  H.Trio.state.channel = 'atrium-test';
+  H.Trio.state.channels = [{ code: 'atrium-test', topic: 'Testing' }];
+  H.Trio.state.members = new Map(); // operator hasn't posted in this channel
+  H.Trio.state.agents = [];
+  H.Trio.state.operator = { id: '_op_l_jdsareault', name: 'jdsareault', source: 'loopback', pending: false };
+  H.Trio.workspace.showDetails();
+  const html = cx.document.getElementById('channel-drawer-body').innerHTML;
+  assert.ok(!html.includes('channel-status-chip offline'),
+    'operator rendered offline while actively viewing the page: ' + html);
+});
+check('channelStatus prefers roster-backed compacting/error states over heartbeat status', () => {
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'compacting', busy: true }), 'sleeping');
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: false, state: 'errored' }), 'errored');
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false }), 'idle');
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);
