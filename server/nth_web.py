@@ -5149,6 +5149,7 @@ WEB_JS_FILES = (
     "js/11-conversation.js", "js/06-ui.js", "js/12-composer.js",
     "js/13-file-links.js",
     "js/20-workspace.js", "js/30-agents.js", "js/40-preferences.js",
+    "js/45-notifications.js",
     "js/07-lifecycle.js", "js/08-sidebar.js", "js/90-boot.js", "js/99-test-hook.js",
 )
 

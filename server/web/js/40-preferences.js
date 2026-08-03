@@ -2,6 +2,7 @@
   'use strict';
   const Trio = window.Trio;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
   const KEY = 'trio.preferences.v1';
   // Each preset is a self-contained design — background family AND accent —
   // so there's nothing left to pick independently. Light presets stay near
@@ -26,8 +27,26 @@
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
-  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true, sttMode: 'local', messageHistoryDays: 3 };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean', sttMode: ['local','web'], messageHistoryDays: 'number' };
+  // Notification tiers, highest priority first — a message is classified
+  // into the FIRST tier it qualifies for (see Trio.notifications.classify):
+  //   dm      a private DM to you
+  //   mention an @you mention, or a !you / !all unfilterable bang (both mean
+  //           "someone specifically wants your attention" — one tier, not two)
+  //   ref     a #you reference (mentioned about, not pinged)
+  //   plain   any other message in a channel you're viewing, no targeting
+  // `chime`/`notifications` below stay the master kill switches; the per-tier
+  // *Tier* keys only matter when their master is on. Each tier also gets an
+  // independent chime *sound preset* — see Trio.notifications.SOUNDS.
+  const NOTIFICATION_TIERS = ['dm', 'mention', 'ref', 'plain'];
+  const SOUND_IDS = ['ping', 'alert', 'tick'];
+  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', messageHistoryDays: 3,
+    chimeTierDm: true, chimeTierMention: true, chimeTierRef: true, chimeTierPlain: false,
+    notifyTierDm: true, notifyTierMention: true, notifyTierRef: false, notifyTierPlain: false,
+    chimeSoundDm: 'alert', chimeSoundMention: 'ping', chimeSoundRef: 'tick', chimeSoundPlain: 'tick' };
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['local','web'], messageHistoryDays: 'number',
+    chimeTierDm: 'boolean', chimeTierMention: 'boolean', chimeTierRef: 'boolean', chimeTierPlain: 'boolean',
+    notifyTierDm: 'boolean', notifyTierMention: 'boolean', notifyTierRef: 'boolean', notifyTierPlain: 'boolean',
+    chimeSoundDm: SOUND_IDS, chimeSoundMention: SOUND_IDS, chimeSoundRef: SOUND_IDS, chimeSoundPlain: SOUND_IDS };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
     if (schema[key] === 'number') { const n = Number(value); return Number.isFinite(n) && n >= 0 ? n : defaults[key]; }
@@ -128,7 +147,7 @@
     });
     themeRow.append(themeChoices); appearance.append(themeRow);
     const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
-    const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Notify me when an agent mentions me or finishes a task.'],['chime','Notification chime','Play a short sound with desktop notifications.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
+    const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Master switch — which message types actually pop one is set below.'],['chime','Notification chime','Master switch — which message types actually play one, and which sound, is set below.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
     behaviors.forEach(([key,label,description]) => { const row = document.createElement('div'); row.className = 'pref-row'; const text = document.createElement('div'); text.className = 'pr-txt'; text.innerHTML = `<div class="l">${esc(label)}</div><div class="d">${esc(description)}</div>`; const toggle = document.createElement('label'); toggle.className = 'switch'; toggle.innerHTML = `<input type="checkbox" ${p[key] ? 'checked' : ''} aria-label="${esc(label)}"><span class="track"></span><span class="knob"></span>`; toggle.querySelector('input').addEventListener('change', event => save({[key]:event.target.checked})); row.append(text, toggle); behavior.append(row); });
     const historyRow = document.createElement('div'); historyRow.className = 'pref-row';
     const historyText = document.createElement('div'); historyText.className = 'pr-txt'; historyText.innerHTML = '<div class="l">Hide old messages</div><div class="d">Collapse messages older than this age so they don\'t clog the conversation. Expand them inline when needed.</div>';
@@ -143,10 +162,42 @@
     [['local','Local (Whisper, on-device)'],['web','Browser (built-in speech recognition)']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.sttMode === value) opt.selected = true; sttSelect.append(opt); });
     sttSelect.addEventListener('change', () => save({ sttMode: sttSelect.value }));
     sttRow.append(sttText, sttSelect); behavior.append(sttRow);
+    const notifyGroup = document.createElement('section'); notifyGroup.className = 'pref-group';
+    notifyGroup.innerHTML = '<h3>Notification rules</h3><p class="pref-group-note">Each message is classified into exactly one row — the highest that applies. A DM always wins; an @mention (or an unfilterable !bang) beats a #reference, which beats an untargeted channel message. Set chime/popup independently per row.</p>';
+    const tierLabels = { dm: 'Direct message', mention: '@Mention (or !bang)', ref: '#Reference', plain: 'Other channel message' };
+    const soundLabels = { ping: 'Ping', alert: 'Alert', tick: 'Tick' };
+    const tierTable = document.createElement('div'); tierTable.className = 'notify-tier-table';
+    tierTable.innerHTML = '<div class="notify-tier-row notify-tier-head"><span>Message type</span><span>Chime</span><span>Sound</span><span>Desktop popup</span></div>';
+    NOTIFICATION_TIERS.forEach(tier => {
+      const row = document.createElement('div'); row.className = 'notify-tier-row';
+      const label = document.createElement('span'); label.textContent = tierLabels[tier]; row.append(label);
+      const chimeToggle = document.createElement('label'); chimeToggle.className = 'switch switch-sm';
+      chimeToggle.innerHTML = `<input type="checkbox" ${p['chimeTier' + cap(tier)] ? 'checked' : ''} aria-label="Chime for ${esc(tierLabels[tier])}"><span class="track"></span><span class="knob"></span>`;
+      chimeToggle.querySelector('input').addEventListener('change', event => save({ ['chimeTier' + cap(tier)]: event.target.checked }));
+      row.append(chimeToggle);
+      const soundWrap = document.createElement('span'); soundWrap.className = 'notify-tier-sound';
+      const soundSelect = document.createElement('select'); soundSelect.className = 'pref-select'; soundSelect.setAttribute('aria-label', `Chime sound for ${tierLabels[tier]}`);
+      SOUND_IDS.forEach(id => { const opt = document.createElement('option'); opt.value = id; opt.textContent = soundLabels[id]; if (p['chimeSound' + cap(tier)] === id) opt.selected = true; soundSelect.append(opt); });
+      soundSelect.addEventListener('change', () => save({ ['chimeSound' + cap(tier)]: soundSelect.value }));
+      const previewBtn = document.createElement('button'); previewBtn.type = 'button'; previewBtn.className = 'btn ghost sm'; previewBtn.textContent = 'Preview';
+      previewBtn.addEventListener('click', () => Trio.notifications?.playPreset?.(soundSelect.value, p.chimeVolume));
+      soundWrap.append(soundSelect, previewBtn); row.append(soundWrap);
+      const notifyToggle = document.createElement('label'); notifyToggle.className = 'switch switch-sm';
+      notifyToggle.innerHTML = `<input type="checkbox" ${p['notifyTier' + cap(tier)] ? 'checked' : ''} aria-label="Desktop popup for ${esc(tierLabels[tier])}"><span class="track"></span><span class="knob"></span>`;
+      notifyToggle.querySelector('input').addEventListener('change', event => save({ ['notifyTier' + cap(tier)]: event.target.checked }));
+      row.append(notifyToggle);
+      tierTable.append(row);
+    });
+    notifyGroup.append(tierTable);
+    const volRow = document.createElement('div'); volRow.className = 'pref-row';
+    const volText = document.createElement('div'); volText.className = 'pr-txt'; volText.innerHTML = '<div class="l">Chime volume</div><div class="d">Applies to every tier\'s chime.</div>';
+    const volInput = document.createElement('input'); volInput.type = 'range'; volInput.min = '0'; volInput.max = '1'; volInput.step = '0.05'; volInput.value = String(p.chimeVolume); volInput.className = 'pref-range'; volInput.setAttribute('aria-label', 'Chime volume');
+    volInput.addEventListener('change', () => save({ chimeVolume: Number(volInput.value) }));
+    volRow.append(volText, volInput); notifyGroup.append(volRow);
     const diagnosticsGroup = document.createElement('section'); diagnosticsGroup.className = 'pref-group'; diagnosticsGroup.innerHTML = '<h3>Diagnostics</h3>';
     const diagnostic = diagnostics(); Object.entries(diagnostic).forEach(([key,value]) => { const row = document.createElement('div'); row.className = 'diag-card'; row.innerHTML = `<span class="di ${key === 'online' || key === 'stt' ? 'ok' : 'off'}">●</span><div class="dtxt"><div class="dl">${esc(key.replace(/([A-Z])/g,' $1'))}<span class="stat-chip-sm ${key === 'online' ? 'ok' : 'off'}">${esc(String(value))}</span></div></div>`; diagnosticsGroup.append(row); });
     const resetButton = document.createElement('button'); resetButton.type = 'button'; resetButton.className = 'reset-prefs'; resetButton.textContent = 'Reset to defaults'; resetButton.addEventListener('click', () => { reset(); renderPage(panel); }); diagnosticsGroup.append(resetButton);
-    panel.append(hero, appearance, behavior, diagnosticsGroup);
+    panel.append(hero, appearance, behavior, notifyGroup, diagnosticsGroup);
   }
   function init() { apply(); }
   function mount() { init(); }

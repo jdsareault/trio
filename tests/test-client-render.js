@@ -322,5 +322,57 @@ check('channelStatus prefers roster-backed compacting/error states over heartbea
   assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false }), 'idle');
 });
 
+// Notification tier classification — DM > @mention/!bang > #ref > plain,
+// first match wins. See 45-notifications.js / 40-preferences.js's
+// NOTIFICATION_TIERS comment for the full rationale.
+check('classify: a DM to you outranks everything else', () => {
+  const msg = { member_id: 'ag_1', recipients: ['me'], mentions: [], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'dm');
+});
+check('classify: @mention when not a DM', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: ['me'], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'mention');
+});
+check('classify: !bang counts as the same tier as @mention', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: [], refs: [], bangs: ['me'] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'mention');
+});
+check('classify: #reference below mention, above plain', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: [], refs: ['me'], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'ref');
+});
+check('classify: untargeted channel message is plain', () => {
+  const msg = { member_id: 'ag_1', recipients: [], mentions: [], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'plain');
+});
+check('classify: a DM addressed to someone ELSE is not a DM tier for you', () => {
+  const msg = { member_id: 'ag_1', recipients: ['someone-else'], mentions: [], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'plain');
+});
+check('classify: your own message never classifies (no self-notify)', () => {
+  const msg = { member_id: 'me', recipients: [], mentions: ['me'], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), null);
+});
+check('classify: a system message never classifies', () => {
+  const msg = { member_id: 'ag_1', content: '[joined] Someone', mentions: ['me'], refs: [], bangs: [], recipients: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), null);
+});
+check('classify: DM still wins even if you were also @mentioned in it', () => {
+  const msg = { member_id: 'ag_1', recipients: ['me'], mentions: ['me'], refs: [], bangs: [] };
+  assert.strictEqual(H.Trio.notifications.classify(msg, 'me'), 'dm');
+});
+check('notifications module exposes the 4-tier priority order and 3 sound presets', () => {
+  // Array.from() (not the raw sandboxed array) — the vm sandbox's Array is a
+  // different realm than this test's, so a bare literal comparison here
+  // fails deepStrictEqual's prototype check despite identical contents.
+  assert.deepStrictEqual(Array.from(H.Trio.notifications.TIERS), ['dm', 'mention', 'ref', 'plain']);
+  assert.deepStrictEqual(Object.keys(H.Trio.notifications.SOUNDS).sort(), ['alert', 'ping', 'tick']);
+});
+check('playPreset never throws even with no AudioContext available (headless/CI)', () => {
+  assert.doesNotThrow(() => H.Trio.notifications.playPreset('ping', 0.5));
+  assert.doesNotThrow(() => H.Trio.notifications.playPreset('nonexistent-preset', 0.5));
+  assert.doesNotThrow(() => H.Trio.notifications.playPreset('ping', 0)); // muted — should no-op, not throw
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);
