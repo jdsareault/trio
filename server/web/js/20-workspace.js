@@ -733,9 +733,11 @@
     if (failures.length === results.length) state.workspaceError = 'Workspace refresh failed';
     state.workspaceLoading = false;
     renderRail();
-    // state.agents was just refreshed above; repaint the face-pile so its dots
-    // reflect the current live/busy/state without waiting for a roster SSE tick.
+    // state.agents was just refreshed above; repaint the face-pile and (if open)
+    // the drawer members so their dots reflect the current live/busy/state
+    // without waiting for a roster SSE tick.
     renderFacePile();
+    refreshDrawerMembers();
     Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     if (['home','attention','messages','tasks'].includes(state.view)) showView(state.view);
   }
@@ -785,7 +787,14 @@
       // Compaction is its own state — surface it as "Compacting", not
       // "Sleeping", so the drawer/face-pile agree with the Agent roster card.
       if (rawState === 'compacting') return 'compacting';
-      if (member.live) return member.busy ? 'working' : 'idle';
+      if (member.live) {
+        // Working/idle is the fast-changing bit: prefer the roster's
+        // member_status (pushed over the SSE roster stream within ~1s) so
+        // "working" + the tool chip appear in near-realtime, rather than waiting
+        // for the slower /api/agents poll's busy flag.
+        const rosterStatus = String(member.status || '').toLowerCase();
+        return (rosterStatus === 'working' || member.busy) ? 'working' : 'idle';
+      }
       if (rawState === 'error' || rawState === 'errored') return 'errored';
       if (rawState === 'sleeping') return rawState;
       return 'offline';
@@ -859,34 +868,19 @@
     };
     document.addEventListener('pointermove', drawerResizeMove); document.addEventListener('pointerup', drawerResizeEnd, {once:true});
   }
-  function showDetails() {
-    const drawer = $('channel-drawer'); const body = $('channel-drawer-body');
-    if (!drawer || !body) return;
-    closeChannelMenu();
-    const channel = (state.channels || []).find(c => c.code === state.channel);
-    const archived = !!channel?.archived || !!state.readOnly;
+  // Compute the drawer's member rows from current state — extracted from
+  // showDetails so refreshDrawerMembers() can recompute them live on a roster
+  // tick without rebuilding the whole panel. Each roster member carries the
+  // SSE-pushed member_status + tool + context (fresh within ~1s); state.agents
+  // overlays the supervisor-backed {live,busy,state}. channelStatus() then reads
+  // working/idle from the fresh roster status and connected/sleeping from the
+  // agent fields.
+  function drawerMembers() {
     const dm = state.dmKey ? (state.dms?.your_dms || []).find(d => d.key === state.dmKey) : null;
-    const title = dm ? (dm.name || state.dmKey) : '#' + (state.channel || 'Atrium');
-    // For a DM, show only the conversation participants — not the whole channel
-    // roster. Agent DMs all share AGENT_INBOX_CHANNEL, so the unfiltered roster
-    // would list every agent ever created, each stamped "active" at spawn.
-    // Agent participants use the supervisor-backed {state, live, busy} from
-    // state.agents (same source as the Agent roster page) so the status chip
-    // agrees with the roster instead of the heartbeat-based channel status.
-    //
-    // LOTC: this merge used to run ONLY on the DM path (dmIds.map(...)) — a
-    // normal channel's member list (allMembers, the common case) fell straight
-    // through to the raw heartbeat-based rows with no {state,live,busy}, so
-    // channelStatus()'s "prefer the roster's fields" branch below never fired
-    // for it and the drawer permanently disagreed with the Agent roster page.
     const allMembers = [...(state.members?.values?.() || [])];
     const agentsById = new Map((state.agents || []).map(a => [a.id, a]));
-    // The operator's raw object (from /api/... identity endpoints) carries no
-    // liveness field at all ({id,name,source,pending}), so channelStatus()'s
-    // fallback branch always landed on its hardcoded 'offline' default — not
-    // "usually" offline, ALWAYS, regardless of the operator actually viewing
-    // this exact page right now. Rendering this drawer at all means the
-    // operator's own client is live, so mark self-presence true.
+    // Rendering this drawer at all means the operator's own client is live, so
+    // mark self-presence true (their raw identity object carries no liveness).
     const rawOperator = state.operator || state.meta?.operator;
     const operator = rawOperator ? { ...rawOperator, live: true, state: rawOperator.state || 'running', busy: false } : rawOperator;
     const mergeRosterInfo = member => {
@@ -909,11 +903,37 @@
           if (operator?.id && !merged.some(m => m.id === operator.id)) merged.push(operator);
           return merged;
         })();
-    const memberCount = dm ? dmIds.length : (members.length || Number(channel?.members) || 0);
+    const channel = (state.channels || []).find(c => c.code === state.channel);
+    const count = (dm && dmIds.length) ? dmIds.length : (members.length || Number(channel?.members) || 0);
+    return { members, count };
+  }
+  // Live-refresh just the drawer's Members section on a roster/agent tick so an
+  // OPEN drawer reflects status/tool changes in near-realtime without tearing
+  // down the whole panel (which would re-run the channel-size fetch and reset
+  // scroll). No-op when the drawer is closed.
+  function refreshDrawerMembers() {
+    const drawer = $('channel-drawer');
+    if (!drawer || !drawer.classList.contains('open')) return;
+    const list = $('channel-drawer-members');
+    if (!list) return;
+    const { members, count } = drawerMembers();
+    list.innerHTML = members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>';
+    const heading = $('channel-drawer-members-heading');
+    if (heading) heading.textContent = 'Members · ' + count;
+  }
+  function showDetails() {
+    const drawer = $('channel-drawer'); const body = $('channel-drawer-body');
+    if (!drawer || !body) return;
+    closeChannelMenu();
+    const channel = (state.channels || []).find(c => c.code === state.channel);
+    const archived = !!channel?.archived || !!state.readOnly;
+    const dm = state.dmKey ? (state.dms?.your_dms || []).find(d => d.key === state.dmKey) : null;
+    const title = dm ? (dm.name || state.dmKey) : '#' + (state.channel || 'Atrium');
+    const { members, count: memberCount } = drawerMembers();
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
-    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div>${dm ? `<div class="kv"><span class="k">Channel size</span><span class="v channel-drawer-empty-inline">not available for DMs</span></div>` : `<div class="kv"><span class="k">Channel size</span><span class="v" id="channel-drawer-size" title="Rough estimate of this channel's message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div>`}<div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
+    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3 id="channel-drawer-members-heading">Members · ${memberCount}</h3><div id="channel-drawer-members">${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</div></section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div>${dm ? `<div class="kv"><span class="k">Channel size</span><span class="v channel-drawer-empty-inline">not available for DMs</span></div>` : `<div class="kv"><span class="k">Channel size</span><span class="v" id="channel-drawer-size" title="Rough estimate of this channel's message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div>`}<div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
     $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });
@@ -1024,7 +1044,13 @@
     input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
   }
   let refreshInterval = null;
-  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, messageCountLabel};
+  let agentsInterval = null;
+  // Dedicated faster poll for agent live/busy/state (+context) so connected/
+  // sleeping/compacting transitions show within ~5s — cheaper bits than the full
+  // 15s workspace refresh, operator-gated, no agent tokens. Working/idle + tool
+  // use come faster still, over the roster SSE (see renderFacePile/refreshDrawerMembers).
+  function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
+  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel};
 })();
