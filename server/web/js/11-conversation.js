@@ -495,6 +495,14 @@
         const others = [...recips].filter(id => id !== op);
         if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
       }
+    } else if (msg.channel && state.channel && msg.channel !== state.channel) {
+      // A message from another channel must not render in the channel
+      // currently open. The workspace-wide SSE stream (00-core.js) multiplexes
+      // EVERY channel's messages through this same event target so the
+      // notification module can chime for other channels; the central guard in
+      // 04-events.js::dispatch only protects its own state write, not this
+      // fan-out — so re-check here. DM views are scoped by recipients above.
+      return;
     }
     const wasNear = nearBottom(dom()); const previous = state.messages.get(msg.id) || {};
     state.messages.set(msg.id, Object.assign({}, previous, msg));
@@ -540,7 +548,23 @@
   }
   const listeners = {};
   function onMessage(event) { ingest(event.detail); }
-  function onRoster(event) { if (Array.isArray(event.detail?.members)) state.members = new Map(event.detail.members.map(m => [m.id, m])); render(); }
+  function onRoster(event) {
+    // Only apply a roster snapshot explicitly stamped for the open channel.
+    // The workspace-wide SSE stream multiplexes every channel's roster through
+    // this same event target; without this guard another channel's roster
+    // (e.g. AGENT_INBOX_CHANNEL's full agent list) overwrites the open
+    // channel's members and paints the wrong face-pile / sidebar.
+    // 04-events.js::dispatch guards its own state.members write the same way
+    // (exact channel match, so a missing channel fails closed), but listeners
+    // re-derive from the raw detail and bypass it — so re-check identically.
+    // Ignore a foreign-channel tick WITHOUT re-rendering: only the open
+    // channel's roster changes what this view paints (name/sigil resolution),
+    // and these ticks arrive constantly on the multiplexed stream.
+    const detail = event.detail;
+    if (!detail || detail.channel !== state.channel) return;
+    if (Array.isArray(detail.members)) state.members = new Map(detail.members.map(m => [m.id, m]));
+    render();
+  }
   function onBoot(event) { state.operator = event.detail?.operator || state.operator; }
   function onPrefsChanged() { render(); }
   function init() {
