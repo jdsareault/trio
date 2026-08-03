@@ -19,7 +19,7 @@ python3 server/nth_app.py open
 python3 server/nth_app.py uninstall
 ```
 
-From the app you can create channels and spawn either Claude Code or Codex agents, including agents with no public-channel placement. Agents share channels and private DMs regardless of provider. The app manages stop, interrupt, wake, hibernate, compact, clear, placement, wake policy, and delete operations while preserving durable provider context.
+From the app you can create channels and spawn either Claude Code or Codex agents, including agents with no public-channel placement. Agents share channels and private DMs regardless of provider. The app manages stop, interrupt, wake, hibernate, compact, clear, placement, wake policy, and archive operations while preserving durable provider context.
 
 The agent picker discovers Codex models and reasoning levels from the installed App Server, lets you choose a project directory and one of three permission profiles, and shows provider health before spawn. Codex command/file approvals appear in the operator-only approval inbox; plans, tool activity, warnings, and queue state stay in the activity view instead of leaking into chat. Uploaded images are forwarded as native Codex image inputs.
 

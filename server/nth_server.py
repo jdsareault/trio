@@ -485,7 +485,9 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             wake_mode      TEXT NOT NULL DEFAULT 'at',
             avatar_name    TEXT NOT NULL DEFAULT '',
             created_at     TEXT NOT NULL,
-            last_active_at TEXT
+            last_active_at TEXT,
+            archived_at    TEXT,
+            archived_by    TEXT
         )
     """)
     # Additive migrations for databases created by earlier unified-hub phases.
@@ -498,6 +500,8 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
         "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
         "avatar_name": "TEXT NOT NULL DEFAULT ''",
+        "archived_at": "TEXT",
+        "archived_by": "TEXT",
     }
     for column, definition in agent_columns.items():
         try:

@@ -203,17 +203,28 @@ check('agent action capabilities filter by lifecycle', () => {
 check('agent management exposes every supported lifecycle action', () => {
   const live = H.Trio.agents.viewModel({ id: 'ag_live', live: true, busy: false });
   const resting = H.Trio.agents.viewModel({ id: 'ag_resting', live: false, state: 'sleeping' });
-  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(live)), ['hibernate', 'compact', 'clear', 'delete']);
-  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(resting)), ['wake', 'clear', 'delete']);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(live)), ['hibernate', 'compact', 'clear', 'archive']);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(resting)), ['wake', 'clear', 'archive']);
   assert.strictEqual(H.Trio.agents.actionLabel('hibernate'), 'Hibernate');
   assert.strictEqual(H.Trio.agents.actionLabel('compact'), 'Compact context');
-  assert.strictEqual(H.Trio.agents.actionLabel('delete'), 'Delete agent');
+  assert.strictEqual(H.Trio.agents.actionLabel('archive'), 'Archive agent');
+  assert.strictEqual(H.Trio.agents.actionLabel('unarchive'), 'Unarchive agent');
+});
+check('archived agents expose only the unarchive action', () => {
+  const vm = H.Trio.agents.viewModel({ id: 'ag_archived', archived: true, live: false, state: 'stopped' });
+  assert.strictEqual(vm.archived, true);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['unarchive']);
+});
+check('viewModel derives archived from archived_at alone (server contract)', () => {
+  const vm = H.Trio.agents.viewModel({ id: 'ag_at', archived_at: '2026-08-01T12:00:00Z', live: false, state: 'stopped' });
+  assert.strictEqual(vm.archived, true);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['unarchive']);
 });
 check('agent compaction status outranks the ordinary live state', () => {
   const vm = H.Trio.agents.viewModel({ id: 'ag_compact', live: true, busy: false, state: 'compacting' });
   assert.strictEqual(vm.lifecycle, 'compacting');
   assert.strictEqual(vm.compacting, true);
-  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['stop', 'delete']);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.actionCaps(vm)), ['stop', 'archive']);
 });
 check('clicking a roster tile opens that agent’s management dialog', () => {
   const originalModal = H.Trio.ui.modal;
