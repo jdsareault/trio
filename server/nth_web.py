@@ -1011,7 +1011,8 @@ class EventHub:
             character_avatars = {
                 r["id"]: avatar_url(r["avatar_name"] or "")
                 for r in db.execute(
-                    "SELECT id, avatar_name FROM agents WHERE avatar_name != ''"
+                    "SELECT id, avatar_name FROM agents "
+                    "WHERE avatar_name != '' AND archived_at IS NULL"
                 ).fetchall()
             }
         except sqlite3.Error:
@@ -2298,7 +2299,8 @@ def _gen_agent_id() -> str:
 
 def pick_agent_name(db, desired: str = "") -> str:
     """A free requested name, or a random unused character name."""
-    used = {r[0] for r in db.execute("SELECT name FROM agents").fetchall()}
+    used = {r[0] for r in db.execute(
+        "SELECT name FROM agents WHERE archived_at IS NULL").fetchall()}
     if desired and desired not in used:
         return desired
     available = [name for name in _CHARACTER_NAMES if name not in used]
@@ -2315,7 +2317,8 @@ def pick_agent_avatar(db, name: str) -> str:
     if name in _CHARACTER_NAMES:
         return name
     used = {r[0] for r in db.execute(
-        "SELECT avatar_name FROM agents WHERE avatar_name != ''").fetchall()}
+        "SELECT avatar_name FROM agents "
+        "WHERE avatar_name != '' AND archived_at IS NULL").fetchall()}
     available = [avatar for _name, avatar in _CHARACTERS if avatar not in used]
     return secrets.choice(available or [avatar for _name, avatar in _CHARACTERS])
 
@@ -3627,7 +3630,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
             targets = []
             agent_rows = db.execute(
-                "SELECT id, name, state, model FROM agents ORDER BY name COLLATE NOCASE"
+                "SELECT id, name, state, model FROM agents "
+                "WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE"
             ).fetchall()
             for a in agent_rows:
                 channels = public_agent_channels(db, a["id"])
@@ -3790,7 +3794,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "channels": chans,
                     "dm_ready": dm_ready,
                     "abandoned": not chans and not dm_ready,
-                    "archived": archived,
                     "archived_at": r["archived_at"],
                     "live": sup.is_running(r["id"]),
                     "busy": sup.is_busy(r["id"]),
@@ -4219,6 +4222,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident is None or not self._require_agent_control():
             return
         sup = get_supervisor()
+        # Archived agents are frozen: only unarchive (and archive itself,
+        # which is a no-op stamp) can touch them. All other lifecycle
+        # actions — wake, clear, compact, stop, placement — are rejected
+        # so an archived agent can't be silently revived or mutated.
+        if action not in ("archive", "unarchive"):
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                row = db.execute(
+                    "SELECT archived_at FROM agents WHERE id=?", (agent_id,)
+                ).fetchone()
+            finally:
+                db.close()
+            if row is not None and row[0] is not None:
+                self._error(409, "agent is archived — unarchive first")
+                return
         if action == "stop":
             ok = sup.stop(agent_id)
         elif action == "interrupt":
@@ -4310,26 +4328,36 @@ class NthWebHandler(BaseHTTPRequestHandler):
             finally:
                 db.close()
         elif action == "archive":
-            # Soft-delete: stop the runtime, revoke sessions, deactivate
-            # presence, and stamp archived_at — but keep the agents row and
+            # Soft-delete: stamp archived_at FIRST (so the agent is hidden from
+            # the roster even if the runtime stop fails), then stop the runtime,
+            # revoke sessions, and deactivate presence. Keep the agents row and
             # agent_channels so the agent can be unarchived later. Mirrors the
             # channel archive pattern (archived_at/archived_by columns).
-            if not sup.stop(agent_id):
-                self._error(404, "agent not found or stop failed")
-                return
+            now = now_iso()
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
                 with db:
-                    db.execute(
+                    cur = db.execute(
                         "UPDATE agents SET archived_at=?, archived_by=?, "
                         "state=?, pid=NULL WHERE id=?",
-                        (now_iso(), ident.member_id, nsup.ST_STOPPED, agent_id))
+                        (now, ident.member_id, nsup.ST_STOPPED, agent_id))
+                    if cur.rowcount == 0:
+                        self._error(404, "agent not found")
+                        return
                     db.execute("UPDATE members SET active = 0 WHERE id = ?", (agent_id,))
                     db.execute(
                         "UPDATE sessions SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL",
-                        (now_iso(), agent_id))
+                        (now, agent_id))
             finally:
                 db.close()
+            # Stop the runtime after the DB is stamped. If stop fails the agent
+            # is still archived (hidden, sessions revoked) — the operator can
+            # investigate via the archived view. This avoids the orphaned state
+            # where stop succeeds but the DB transaction fails.
+            try:
+                sup.stop(agent_id)
+            except Exception:
+                pass
             ok = True
         elif action == "unarchive":
             db = sqlite3.connect(str(self.db_path), timeout=5)
@@ -4341,10 +4369,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     self._error(404, "agent not found")
                     return
                 with db:
-                    db.execute(
-                        "UPDATE agents SET archived_at=NULL, archived_by=NULL "
-                        "WHERE id=?", (agent_id,))
-                    # Restore presence in every placed channel + the inbox.
+                    cur = db.execute(
+                        "UPDATE agents SET archived_at=NULL, archived_by=NULL, "
+                        "state=?, pid=NULL WHERE id=?",
+                        (nsup.ST_STOPPED, agent_id))
+                    if cur.rowcount == 0:
+                        self._error(404, "agent not found")
+                        return
+                    # Restore presence only in channels where the agent still
+                    # has an agent_channels row (i.e. was NOT removed before
+                    # archiving) + the private inbox.
                     db.execute(
                         "UPDATE members SET active = 1 WHERE id=? AND channel IN ("
                         "SELECT channel FROM agent_channels WHERE agent_id=?"
