@@ -23,6 +23,56 @@
     async post(path, body, channelScoped = true) { const response = await fetch(this.url(path, channelScoped), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
   };
   root.actions = root.actions || {};
+  // ── Avatar tone assignment ──────────────────────────────────────────
+  // Two call sites (11-conversation.js, 20-workspace.js) used to each keep
+  // their own copy of a pure hash — tones[sum(charCodes) % 5] — with no
+  // collision avoidance at all, so two members could land on the identical
+  // tone by pure chance (reported: two agents both plum). Mirrors
+  // nth_constants.py's animal_for_channel: hash picks a PREFERRED slot,
+  // linear-probing to the next free one only on an actual collision, over
+  // ids/labels sorted for determinism — every tone in the pool gets used
+  // before any repeats, and a given id keeps the same tone across renders
+  // as long as the population (who else is visible) hasn't changed.
+  const AVATAR_TONES = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum'];
+  function hashLabel(label) {
+    let h = 0;
+    for (const ch of String(label || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return h;
+  }
+  root.avatarTones = function avatarTones(labels) {
+    const pool = AVATAR_TONES.length;
+    const taken = new Set();
+    const result = new Map();
+    for (const label of [...new Set((labels || []).filter(Boolean))].sort()) {
+      let pick = hashLabel(label) % pool;
+      for (let i = 0; i < pool && taken.has(pick); i++) pick = (pick + 1) % pool;
+      taken.add(pick);
+      result.set(label, AVATAR_TONES[pick]);
+    }
+    return result;
+  };
+  // Convenience single-lookup form for call sites that just want "the tone
+  // for this one label" — builds the population from everyone currently
+  // known to the client (this channel's live roster + every managed agent +
+  // the operator) so a message/avatar rendered ANYWHERE in the app resolves
+  // the same tone for the same identity. Population sizes here are small
+  // (roster/agent counts, not message volume), so recomputing per call is
+  // cheap — no cache to invalidate when the roster changes.
+  root.avatarTone = function avatarTone(label) {
+    const ids = new Set();
+    const members = root.state?.members;
+    if (members instanceof Map) for (const id of members.keys()) ids.add(id);
+    // state.agents is a flat array once 30-agents.js's refresh() has run at
+    // least once, but 01-store.js's initial shape is {list, selected,
+    // loading} — guard against both rather than assume the post-refresh
+    // shape everywhere avatarTone might get called from.
+    const agents = Array.isArray(root.state?.agents) ? root.state.agents
+      : Array.isArray(root.state?.agents?.list) ? root.state.agents.list : [];
+    for (const agent of agents) if (agent?.id) ids.add(agent.id);
+    if (root.state?.operator?.id) ids.add(root.state.operator.id);
+    ids.add(label);
+    return root.avatarTones([...ids]).get(label);
+  };
   root.boot = async function boot(mountFeatures) {
     const meta = await root.api.get('/api/meta'); root.state.meta = meta;
     root.state.operator = meta.operator || null;

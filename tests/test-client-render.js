@@ -553,5 +553,47 @@ check('conversationKeyFor: an unresolvable DM (no matching thread loaded yet) fa
   assert.strictEqual(H.Trio.notifications.conversationKeyFor({ member_id: 'ag1', recipients: ['me'], channel: 'nth-agent-inbox' }), 'nth-agent-inbox');
 });
 
+// Avatar tone collision avoidance: two separate copies of the same bare
+// hash (sum of char codes mod 5) meant two members could land on the
+// identical tone purely by chance (reported: two agents both showing
+// plum). Trio.avatarTones mirrors nth_constants.py's animal_for_channel —
+// hash picks a preferred slot, linear-probing to the next free one only on
+// an actual collision — so every tone in the pool is used before any repeat.
+check('avatarTones: every tone in the pool is used before any repeats, up to pool size', () => {
+  // 5 labels chosen so at least two would hash to the same slot under the
+  // bare "sum of char codes mod 5" scheme (this is the actual bug report).
+  const labels = ['Clover', 'Stag', 'Frost', 'Gale', 'Delta'];
+  const assignment = H.Trio.avatarTones(labels);
+  const tones = labels.map(label => assignment.get(label));
+  assert.strictEqual(new Set(tones).size, 5, 'expected all 5 distinct tones, got: ' + tones.join(','));
+});
+check('avatarTones: a 6th label beyond the pool size must repeat (only 5 tones exist)', () => {
+  const labels = ['Clover', 'Stag', 'Frost', 'Gale', 'Delta', 'Sixth'];
+  const assignment = H.Trio.avatarTones(labels);
+  assert.strictEqual(new Set(labels.map(l => assignment.get(l))).size, 5);
+});
+check('avatarTones: deterministic — the same label set always resolves the same way', () => {
+  const labels = ['Clover', 'Stag', 'Frost'];
+  const a = H.Trio.avatarTones(labels);
+  const b = H.Trio.avatarTones([...labels].reverse()); // input order must not matter — sorted internally
+  for (const label of labels) assert.strictEqual(a.get(label), b.get(label));
+});
+check('avatarTones: falsy/duplicate labels are ignored, never crash', () => {
+  assert.doesNotThrow(() => H.Trio.avatarTones([]));
+  assert.doesNotThrow(() => H.Trio.avatarTones([null, undefined, '', 'Clover', 'Clover']));
+  assert.strictEqual(H.Trio.avatarTones([null, undefined, '', 'Clover', 'Clover']).size, 1);
+});
+check('avatarTone: two known agents never share a tone (the reported bug)', () => {
+  H.Trio.state.members = new Map();
+  H.Trio.state.agents = [{ id: 'ag_clover' }, { id: 'ag_stag' }];
+  H.Trio.state.operator = null;
+  assert.notStrictEqual(H.Trio.avatarTone('ag_clover'), H.Trio.avatarTone('ag_stag'));
+});
+check('avatarTone: tolerates state.agents in its pre-refresh {list,...} shape (not yet a flat array)', () => {
+  H.Trio.state.members = new Map();
+  H.Trio.state.agents = { list: [{ id: 'ag_x' }], selected: null, loading: false };
+  assert.doesNotThrow(() => H.Trio.avatarTone('ag_x'));
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);

@@ -196,7 +196,9 @@
     const agent = agentRecord(member?.id || label);
     return avatar(label, avatarTone(label), status, member?.avatar_url || agent?.avatar_url || '');
   }
-  function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
+  // Shared with 11-conversation.js via Trio.avatarTone (00-core.js) — see its
+  // comment there for why this needed to stop being a bare per-label hash.
+  const avatarTone = Trio.avatarTone;
   function renderFacePile() {
     const pile = $('face-pile'); if (!pile) return;
     if (!state.channel) { pile.classList.add('hidden'); return; }
