@@ -1797,7 +1797,8 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
         "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
     rows = conn.execute(
-        "SELECT id, name, model, base_prompt FROM agents WHERE managed = 1"
+        "SELECT id, name, model, base_prompt FROM agents "
+        "WHERE managed = 1 AND archived_at IS NULL"
     ).fetchall()
     for row in rows:
         agent_id, name, model, base_prompt = row
@@ -1900,7 +1901,8 @@ def ensure_agents_schema(conn) -> None:
             permission_profile TEXT NOT NULL DEFAULT 'balanced',
             wake_mode TEXT NOT NULL DEFAULT 'at',
             avatar_name TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL, last_active_at TEXT)
+            created_at TEXT NOT NULL, last_active_at TEXT,
+            archived_at TEXT, archived_by TEXT)
     """)
     agent_columns = {
         "effort": "TEXT NOT NULL DEFAULT ''",
@@ -1911,6 +1913,8 @@ def ensure_agents_schema(conn) -> None:
         "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
         "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
         "avatar_name": "TEXT NOT NULL DEFAULT ''",
+        "archived_at": "TEXT",
+        "archived_by": "TEXT",
     }
     for column, definition in agent_columns.items():
         try:
@@ -2068,7 +2072,8 @@ def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
     db.row_factory = sqlite3.Row
     try:
         ids = [r["id"] for r in db.execute(
-            "SELECT id FROM agents WHERE managed=1 AND state IN (?,?,?)",
+            "SELECT id FROM agents WHERE managed=1 AND archived_at IS NULL "
+            "AND state IN (?,?,?)",
             (nsup.ST_SPAWNING, nsup.ST_RUNNING, nsup.ST_IDLE)
         ).fetchall()]
     finally:
@@ -2118,7 +2123,8 @@ class AgentIdleReaper(threading.Thread):
         try:
             rows = db.execute(
                 "SELECT id, last_active_at FROM agents WHERE managed=1 "
-                "AND state = ?", (nsup.ST_IDLE,)).fetchall()
+                "AND archived_at IS NULL AND state = ?",
+                (nsup.ST_IDLE,)).fetchall()
         finally:
             db.close()
         slept = []
@@ -2570,7 +2576,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/dms":
             self._handle_dms(parsed)
         elif path == "/api/agents":
-            self._handle_agents_list()
+            self._handle_agents_list(parsed)
         elif path == "/api/agent-models":
             self._handle_agent_models(parsed)
         elif path == "/api/approvals":
@@ -3744,11 +3750,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _handle_agents_list(self) -> None:
+    def _handle_agents_list(self, parsed) -> None:
         """Roster of every managed (and external) agent + placements + live
-        process state. Operator-only."""
+        process state. Operator-only. Archived agents are excluded by default;
+        pass ?archived=1 to list only archived agents."""
         if self._require_operator() is None or not self._require_agent_control():
             return
+        archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
         sup = get_supervisor()
         db = None
         try:
@@ -3758,12 +3766,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             rows = db.execute(
                 "SELECT id, name, model, state, managed, session_id, pid, "
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
-                "wake_mode, avatar_name, created_at, last_active_at FROM agents ORDER BY created_at"
+                "wake_mode, avatar_name, created_at, last_active_at, archived_at "
+                "FROM agents WHERE archived_at IS "
+                + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
             agents = []
             for r in rows:
                 chans = public_agent_channels(db, r["id"])
-                dm_ready = db.execute(
+                dm_ready = (not archived) and db.execute(
                     "SELECT 1 FROM agent_channels WHERE agent_id=? AND channel=?",
                     (r["id"], AGENT_INBOX_CHANNEL)).fetchone() is not None
                 agents.append({
@@ -3780,6 +3790,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "channels": chans,
                     "dm_ready": dm_ready,
                     "abandoned": not chans and not dm_ready,
+                    "archived": archived,
+                    "archived_at": r["archived_at"],
                     "live": sup.is_running(r["id"]),
                     "busy": sup.is_busy(r["id"]),
                     "queued": sup.queued_count(r["id"]),
@@ -4203,7 +4215,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_action(self, agent_id: str, action: str) -> None:
         """Lifecycle/context/placement operations for a managed agent."""
-        if self._require_operator() is None or not self._require_agent_control():
+        ident = self._require_operator()
+        if ident is None or not self._require_agent_control():
             return
         sup = get_supervisor()
         if action == "stop":
@@ -4296,22 +4309,51 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 ok = cur.rowcount > 0
             finally:
                 db.close()
-        elif action == "delete":
-            if not sup.delete(agent_id):
-                self._error(404, "agent not found or provider delete failed")
+        elif action == "archive":
+            # Soft-delete: stop the runtime, revoke sessions, deactivate
+            # presence, and stamp archived_at — but keep the agents row and
+            # agent_channels so the agent can be unarchived later. Mirrors the
+            # channel archive pattern (archived_at/archived_by columns).
+            if not sup.stop(agent_id):
+                self._error(404, "agent not found or stop failed")
                 return
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
                 with db:
-                    db.execute("DELETE FROM agent_channels WHERE agent_id = ?", (agent_id,))
+                    db.execute(
+                        "UPDATE agents SET archived_at=?, archived_by=?, "
+                        "state=?, pid=NULL WHERE id=?",
+                        (now_iso(), ident.member_id, nsup.ST_STOPPED, agent_id))
                     db.execute("UPDATE members SET active = 0 WHERE id = ?", (agent_id,))
                     db.execute(
                         "UPDATE sessions SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL",
                         (now_iso(), agent_id))
-                    db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
             finally:
                 db.close()
             ok = True
+        elif action == "unarchive":
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                exists = db.execute(
+                    "SELECT 1 FROM agents WHERE id=?", (agent_id,)).fetchone()
+                if exists is None:
+                    self._error(404, "agent not found")
+                    return
+                with db:
+                    db.execute(
+                        "UPDATE agents SET archived_at=NULL, archived_by=NULL "
+                        "WHERE id=?", (agent_id,))
+                    # Restore presence in every placed channel + the inbox.
+                    db.execute(
+                        "UPDATE members SET active = 1 WHERE id=? AND channel IN ("
+                        "SELECT channel FROM agent_channels WHERE agent_id=?"
+                        " UNION SELECT ?)",
+                        (agent_id, agent_id, AGENT_INBOX_CHANNEL))
+            finally:
+                db.close()
+            ok = True
+            # The agent stays stopped after unarchive — wake it to resume.
         else:
             self._error(400, f"unknown action: {action}")
             return
