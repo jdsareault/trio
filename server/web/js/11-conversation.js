@@ -17,6 +17,10 @@
 
   function member(id) { return state.members.get(id) || {}; }
   function nameFor(id, fallback) { return member(id).name || fallback || id || 'unknown'; }
+  function avatarTone(label) {
+    const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum'];
+    return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length];
+  }
   function avatarUrlFor(id) {
     const fromMember = member(id).avatar_url;
     if (fromMember) return fromMember;
@@ -337,11 +341,14 @@
       card.append(content);
       return card;
     }
-    const avatar = document.createElement(vm.avatarUrl ? 'img' : 'div');
-    avatar.className = 'message-avatar av av-32' + (vm.avatarUrl ? ' avatar-svg' : '');
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar av av-32 tone-' + avatarTone(vm.author);
     avatar.setAttribute('aria-hidden', 'true');
-    if (vm.avatarUrl) { avatar.src = vm.avatarUrl; avatar.alt = ''; }
-    else avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    if (vm.avatarUrl) {
+      const image = document.createElement('img');
+      image.className = 'avatar-svg-image'; image.src = vm.avatarUrl; image.alt = '';
+      avatar.append(image);
+    } else avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = vm.author;
