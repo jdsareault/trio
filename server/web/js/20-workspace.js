@@ -719,6 +719,13 @@
       api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); }),
       api.get('/api/mentions').then(data => { state.mentions = data.mentions || []; Trio.store.set('workspace.mentions', state.mentions); }),
       api.get('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); }),
+      // Keep state.agents (live/busy/state + context %) fresh on the same 15s +
+      // on-message cadence as everything else. The drawer, face-pile, and roster
+      // card all read state.agents, which was otherwise only refetched on an
+      // Agent-roster page visit — so their status/context went stale in between.
+      // agents.refresh() honors the current archived filter and re-renders the
+      // roster page if it's open.
+      (Trio.agents?.refresh?.() || Promise.resolve()),
     ];
     const results = await Promise.allSettled(requests);
     const failures = results.filter(result => result.status === 'rejected');
@@ -726,6 +733,9 @@
     if (failures.length === results.length) state.workspaceError = 'Workspace refresh failed';
     state.workspaceLoading = false;
     renderRail();
+    // state.agents was just refreshed above; repaint the face-pile so its dots
+    // reflect the current live/busy/state without waiting for a roster SSE tick.
+    renderFacePile();
     Trio.events.dispatchEvent(new CustomEvent('workspace:updated', {detail: state}));
     if (['home','attention','messages','tasks'].includes(state.view)) showView(state.view);
   }
