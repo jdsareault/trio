@@ -2,12 +2,17 @@
 # Both nth_server.py and nth_monitor.py import from here.
 
 import json
+from pathlib import Path
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
 # Hidden transport shared by the managed-agent app. Messages here are always
 # private-scoped by nth_server, even when a model accidentally uses trio_send.
 AGENT_INBOX_CHANNEL = "nth-agent-inbox"
+
+# Shared attachment storage path. The web upload endpoint and the Claude
+# agent runtime both need this directory to be readable.
+ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
 
 # ── Real DMs: the member-aware visibility predicate ───────────────────
 # Lives here, in the module every side (nth_server, nth_web, nth_monitor)

@@ -55,8 +55,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, animal_for,
-                           animal_for_channel, can_see, is_all_seeing,
+from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, ATTACH_DIR,
+                           animal_for, animal_for_channel, can_see, is_all_seeing,
                            parse_recipients)
 import nth_supervisor as nsup
 import nth_agent_manager as nam
@@ -74,7 +74,7 @@ UI_PATHS = frozenset((
 ))
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # ── Image attachments (Phase-1 prototype) ──
-ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
+# ATTACH_DIR is imported from nth_constants.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
 ALLOWED_IMAGE_MIME = {
     "image/png": ".png", "image/jpeg": ".jpg",
@@ -4872,10 +4872,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             att_id = cur.lastrowid
             fpath = None
             try:
+                ATTACH_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
                 chan_dir = ATTACH_DIR / re.sub(r"[^\w.\-]", "_", self.channel)
-                chan_dir.mkdir(parents=True, exist_ok=True)
+                chan_dir.mkdir(mode=0o755, exist_ok=True)
                 fpath = chan_dir / f"{att_id}{ext}"
                 fpath.write_bytes(data)
+                fpath.chmod(0o644)
                 db.execute("UPDATE attachments SET path = ? WHERE id = ?",
                            (str(fpath), att_id))
             except (OSError, sqlite3.Error):

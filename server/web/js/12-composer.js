@@ -245,6 +245,23 @@
     sendButton?.addEventListener('click', sendClick); if (sendButton) domListeners.push([sendButton, 'click', sendClick]);
     const onAttach = () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => Trio.ui.toast(error.message)); picker.click(); };
     attach?.addEventListener('click', onAttach); if (attach) domListeners.push([attach, 'click', onAttach]);
+    const onPaste = async (event) => {
+      const clip = event.clipboardData || window.clipboardData;
+      const images = [];
+      if (clip.files && clip.files.length) {
+        for (const f of clip.files) { if (/^image\//.test(f.type)) images.push(f); }
+      } else if (clip.items) {
+        for (const it of clip.items) {
+          if (it.kind === 'file' && /^image\//.test(it.type)) {
+            const f = it.getAsFile(); if (f) images.push(f);
+          }
+        }
+      }
+      if (!images.length) return;
+      event.preventDefault();
+      for (const f of images) await upload(f).catch(error => Trio.ui.toast(error.message));
+    };
+    text.addEventListener('paste', onPaste); if (text) domListeners.push([text, 'paste', onPaste]);
     const dictation = Trio.preferences?.read?.().dictation !== false;
     const dictateBtn = byId('dictate-btn');
     const dictationAvailable = hasLocalDictation() || hasBrowserDictation();
