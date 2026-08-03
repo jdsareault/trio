@@ -562,7 +562,12 @@ check('notifications: the SAME message id delivered twice (per-channel + workspa
 // open channel, must drop foreign-channel events — otherwise another channel's
 // message renders in this one and another channel's roster (worse,
 // AGENT_INBOX_CHANNEL's full agent list) overwrites the face-pile/sidebar.
+// The harness suppresses boot, so onMessage/onRoster are NOT auto-registered —
+// call conversation.init() to wire the real dispatch → onMessage → ingest →
+// upsert path these tests must exercise. (Trio.events is a real EventTarget,
+// which dedupes an identical (type, fn) pair across repeated init() calls.)
 check('conversation: a message from another channel does NOT render in the open channel', () => {
+  H.Trio.conversation.init();
   H.Trio.state.channel = 'atrium-test4';
   delete H.Trio.state.dmKey;
   H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
@@ -579,6 +584,45 @@ check('conversation: a message for the open channel (or with no channel stamp) s
   H.upsert({ id: 9103, member_id: 'ag_1', content: 'unstamped-legacy' });
   assert.strictEqual(H.Trio.state.messages.has(9102), true);
   assert.strictEqual(H.Trio.state.messages.has(9103), true);
+});
+check('conversation: a foreign-channel edit cannot overwrite an existing open-channel message', () => {
+  H.Trio.state.channel = 'atrium-test4';
+  delete H.Trio.state.dmKey;
+  H.upsert({ id: 9110, member_id: 'ag_1', channel: 'atrium-test4', content: 'original' });
+  // A message_update stamped for another channel must be dropped, not applied.
+  H.upsert({ id: 9110, member_id: 'ag_1', channel: 'other-channel', content: 'tampered', edited_at: 'now' });
+  assert.strictEqual(H.Trio.state.messages.get(9110).content, 'original');
+});
+check('conversation: in a DM view a message is scoped by recipients and ignores its channel stamp', () => {
+  H.Trio.state.channel = 'nth-agent-inbox';
+  H.Trio.state.operator = { id: 'op' };
+  H.Trio.state.dmKey = 'ag_1';
+  H.Trio.state.dmMemberIds = ['ag_1'];
+  // channel is neither the DM's channel nor unrelated to matter — the dmKey
+  // branch never inspects it; recipients decide. (Guards the "DM views are
+  // scoped by recipients" contract the channel guard's else-branch relies on.)
+  H.upsert({ id: 9120, member_id: 'ag_1', recipients: ['op'], channel: 'totally-unrelated', content: 'dm ignores channel' });
+  assert.strictEqual(H.Trio.state.messages.has(9120), true);
+  delete H.Trio.state.dmKey; delete H.Trio.state.dmMemberIds;
+});
+check('conversation + notifications: a foreign-channel message is dropped from the view but still chimes/notifies', () => {
+  H.Trio.conversation.init();
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  delete H.Trio.state.dmKey;
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 9130, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanB', member_name: 'Bob', content: 'hi',
+  } }));
+  // Both listeners share the same event target: the conversation view drops it
+  // (foreign channel) while the notification module still fires — the whole
+  // reason the guard lives in the listener, not in dispatch().
+  assert.strictEqual(H.Trio.state.messages.has(9130), false, 'foreign message must not render in the open channel');
+  assert.strictEqual(created.length, 1, 'but it must still produce a cross-channel notification');
 });
 // These exercise the conversation module's OWN 'roster' listener (onRoster) —
 // the listener that re-derived state.members from the raw event detail and so
