@@ -50,6 +50,25 @@ check("idle: turn ended but no activity recorded",
       web.member_status(iso(-5), "", session_activity_iso=None, last_turn_end_iso=iso(-3)) == "idle")
 check("dead precedence over turn data",
       web.member_status(iso(-1000), "", session_activity_iso=iso(-1), last_turn_end_iso=iso(-30)) == "dead")
+check("blocked: activity has not advanced past blocked_since",
+      web.member_status(iso(-5), "", session_activity_iso=iso(-30),
+                        last_turn_end_iso=iso(-30), blocked_since_iso=iso(-30)) == "blocked")
+check("blocked self-heals: activity advanced past blocked_since -> working",
+      web.member_status(iso(-5), "", session_activity_iso=iso(-2),
+                        last_turn_end_iso=iso(-30), blocked_since_iso=iso(-30)) == "working")
+
+# ── _agent_is_live(): the /api/agents state gate ─────────────────────────────
+check("_agent_is_live: in-process handle wins regardless of heartbeat/state",
+      web._agent_is_live(True, False, "sleeping") is True)
+check("_agent_is_live: fresh heartbeat + running state -> live",
+      web._agent_is_live(False, True, "running") is True)
+check("_agent_is_live: fresh heartbeat but sleeping -> NOT live (no hibernate flash)",
+      web._agent_is_live(False, True, "sleeping") is False)
+check("_agent_is_live: fresh heartbeat but stopped/errored -> NOT live",
+      web._agent_is_live(False, True, "stopped") is False
+      and web._agent_is_live(False, True, "errored") is False)
+check("_agent_is_live: stale heartbeat + running -> NOT live",
+      web._agent_is_live(False, False, "running") is False)
 
 
 # ── the turn hook stamps sessions.last_turn_end ──────────────────────────────
@@ -194,7 +213,70 @@ try:
 finally:
     c.close()
 check("_agent_liveness: Monitor heartbeat alone keeps an unspawned agent live",
+      liveness(agent) == (True, True))
+
+# Each freshness source in isolation must keep the agent live. members.last_seen
+# ALONE (messenger_heartbeat + session activity stale):
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-2), iso(-200), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-200), iso(-100), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: members.last_seen alone keeps agent live",
       (liveness(agent) or (False,))[0] is True)
+
+# sessions.last_seen ALONE (Monitor columns stale) — the "Monitor down, agent
+# still active via trio RPCs / activity hooks" case the docstring promises:
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-200), iso(-200), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-2), iso(-30), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: sessions.last_seen alone keeps agent live+working",
+      liveness(agent) == (True, True))
+
+# LIVE_SECONDS boundary: 59s fresh, 61s stale.
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-59), iso(-59), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-59), iso(-100), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: heartbeat at 59s is still fresh", (liveness(agent) or (False,))[0] is True)
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-61), iso(-61), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=? WHERE fingerprint=?", (iso(-61), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: heartbeat at 61s is stale", liveness(agent) == (False, False))
+
+# blocked: fresh heartbeat but the session is frozen on a host prompt
+# (blocked_since == activity) -> live but NOT working.
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(0), iso(0), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=?, blocked_since=? WHERE fingerprint=?",
+              (iso(-30), iso(-30), iso(-30), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: fresh but blocked -> (live, not working)",
+      liveness(agent) == (True, False))
+c = raw()
+try:
+    c.execute("UPDATE sessions SET blocked_since=NULL WHERE fingerprint=?", ("wi-sid-1",))
+finally:
+    c.close()
 
 # no heartbeat within LIVE_SECONDS from any source -> not live, not working.
 c = raw()
@@ -207,6 +289,51 @@ finally:
     c.close()
 check("_agent_liveness: no heartbeat within LIVE_SECONDS -> not live",
       liveness(agent) == (False, False))
+
+# Multi-channel agent (Sauron W1): the SAME member id present in two channels,
+# working (activity > its own turn end) in one and idle (turn ended after
+# activity) in the other. Per-session classification must report working;
+# the old column-wise MAX(activity) vs MAX(turn_end) could cross-compare and
+# wrongly report idle. Raw inserts (FK off on this connection) add the second
+# channel membership + session for the same agent id.
+c = raw()
+try:
+    # channel wi2: idle, but its turn ended very recently (-2s). A column-wise
+    # MAX(last_turn_end) would pick THIS end and compare it against wi1's
+    # activity, wrongly flipping the working agent to idle.
+    c.execute("INSERT INTO members (id, channel, name, joined_at, last_seen, messenger_heartbeat) "
+              "VALUES (?, 'wi2', 'Worker', ?, ?, ?)", (agent, iso(-2), iso(-2), iso(-2)))
+    c.execute("INSERT INTO sessions (session_token, member_id, channel, connected_at, "
+              "last_seen, fingerprint, last_turn_end) "
+              "VALUES ('tok-wi2', ?, 'wi2', ?, ?, 'wi-sid-2', ?)",
+              (agent, iso(-60), iso(-60), iso(-2)))
+    # channel wi1: working — activity (-5s) after its OWN turn end (-30s).
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-5), iso(-5), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-5), iso(-30), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: multi-channel — working in one channel is reported working",
+      liveness(agent) == (True, True))
+c = raw()
+try:
+    c.execute("DELETE FROM members WHERE id=? AND channel='wi2'", (agent,))
+    c.execute("DELETE FROM sessions WHERE fingerprint='wi-sid-2'")
+finally:
+    c.close()
+
+# A member row with NO live session (all revoked / never had one): heartbeat
+# still drives freshness; no turn data -> not working; must not crash.
+c = raw()
+try:
+    c.execute("INSERT INTO members (id, channel, name, joined_at, last_seen, messenger_heartbeat) "
+              "VALUES ('ag_nosess', 'wi1', 'NoSession', ?, ?, ?)", (iso(0), iso(0), iso(0)))
+finally:
+    c.close()
+check("_agent_liveness: member with no session -> (live, not working), no crash",
+      liveness("ag_nosess") == (True, False))
+os.environ["CLAUDE_CODE_SESSION_ID"] = "wi-sid-1"
 
 
 os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
