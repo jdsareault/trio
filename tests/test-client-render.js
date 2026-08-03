@@ -815,5 +815,32 @@ check('roster clobber: the roster CustomEvent still dispatches even when not app
   }
 });
 
-console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
-process.exit(failures ? 1 : 0);
+// The workspace refresh loop (15s interval + on-message) must re-poll
+// /api/agents so state.agents — read by the drawer, face-pile, and roster card
+// — stays fresh between Agent-roster page visits, and repaint the face-pile.
+async function checkAsync(name, fn) {
+  try { await fn(); console.log('PASS: ' + name); }
+  catch (e) { failures++; console.log('FAIL: ' + name + ' — ' + e.message); }
+}
+(async () => {
+  await checkAsync('workspace refresh re-polls /api/agents (keeps state.agents fresh)', async () => {
+    let agentsRefreshed = 0;
+    const realAgentsRefresh = H.Trio.agents.refresh;
+    const realGet = H.Trio.api.get;
+    H.Trio.agents.refresh = () => { agentsRefreshed++; return Promise.resolve(); };
+    H.Trio.api.get = () => Promise.resolve({ channels: [], your_dms: [], tasks: [], approvals: [], questions: [], mentions: [] });
+    H.Trio.state.channel = 'chanA';
+    H.Trio.state.agents = [];
+    delete H.Trio.state.dmKey;
+    try {
+      await H.Trio.workspace.refresh();
+      assert.ok(agentsRefreshed >= 1, 'workspace refresh should re-poll agents (got ' + agentsRefreshed + ')');
+    } finally {
+      H.Trio.agents.refresh = realAgentsRefresh;
+      H.Trio.api.get = realGet;
+    }
+  });
+
+  console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
+  process.exit(failures ? 1 : 0);
+})();
