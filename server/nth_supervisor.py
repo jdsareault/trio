@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from nth_constants import AGENT_INBOX_CHANNEL
+from nth_constants import AGENT_INBOX_CHANNEL, ATTACH_DIR
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
@@ -53,6 +53,13 @@ TRIO_TOOL_NAMES = (
 )
 MANAGED_ALLOWED_TOOLS = ",".join(
     f"mcp__nth-trio__trio_{name}" for name in TRIO_TOOL_NAMES)
+
+# Map the web dashboard permission profile to a `claude --permission-mode`.
+PERMISSION_MODES = {
+    "observe": "manual",
+    "balanced": "auto",
+    "autonomous": "bypassPermissions",
+}
 
 # Valid agent lifecycle states (mirror the supervisor state machine in the
 # design doc). Kept as plain strings in agents.state. ST_IDLE is set by the hub
@@ -158,7 +165,8 @@ def build_spawn_argv(
     system_prompt: str = "",
     mcp_config: str = "",
     resume_session_id: str = "",
-    permission_mode: str = "acceptEdits",
+    permission_mode: str = "auto",
+    extra_dirs: Optional[List[str]] = None,
     disallowed_tools: str = "AskUserQuestion",
     allowed_tools: str = MANAGED_ALLOWED_TOOLS,
     effort: str = "",
@@ -195,6 +203,16 @@ def build_spawn_argv(
         argv += ["--mcp-config", mcp_config]
     if resume_session_id:
         argv += ["--resume", resume_session_id]
+    # Make sure uploaded attachments are accessible to the headless agent's
+    # Read tool without a manual permission prompt. Create the dir now so it
+    # always appears on the allowlist even before the first upload.
+    ATTACH_DIR.mkdir(parents=True, exist_ok=True)
+    add_dirs = {str(ATTACH_DIR)}
+    for d in extra_dirs or []:
+        if d:
+            add_dirs.add(d)
+    for d in add_dirs:
+        argv += ["--add-dir", d]
     return argv
 
 
@@ -537,7 +555,8 @@ class AgentSupervisor:
     # ── lifecycle ──
     def spawn(self, agent_id: str, *, model: str = "", system_prompt: str = "",
               mcp_config: str = "", resume_session_id: str = "", effort: str = "",
-              cwd: str = "",
+              cwd: str = "", permission_profile: str = "balanced",
+              extra_dirs: Optional[List[str]] = None,
               session_timeout: float = 10.0) -> AgentProc:
         """Launch (or resume) an agent process and sync its DB row. Serialized
         per-agent. Blocks briefly to capture the session_id from the init
@@ -554,9 +573,11 @@ class AgentSupervisor:
                 existing = self._procs.get(agent_id)
                 if existing and existing.alive():
                     return existing
+            permission_mode = PERMISSION_MODES.get(permission_profile, "auto")
             argv = self.runtime.build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
-                resume_session_id=resume_session_id, effort=effort)
+                resume_session_id=resume_session_id, effort=effort,
+                permission_mode=permission_mode, extra_dirs=extra_dirs)
             proc = AgentProc(
                 agent_id, argv,
                 on_event=lambda aid, evt: self._handle_event(aid, evt, source=proc),
