@@ -417,6 +417,36 @@ check('channelStatus prefers roster-backed compacting/error states over heartbea
   assert.strictEqual(H.Trio.workspace.channelStatus({ live: false, state: 'errored' }), 'errored');
   assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false }), 'idle');
 });
+check('channelStatus: a live agent shows working from the SSE roster status (near-realtime, not the slow busy poll)', () => {
+  // member_status is pushed over the roster SSE within ~1s; busy comes from the
+  // slower /api/agents poll. A live agent whose roster status is 'working' must
+  // read working immediately even while the polled busy flag is still false.
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false, status: 'working' }), 'working');
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false, status: 'idle' }), 'idle');
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: true, status: 'idle' }), 'working');
+});
+check('drawer members re-render live on a roster tick (open drawer reflects a status change)', () => {
+  H.Trio.state.dmKey = null;
+  H.Trio.state.channel = 'atrium-test';
+  H.Trio.state.channels = [{ code: 'atrium-test', topic: 'T' }];
+  H.Trio.state.operator = { id: 'op', name: 'op' };
+  H.Trio.state.members = new Map([['ag_x', { id: 'ag_x', name: 'X', status: 'idle' }]]);
+  H.Trio.state.agents = [{ id: 'ag_x', name: 'X', state: 'running', live: true, busy: false }];
+  cx.document.getElementById('channel-drawer').classList.add('open');
+  H.Trio.workspace.showDetails();
+  assert.ok(cx.document.getElementById('channel-drawer-body').innerHTML.includes('channel-status-chip idle'),
+    'drawer should render idle initially');
+  // The roster SSE pushes a status change to working (with a tool chip).
+  H.Trio.state.members = new Map([['ag_x', { id: 'ag_x', name: 'X', status: 'working', last_tool_name: 'Bash' }]]);
+  H.Trio.workspace.refreshDrawerMembers();
+  const membersHtml = cx.document.getElementById('channel-drawer-members').innerHTML;
+  assert.ok(membersHtml.includes('channel-status-chip working'),
+    'open drawer must re-render to working on the roster tick: ' + membersHtml);
+});
+check('refreshDrawerMembers is a no-op when the drawer is closed', () => {
+  cx.document.getElementById('channel-drawer').classList.remove('open');
+  assert.doesNotThrow(() => H.Trio.workspace.refreshDrawerMembers());
+});
 check('channel drawer labels a compacting agent "Compacting", not "Sleeping"', () => {
   H.Trio.state.dmKey = null;
   H.Trio.state.channel = 'atrium-test';
