@@ -4215,6 +4215,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     and effort not in selected["efforts"]:
                 self._error(400, f"{model} does not support effort {effort}")
                 return
+        elif provider == "claude" and effort and model:
+            # Claude models were unchecked here — only the generic allowlist
+            # above applied, so e.g. effort="xhigh" was silently accepted on
+            # a model whose CLAUDE_MODELS entry caps at "max". Codex already
+            # gets this same per-model check; give Claude parity.
+            claude_models = get_supervisor().list_models("claude")
+            selected = next((m for m in claude_models if m.get("id") == model), None)
+            if selected and selected.get("efforts") and effort not in selected["efforts"]:
+                self._error(400, f"{model} does not support effort {effort}")
+                return
         raw_channels = body.get("channels") or []
         if not isinstance(raw_channels, list):
             self._error(400, "channels must be a list of channel codes")
@@ -4417,6 +4427,46 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 with db:
                     cur = db.execute(
                         "UPDATE agents SET wake_mode=? WHERE id=?", (mode, agent_id))
+                ok = cur.rowcount > 0
+            finally:
+                db.close()
+        elif action == "effort":
+            body = self._read_json_body(max_bytes=4096)
+            if body is None:
+                return
+            effort = (body.get("effort") or "").strip().lower()
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                row = db.execute(
+                    "SELECT model, runtime_provider FROM agents WHERE id=?",
+                    (agent_id,)).fetchone()
+                if row is None:
+                    self._error(404, "agent not found")
+                    return
+                # Empty clears back to the provider's default for this model —
+                # same allowance as at creation. A non-empty value is checked
+                # against the model's OWN supported efforts (Codex models and
+                # Claude tiers advertise different sets; see CLAUDE_MODELS /
+                # nth_codex_runtime.list_models) rather than the generic
+                # cross-provider allowlist alone.
+                if effort and effort not in ("low", "medium", "high", "xhigh", "max", "ultra"):
+                    self._error(400, "effort must be one of low|medium|high|xhigh|max|ultra")
+                    return
+                if effort:
+                    provider = row["runtime_provider"] or "claude"
+                    try:
+                        models = get_supervisor().list_models(provider)
+                    except Exception as exc:
+                        self._error(409, f"{provider} model discovery failed: {exc}")
+                        return
+                    selected = next((m for m in models if m.get("id") == row["model"]), None)
+                    if selected and selected.get("efforts") and effort not in selected["efforts"]:
+                        self._error(400, f"{row['model']} does not support effort {effort}")
+                        return
+                with db:
+                    cur = db.execute(
+                        "UPDATE agents SET effort=? WHERE id=?", (effort, agent_id))
                 ok = cur.rowcount > 0
             finally:
                 db.close()

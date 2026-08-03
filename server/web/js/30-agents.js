@@ -221,7 +221,7 @@
   function showDetail(vm) {
     const rows = [
       ['Name', vm.name], ['Provider', vm.provider], ['Model', vm.model], ['Lifecycle', vm.lifecycle],
-      ['Wake policy', vm.wakePolicy], ['Cwd', vm.cwd], ['Permissions', vm.permissions], ['Placements', (vm.placements || []).join(', ') || 'none'],
+      ['Reasoning effort', vm.effort || 'default'], ['Wake policy', vm.wakePolicy], ['Cwd', vm.cwd], ['Permissions', vm.permissions], ['Placements', (vm.placements || []).join(', ') || 'none'],
       ['Last active', formatLastActive(vm.lastActive)], ['Status', vm.statusText || ''], ['Error', vm.error || ''],
     ];
     const lifecycleActions = actionCaps(vm).map(actionName =>
@@ -229,7 +229,7 @@
     ).join('');
     const html = rows.map(([k, v]) => `<div class="detail-row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('') +
       `<div class="agent-actions" aria-label="Agent lifecycle controls">${lifecycleActions}</div>` +
-      `<div class="agent-actions"><button data-edit="placements" type="button">Edit placements</button><button data-edit="wake" type="button">Edit wake policy</button></div>`;
+      `<div class="agent-actions"><button data-edit="placements" type="button">Edit placements</button><button data-edit="wake" type="button">Edit wake policy</button><button data-edit="effort" type="button">Edit reasoning effort</button></div>`;
     Trio.ui.modal('Manage agent: ' + vm.name, html, undefined, { submit: false, cancelLabel: 'Close' });
     setTimeout(() => {
       const panel = document.getElementById('trio-control-modal');
@@ -253,6 +253,9 @@
       panel.querySelector('[data-edit="wake"]')?.addEventListener('click', () => {
         panel.close('cancel'); setTimeout(() => editWake(vm), 0);
       });
+      panel.querySelector('[data-edit="effort"]')?.addEventListener('click', () => {
+        panel.close('cancel'); setTimeout(() => editEffort(vm), 0);
+      });
     }, 0);
   }
   function showCompact(vm) {
@@ -275,6 +278,52 @@
   function editWake(vm) {
     const html = '<label>Wake policy <select name="wake"><option value="all" ' + (vm.wakePolicy === 'all' ? 'selected' : '') + '>all</option><option value="about" ' + (vm.wakePolicy === 'about' ? 'selected' : '') + '>about</option><option value="at" ' + (vm.wakePolicy === 'at' ? 'selected' : '') + '>at</option></select></label>';
     Trio.ui.modal('Wake policy for ' + vm.name, html, node => { const v = node.querySelector('[name="wake"]').value; action(vm.id, 'wake-mode', { mode: v }); });
+  }
+  // Efforts are per-MODEL (a Sonnet agent and a Haiku agent don't support the
+  // same set) — look the agent's own model up in the already-discovered
+  // provider model list rather than offering a fixed global list.
+  function effortModelEntry(provider, modelId) {
+    return normalizeModels(state.agentModels[provider]).find(m => m.id === modelId);
+  }
+  function effortsForModel(provider, modelId) {
+    const model = effortModelEntry(provider, modelId);
+    return Array.isArray(model?.efforts) && model.efforts.length ? model.efforts : ['low', 'medium', 'high'];
+  }
+  // LOTC/Frodo: with no "use the model's own default" option, the browser
+  // auto-selects the FIRST <option> whenever `selected` matches nothing —
+  // which silently downgraded every unedited agent to the lowest effort
+  // (both at creation and when merely opening-then-saving the edit dialog,
+  // since an agent at its default has vm.effort === ''). A real, always-
+  // present "Model default" option fixes both: it's what actually gets sent
+  // when the user doesn't touch the control, matching what the backend
+  // already does with an empty effort string.
+  // `current` (if given and not already in `efforts`) is kept as an option
+  // rather than dropped — an agent already running at "max" must not lose
+  // that from the list just because live discovery came back stale/thin.
+  function effortOptions(efforts, selected, { defaultLabel = 'Model default' } = {}) {
+    const all = current => current && !efforts.includes(current) ? [...efforts, current] : efforts;
+    const list = all(selected);
+    const opts = list.map(e => `<option value="${esc(e)}"${e === selected ? ' selected' : ''}>${esc(e)}</option>`).join('');
+    return `<option value=""${selected ? '' : ' selected'}>${esc(defaultLabel)}</option>` + opts;
+  }
+  async function editEffort(vm) {
+    await loadDiscovery();
+    const efforts = effortsForModel(vm.provider, vm.model);
+    const model = effortModelEntry(vm.provider, vm.model);
+    const defaultLabel = model?.default_effort ? `Model default (${model.default_effort})` : 'Model default';
+    // Sauron: this claim differs by provider. Codex re-reads effort fresh on
+    // EVERY turn (no restart involved) — Claude fixes it in the process argv
+    // at spawn, so only Clear (a genuinely fresh session) is guaranteed to
+    // pick up a change; Wake resumes the existing session and may not.
+    const hint = vm.provider === 'codex'
+      ? 'applies to this agent’s next message — no restart needed'
+      : 'applies once this agent is Cleared (a fresh session) — Wake resumes the existing session and may not pick it up';
+    const html = `<label class="field">Reasoning effort <span class="hint">${esc(hint)}</span><select name="effort">${effortOptions(efforts, vm.effort, { defaultLabel })}</select></label>`;
+    Trio.ui.modal('Reasoning effort for ' + vm.name, html, async node => {
+      const v = node.querySelector('[name="effort"]').value;
+      await action(vm.id, 'effort', { effort: v });
+      Trio.ui.toast(v ? `Reasoning effort set to ${v} — ${hint}` : `Reasoning effort reset to ${defaultLabel.toLowerCase()} — ${hint}`);
+    });
   }
   function normalizeModels(models) {
     if (!Array.isArray(models)) return [];
@@ -364,18 +413,21 @@
     await loadDiscovery();
     const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
     const defaultProvider = state.providers[0] || 'codex';
+    const defaultModels = normalizeModels(state.agentModels[defaultProvider]);
     const models = modelOptions(state.agentModels[defaultProvider]);
+    const defaultModelId = defaultModels[0]?.id || '';
     const channelOpts = (state.channels || []).filter(c => !c.archived)
       .map(c => `<label><input type="checkbox" name="placement" value="${esc(c.code)}"> ${esc(c.code)}</label>`).join('');
     const channelsField = channelOpts
       ? `<fieldset class="field"><legend>Channels <span class="hint">optional — place later if blank</span></legend>${channelOpts}</fieldset>`
       : '';
-    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
+    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Reasoning effort <select name="effort">${effortOptions(effortsForModel(defaultProvider, defaultModelId), '')}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
       const name = (f.get('name') || '').trim();
       const provider = f.get('provider');
       const model = f.get('model');
+      const effort = f.get('effort') || '';
       const cwd = (f.get('cwd') || '').trim();
       const channels = [...node.querySelectorAll('input[name="placement"]:checked')].map(cb => cb.value);
       if (!provider) { Trio.ui.toast('Provider is required'); return; }
@@ -385,7 +437,7 @@
       pendingAgentActions.add(key);
       Trio.ui.toast('Creating agent…');
       try {
-        const result = await Trio.api.post('/api/agents', { name, provider, model, cwd, permission_profile: f.get('permission_profile') || 'balanced', channels });
+        const result = await Trio.api.post('/api/agents', { name, provider, model, effort, cwd, permission_profile: f.get('permission_profile') || 'balanced', channels });
         await refresh();
         if (result?.agent?.id) Trio.workspace?.openDmByKey?.(result.agent.id);
       } catch (e) { Trio.ui.toast(e.message || 'Could not create agent'); }
@@ -394,9 +446,16 @@
     const panel = document.getElementById('trio-control-modal');
     const providerField = panel?.querySelector('select[name="provider"]');
     const modelField = panel?.querySelector('select[name="model"]');
+    const effortField = panel?.querySelector('select[name="effort"]');
+    const refreshEffortOptions = () => {
+      if (!effortField) return;
+      effortField.innerHTML = effortOptions(effortsForModel(providerField?.value, modelField?.value), '');
+    };
     providerField?.addEventListener('change', () => {
       if (modelField) modelField.innerHTML = modelOptions(state.agentModels[providerField.value]);
+      refreshEffortOptions();
     });
+    modelField?.addEventListener('change', refreshEffortOptions);
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions };
 })();
