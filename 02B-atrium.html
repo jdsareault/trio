@@ -3155,7 +3155,7 @@ function openAgentMenu(e,id){
     mi("Clear context",'<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',"clearAgent('"+id+"')",true)+
     mi("Manage placements",'<path d="M12 5v14M5 12h14"/>',"managePlacements('"+id+"')")+
     `<div class="menu-sep"></div>`+
-    mi("Delete agent",'<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',"deleteAgent('"+id+"')",true));
+    mi("Archive agent",'<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',"archiveAgent('"+id+"')",true));
 }
 function stopAgent(id){ const a=agentById(id); a.status="stopped"; a.statusText="Stopped by you — resumable"; refreshAgentViews(); toast(a.name+" stopped"); }
 function wakeAgent(id){
@@ -3166,12 +3166,12 @@ function wakeAgent(id){
 function hibernateAgent(id){ const a=agentById(id); a.status="sleeping"; a.statusText="Hibernated — context preserved"; refreshAgentViews(); toast(a.name+" hibernated · zero cost"); }
 function compactAgent(id){ const a=agentById(id); confirmDialog("Compact "+a.name+"'s context?","Summarizes older turns to free up the context window. "+a.name+" keeps its memory and identity — nothing is lost.","Compact",()=>{ a.ctx=Math.max(0.1,a.ctx*0.5); refreshAgentViews(); toast(a.name+"'s context compacted"); }, false); }
 function clearAgent(id){ const a=agentById(id); confirmDialog("Clear "+a.name+"'s context?","This starts a FRESH context — "+a.name+" forgets the current conversation history (but keeps its name, role, and channels). Different from Compact, which preserves memory.","Clear context",()=>{ a.ctx=0.02; refreshAgentViews(); toast(a.name+"'s context cleared — fresh start"); }, true); }
-function deleteAgent(id){ const a=agentById(id); confirmDialog("Delete "+a.name+"?","This revokes "+a.name+"'s sessions and removes it from every channel. This can't be undone.","Delete agent",()=>{
+function archiveAgent(id){ const a=agentById(id); confirmDialog("Archive "+a.name+"?","This stops "+a.name+" and hides it from the roster. It can be restored later.","Archive agent",()=>{
   const i=agents.findIndex(x=>x.id===id); if(i>=0) agents.splice(i,1);
   channels.forEach(c=>c.members=c.members.filter(m=>m!==id));
   if(detailAgentId===id){ closeDetail(); }
   if(currentView==="roster") renderRoster(); if(currentView==="home") renderHome();
-  renderSidebar(); toast(a.name+" deleted");
+  renderSidebar(); toast(a.name+" archived");
 }, true); }
 function refreshAgentViews(){ if(currentView==="roster") renderRoster(); if(currentView==="home") renderHome(); if(currentView==="inbox") renderInbox(); if(detailAgentId){ const open=document.getElementById("detailPanel").classList.contains("open"); if(open) openDetail(detailAgentId); } renderSidebar(); }
 

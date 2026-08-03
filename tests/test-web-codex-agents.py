@@ -138,7 +138,7 @@ try:
           responders == {agent_id, claude_id})
     router.stop()
     router = None
-    request(port, f"/api/agents/{claude_id}/delete", "POST")
+    request(port, f"/api/agents/{claude_id}/archive", "POST")
 
     status, _ = request(port, f"/api/agents/{agent_id}/compact", "POST")
     check("Codex compact maps through the common action", status == 200)
@@ -164,11 +164,12 @@ try:
         "provider": "codex", "model": "missing", "cwd": str(tmp)})
     check("unknown Codex models fail before durable creation", status == 400)
 
-    status, _ = request(port, f"/api/agents/{agent_id}/delete", "POST")
+    status, _ = request(port, f"/api/agents/{agent_id}/archive", "POST")
     with sqlite3.connect(str(srv.DB_PATH)) as db:
-        remaining = db.execute("SELECT COUNT(*) FROM agents WHERE id=?", (agent_id,)).fetchone()[0]
-    check("Codex delete removes provider thread and Trio identity",
-          status == 200 and remaining == 0)
+        row = db.execute("SELECT archived_at FROM agents WHERE id=?", (agent_id,)).fetchone()
+    check("Codex archive stops the thread and stamps archived_at (row retained)",
+          status == 200 and row is not None and row[0] is not None
+          and not web.get_supervisor().is_running(agent_id))
 finally:
     if router is not None:
         router.stop()

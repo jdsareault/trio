@@ -1,6 +1,6 @@
 """Tests for the agent control-plane endpoints (supervisor-backed):
 POST /api/agents (create+spawn), GET /api/agents (roster),
-POST /api/agents/<id>/{stop,delete}. Operator-only. Driven against the fake
+POST /api/agents/<id>/{stop,archive,unarchive}. Operator-only. Driven against the fake
 stream-json agent (tests/fake_agent.py) — NO real billed Claude session.
 
 Usage: python tests/test-web-agents.py
@@ -127,21 +127,42 @@ try:
           and row(aid)["state"] == "stopped"
           and not web.get_supervisor().is_running(aid))
 
-    # ── delete ──
+    # ── archive (soft-delete: row + placements kept, presence + sessions revoked) ──
     db = sqlite3.connect(str(srv.DB_PATH))
     db.execute("INSERT INTO sessions (session_token,member_id,channel,role,fingerprint,connected_at,last_seen) "
                "VALUES ('delete-token',?,'chan-x','primary','delete-test',?,?)",
                (aid, srv.now_iso(), srv.now_iso()))
     db.commit(); db.close()
-    st, _ = http(port, f"/api/agents/{aid}/delete", "POST")
-    check("delete: 200 + agents row gone", st == 200 and row(aid) is None)
+    st, _ = http(port, f"/api/agents/{aid}/archive", "POST")
+    ar = row(aid)
+    check("archive: 200 + agents row kept + archived_at stamped",
+          st == 200 and ar is not None and ar["archived_at"] is not None)
     db = sqlite3.connect(str(srv.DB_PATH))
     left = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=?", (aid,)).fetchone()[0]
     active = db.execute("SELECT active FROM members WHERE id=?", (aid,)).fetchone()
     revoked = db.execute("SELECT revoked_at FROM sessions WHERE session_token='delete-token'").fetchone()
     db.close()
-    check("delete: placements removed, member deactivated", left == 0 and active and active[0] == 0)
-    check("delete: outstanding MCP sessions revoked", revoked and bool(revoked[0]))
+    check("archive: placements retained, member deactivated", left >= 1 and active and active[0] == 0)
+    check("archive: outstanding MCP sessions revoked", revoked and bool(revoked[0]))
+    # archived agents are excluded from the default roster
+    st, d = http(port, "/api/agents", "GET")
+    ids = [a["id"] for a in d.get("agents", [])]
+    check("archive: hidden from default roster", aid not in ids)
+    st, d = http(port, "/api/agents?archived=1", "GET")
+    ids = [a["id"] for a in d.get("agents", [])]
+    check("archive: surfaced under ?archived=1", aid in ids)
+
+    # ── unarchive (restore presence; agent stays stopped until woken) ──
+    st, _ = http(port, f"/api/agents/{aid}/unarchive", "POST")
+    ur = row(aid)
+    check("unarchive: 200 + archived_at cleared", st == 200 and ur and ur["archived_at"] is None)
+    db = sqlite3.connect(str(srv.DB_PATH))
+    active = db.execute("SELECT active FROM members WHERE id=?", (aid,)).fetchone()
+    db.close()
+    check("unarchive: member presence restored", active and active[0] == 1)
+    st, d = http(port, "/api/agents", "GET")
+    ids = [a["id"] for a in d.get("agents", [])]
+    check("unarchive: visible in default roster again", aid in ids)
 
     # ── thinking-level (effort) ──
     st, d = http(port, "/api/agents", "POST",
@@ -152,7 +173,7 @@ try:
     proc = web.get_supervisor()._procs.get(eid)
     check("effort passed to the spawned argv (--effort high)",
           proc and "--effort" in proc.argv and proc.argv[proc.argv.index("--effort") + 1] == "high")
-    http(port, f"/api/agents/{eid}/delete", "POST")
+    http(port, f"/api/agents/{eid}/archive", "POST")
     st, _ = http(port, "/api/agents", "POST",
                  {"model": "haiku", "channels": ["chan-x"], "effort": "bogus"})
     check("create with invalid effort -> 400", st == 400)
@@ -180,7 +201,7 @@ try:
     st, _ = http(port, f"/api/send?channel={web.AGENT_INBOX_CHANNEL}", "POST",
                  {"content": "private hello", "recipients": [ab.get("id")]})
     check("operator can DM a zero-public-placement agent", st == 200)
-    http(port, f"/api/agents/{ab.get('id')}/delete", "POST")
+    http(port, f"/api/agents/{ab.get("id")}/archive", "POST")
 
     # ── wake endpoint ──
     st, d = http(port, "/api/agents", "POST", {"model": "sonnet", "channels": ["chan-x"]})
@@ -223,7 +244,7 @@ try:
     check("placement endpoint removes channel membership", st == 200 and placed == 0)
     st, _ = http(port, "/api/agents/nope/wake", "POST")
     check("wake bogus agent -> 404", st == 404)
-    http(port, f"/api/agents/{wid}/delete", "POST")
+    http(port, f"/api/agents/{wid}/archive", "POST")
 
     # ── runtime preflight fails before creating a broken durable row ──
     _health = web.runtime_health
