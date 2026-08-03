@@ -580,7 +580,6 @@
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/>',
     mute: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="m9 21h6"/>',
     archive: '<path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/>',
-    end: '<path d="m18 6-12 12M6 6l12 12"/>',
   };
   function menuSvg(name) { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${menuIcon[name] || ''}</svg>`; }
   function closeChannelMenu() {
@@ -588,13 +587,6 @@
     if (!menu) return;
     menu.hidden = true; menu.classList.remove('open');
     button?.classList.remove('menu-active'); button?.setAttribute('aria-expanded', 'false');
-  }
-  function endCurrentChannel() {
-    closeChannelMenu();
-    if (!state.channel) return;
-    Trio.ui.confirmAction(`End #${state.channel}?`, 'The channel will be archived and become read-only.', () => {
-      archive('channel', state.channel, true).then(() => loadConversation(state.channel, '#' + state.channel, 'Archived channel — read only', true, false));
-    });
   }
   function openChannelMenu() {
     const menu = $('channel-menu'); const button = $('channel-more-btn');
@@ -608,7 +600,7 @@
       `<button type="button" role="menuitem" data-menu-action="mute">${menuSvg('mute')}<span>Mute notifications</span></button>`,
       '<div class="menu-sep" role="separator"></div>',
       isChannel
-        ? `<button type="button" role="menuitem" class="danger" data-menu-action="end">${menuSvg('end')}<span>End channel</span></button>`
+        ? `<button type="button" role="menuitem" class="danger" data-menu-action="archive">${menuSvg('archive')}<span>${archived ? 'Restore channel' : 'Archive channel'}</span></button>`
         : `<button type="button" role="menuitem" data-menu-action="archive">${menuSvg('archive')}<span>${archived ? 'Restore conversation' : 'Archive conversation'}</span></button>`,
     ];
     menu.innerHTML = rows.join(''); menu.hidden = false; menu.classList.add('open');
@@ -622,7 +614,6 @@
       if (action === 'details') showDetails();
       if (action === 'search') openSearch();
       if (action === 'mute') { closeChannelMenu(); toast('Notifications muted for this conversation'); }
-      if (action === 'end') endCurrentChannel();
       if (action === 'archive') { closeChannelMenu(); archiveCurrent(); }
     }));
     menu.querySelector('button')?.focus();
@@ -797,12 +788,12 @@
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
-    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v">${state.messages?.size || 0}</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="end-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : 'End channel'}</button>` : ''}</div></section>`;
+    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v">${state.messages?.size || 0}</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
     $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });
     $('edit-channel-objective')?.addEventListener('click', () => toast('Objective editing is coming soon'));
-    $('end-channel-drawer')?.addEventListener('click', () => { closeDetails(); if (dm) archiveCurrent(); else endCurrentChannel(); });
+    $('archive-channel-drawer')?.addEventListener('click', () => { closeDetails(); archiveCurrent(); });
   }
   function openSearch() {
     if (!searchDialog) { searchDialog = document.createElement('dialog'); searchDialog.id = 'trio-search'; searchDialog.className = 'search-modal'; document.body.append(searchDialog); }

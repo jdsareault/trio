@@ -1,10 +1,10 @@
 'use strict';
 
-// Regression for the broken "End channel" confirm flow: confirmAction was
-// two-arg, but 20-workspace.js called it with (message, description, callback),
-// so the description string was bound as `action` and the real callback was
-// discarded — clicking Confirm evaluated `'text'?.()` (TypeError) and the
-// channel was never ended. The helper now accepts an optional description.
+// Regression for the broken confirm flow: confirmAction was two-arg, but a
+// caller passed (message, description, callback), so the description string
+// was bound as `action` and the real callback was discarded — clicking Confirm
+// evaluated `'text'?.()` (TypeError) and the action never ran. The helper now
+// accepts an optional description.
 const assert = require('assert');
 const { load } = require('./dom-harness');
 
@@ -21,11 +21,11 @@ function fireClose(node) {
 
 check('3-arg confirmAction renders description and runs the real callback', () => {
   let called = 0;
-  H.Trio.ui.confirmAction('End #foo?', 'The channel will be archived and become read-only.', () => { called++; });
+  H.Trio.ui.confirmAction('Archive #foo?', 'The channel will be archived and become read-only.', () => { called++; });
   const node = cx.document.getElementById('trio-control-modal');
   assert.ok(node, 'modal node created');
   // Description rendered as a body line, not bound as the action.
-  assert.ok(node.innerHTML.includes('End #foo?'), 'prompt text present in modal body');
+  assert.ok(node.innerHTML.includes('Archive #foo?'), 'prompt text present in modal body');
   assert.ok(node.innerHTML.includes('archived and become read-only'), 'description text present in modal body');
   // Simulate the user clicking Confirm (dialog returnValue 'default').
   node.returnValue = 'default';
