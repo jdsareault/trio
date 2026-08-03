@@ -17,6 +17,12 @@
 
   function member(id) { return state.members.get(id) || {}; }
   function nameFor(id, fallback) { return member(id).name || fallback || id || 'unknown'; }
+  function avatarUrlFor(id) {
+    const fromMember = member(id).avatar_url;
+    if (fromMember) return fromMember;
+    const agents = Trio.store?.get('agents.list') || state.agents || [];
+    return agents.find(agent => agent.id === id)?.avatar_url || '';
+  }
   function operator() { return state.operator || state.meta?.operator || {}; }
   function isOwn(msg) { return msg.member_id === operator().id; }
   function isPrivate(msg) { return !!msg.is_dm || Array.isArray(msg.recipients) && msg.recipients.length > 0; }
@@ -53,6 +59,7 @@
       selection: msg.selection,
       replyTo: msg.reply_to,
       taskId: msg.task_id,
+      avatarUrl: avatarUrlFor(msg.member_id),
     };
   }
   function time(iso) {
@@ -330,8 +337,11 @@
       card.append(content);
       return card;
     }
-    const avatar = document.createElement('div'); avatar.className = 'message-avatar av av-32'; avatar.setAttribute('aria-hidden', 'true');
-    avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    const avatar = document.createElement(vm.avatarUrl ? 'img' : 'div');
+    avatar.className = 'message-avatar av av-32' + (vm.avatarUrl ? ' avatar-svg' : '');
+    avatar.setAttribute('aria-hidden', 'true');
+    if (vm.avatarUrl) { avatar.src = vm.avatarUrl; avatar.alt = ''; }
+    else avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = vm.author;

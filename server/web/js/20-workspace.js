@@ -180,7 +180,22 @@
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
   }
   function initials(label) { return String(label || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase(); }
-  function avatar(label, tone = 'eucalyptus', status = '') { return `<span class="av av-28 tone-${tone} ${status ? 'st-' + status : ''}">${esc(initials(label))}${status ? '<span class="st-ring"></span>' : ''}</span>`; }
+  function agentRecord(idOrName) {
+    const agents = Trio.store?.get('agents.list') || state.agents || [];
+    return agents.find(agent => agent.id === idOrName || agent.name === idOrName) || null;
+  }
+  function avatar(label, tone = 'eucalyptus', status = '', avatarUrl = '') {
+    const content = avatarUrl
+      ? `<img src="${esc(avatarUrl)}" alt="" class="avatar-svg-image">`
+      : esc(initials(label));
+    return `<span class="av av-28 tone-${tone} ${avatarUrl ? 'avatar-svg' : ''} ${status ? 'st-' + status : ''}">${content}${status ? '<span class="st-ring"></span>' : ''}</span>`;
+  }
+  function avatarFor(memberOrName, status = '') {
+    const member = typeof memberOrName === 'object' ? memberOrName : null;
+    const label = member?.name || member?.id || memberOrName || '?';
+    const agent = agentRecord(member?.id || label);
+    return avatar(label, avatarTone(label), status, member?.avatar_url || agent?.avatar_url || '');
+  }
   function avatarTone(label) { const tones = ['coral', 'indigo', 'eucalyptus', 'amber', 'plum']; return tones[[...String(label || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % tones.length]; }
   function renderFacePile() {
     const pile = $('face-pile'); if (!pile) return;
@@ -198,7 +213,7 @@
     const visible = members.slice(0, 4);
     visible.forEach(member => {
       const node = document.createElement('span');
-      node.innerHTML = avatar(member.name || member.id, avatarTone(member.name || member.id), member.status === 'working' ? 'thinking' : 'online');
+      node.innerHTML = avatarFor(member, member.status === 'working' ? 'thinking' : 'online');
       const face = node.firstElementChild;
       face.setAttribute('aria-label', member.name || member.id || 'Channel member');
       face.title = member.name || member.id || 'Channel member';
@@ -237,7 +252,7 @@
   function dmItem(dm, audit = false) {
     const label = dm.name || dm.key || 'Conversation';
     const people = label.split(/\s*[↔·,]\s*/).filter(Boolean);
-    const visual = audit && people.length > 1 ? `<span class="dm-pair">${avatar(people[0], avatarTone(people[0]))}${avatar(people[1], avatarTone(people[1]))}</span>` : avatar(people[0] || label, avatarTone(label), dm.unread ? 'online' : 'idle');
+    const visual = audit && people.length > 1 ? `<span class="dm-pair">${avatarFor(people[0])}${avatarFor(people[1])}</span>` : avatarFor(people[0] || label, dm.unread ? 'online' : 'idle');
     const button = document.createElement('button'); button.type = 'button'; button.className = 'dm-item'; button.classList.toggle('active', state.view === 'conversation' && state.dmKey === dm.key);
     button.setAttribute('data-tip', label);
     button.innerHTML = `${visual}<span class="dm-copy"><span class="dm-name">${esc(label)}</span></span>${dm.unread ? '<span class="unread-dot" aria-label="Unread"></span>' : ''}`;
@@ -715,7 +730,7 @@
     const name = member.name || member.id || 'Unknown member';
     const status = channelStatus(member);
     const statusText = member.status_text || member.statusText || (status === 'active' ? 'Active in this channel' : channelStatusLabel(status));
-    return `<div class="channel-member">${avatar(name, avatarTone(name), status === 'working' ? 'thinking' : 'online')}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div></div>${channelStatusChip(status)}</div>`;
+    return `<div class="channel-member">${avatarFor(member, status === 'working' ? 'thinking' : 'online')}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div></div>${channelStatusChip(status)}</div>`;
   }
   function detailTask(task) {
     const status = ['open','claimed','blocked','done'].includes(task.status) ? task.status : 'open';

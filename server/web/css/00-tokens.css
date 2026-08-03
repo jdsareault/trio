@@ -5,6 +5,7 @@
   /* type */
   --font-display: "Fraunces", Georgia, serif;
   --font-body: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+  --avatar-svg-filter: none;
 
   /* radii */
   --r-xs: 8px;
@@ -137,6 +138,7 @@
    color) live once here; each named preset below only overrides its own
    identity — bg family, ink, and accent. */
 [data-theme^="dark-"] {
+  --avatar-svg-filter: invert(1);
   --ink-inv: #1a1714;
   --bubble-me-ink: #ffffff;
   --bubble-agent-ink: var(--ink);
@@ -194,4 +196,3 @@
   --ink:#e8eaee; --ink-2:#b0b6c0; --ink-3:#767d88; --bubble-agent:#22262c; --code-bg:#16191d; --code-ink:#56d4e0;
   --accent:#3dd0e0; --accent-strong:#5fdcec; --accent-tint:#103038;
 }
-

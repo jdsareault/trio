@@ -1006,6 +1006,17 @@ class EventHub:
         # may reshuffle affected members, which the client handles by
         # keying on the emoji/name fields we ship instead of hashing.
         avatars = animal_for_channel([r["id"] for r in rows])
+        character_avatars = {}
+        try:
+            character_avatars = {
+                r["id"]: avatar_url(r["avatar_name"] or "")
+                for r in db.execute(
+                    "SELECT id, avatar_name FROM agents WHERE avatar_name != ''"
+                ).fetchall()
+            }
+        except sqlite3.Error:
+            # Older databases may not have the managed-agent table yet.
+            pass
         out = []
         for r in rows:
             effective_last_read = max(
@@ -1030,6 +1041,7 @@ class EventHub:
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
+                "avatar_url": character_avatars.get(r["id"], ""),
                 "status_text": r["status_text"] or "",
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,

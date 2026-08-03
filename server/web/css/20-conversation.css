@@ -116,3 +116,4 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .message.msg.system-message .message-content{width:100%;max-width:none;align-items:flex-start}
 .message.msg.system-message .message-body.system{width:100%;box-sizing:border-box;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink-3);font-size:13px;line-height:1.4;text-align:left}
 @media(max-width:640px){.message.msg.system-message .message-content{max-width:none}}
+.message.msg .message-avatar.avatar-svg{background:transparent}

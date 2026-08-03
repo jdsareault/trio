@@ -158,6 +158,10 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   position:relative; letter-spacing:.01em;
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
 }
+.avatar-svg{ background:transparent !important; }
+.avatar-svg-image,.message-avatar.avatar-svg,.directory-avatar[src]{
+  object-fit:contain; filter:var(--avatar-svg-filter); padding:6px;
+}
 .av.sq{ border-radius:11px; }
 .av-28{ width:28px; height:28px; font-size:12px; }
 .av-32{ width:32px; height:32px; font-size:13px; }
