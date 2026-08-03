@@ -556,6 +556,60 @@ check('notifications: the SAME message id delivered twice (per-channel + workspa
   assert.strictEqual(created.length, 1);
 });
 
+// Cross-channel LEAK guard: the workspace-wide SSE stream multiplexes every
+// channel's messages AND roster through the same event target so notifications
+// can chime for other channels. The conversation view, which renders only the
+// open channel, must drop foreign-channel events — otherwise another channel's
+// message renders in this one and another channel's roster (worse,
+// AGENT_INBOX_CHANNEL's full agent list) overwrites the face-pile/sidebar.
+check('conversation: a message from another channel does NOT render in the open channel', () => {
+  H.Trio.state.channel = 'atrium-test4';
+  delete H.Trio.state.dmKey;
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 9101, member_id: 'ag_stag', channel: 'other-channel',
+    content: 'leaked from elsewhere', created_at: new Date().toISOString(),
+  } }));
+  assert.strictEqual(H.Trio.state.messages.has(9101), false,
+    'foreign-channel message must not enter the open conversation');
+});
+check('conversation: a message for the open channel (or with no channel stamp) still renders', () => {
+  H.Trio.state.channel = 'atrium-test4';
+  delete H.Trio.state.dmKey;
+  H.upsert({ id: 9102, member_id: 'ag_1', channel: 'atrium-test4', content: 'mine' });
+  H.upsert({ id: 9103, member_id: 'ag_1', content: 'unstamped-legacy' });
+  assert.strictEqual(H.Trio.state.messages.has(9102), true);
+  assert.strictEqual(H.Trio.state.messages.has(9103), true);
+});
+// These exercise the conversation module's OWN 'roster' listener (onRoster) —
+// the listener that re-derived state.members from the raw event detail and so
+// re-bypassed the guard in 04-events.js::dispatch. The harness suppresses boot,
+// so wire the listeners explicitly with init() before dispatching.
+check('conversation onRoster: a roster for another channel does NOT replace the open channel members', () => {
+  H.Trio.conversation.init();
+  H.Trio.state.channel = 'atrium-test4';
+  delete H.Trio.state.dmKey;
+  H.Trio.state.members = new Map([['ag_cedar', { id: 'ag_cedar', name: 'Cedar' }]]);
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('roster', { detail: {
+    channel: 'nth-agent-inbox',
+    members: [{ id: 'ag_a', name: 'Aragorn' }, { id: 'ag_b', name: 'Boromir' }],
+  } }));
+  assert.strictEqual(H.Trio.state.members.size, 1,
+    'foreign-channel roster must not clobber the open channel member list');
+  assert.ok(H.Trio.state.members.has('ag_cedar'));
+});
+check('conversation onRoster: a roster for the open channel replaces its members', () => {
+  H.Trio.conversation.init();
+  H.Trio.state.channel = 'atrium-test4';
+  delete H.Trio.state.dmKey;
+  H.Trio.state.members = new Map([['old', { id: 'old', name: 'stale' }]]);
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('roster', { detail: {
+    channel: 'atrium-test4',
+    members: [{ id: 'ag_cedar', name: 'Cedar' }, { id: 'op', name: 'jdsareault' }],
+  } }));
+  assert.strictEqual(H.Trio.state.members.size, 2);
+  assert.ok(H.Trio.state.members.has('ag_cedar') && !H.Trio.state.members.has('old'));
+});
+
 // Per-conversation mute: LOTC/Frodo found the "Mute notifications" menu item
 // was a stub (toasted "muted", did nothing) — a broken promise cross-channel
 // chimes made materially worse. toggleMute/isMuted/conversationKeyFor make it
