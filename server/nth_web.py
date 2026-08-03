@@ -100,6 +100,10 @@ STT_MAX_CONCURRENT = int(os.environ.get("NTH_STT_MAX_CONCURRENT", "2"))  # in-fl
 
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
+LIVE_SECONDS = 60            # dashboard "connected" light: heartbeat within this
+                             # window counts as live. Tight (~6 Monitor beats)
+                             # so a crash shows in ~1 min, vs the coarse
+                             # STALE/DEAD roster dot that tolerates host sleep.
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 OPERATOR_MEMBER_ID_PREFIX = "_op_"
 OPERATOR_NAME_FALLBACK = "Operator"
@@ -452,6 +456,80 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
         act = _iso_secs(session_activity_iso)
         return "working" if (act is not None and act > end) else "idle"
     return "active"  # no turn data (hook not installed) — legacy behavior
+
+
+def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
+    """Per-agent (fresh, working) derived from heartbeat + turn state.
+
+    The supervisor's is_running/is_busy only see agents THIS dashboard process
+    spawned into its in-memory _procs (and is_busy is compaction-only). That
+    leaves a genuinely-alive agent reading as "Not currently connected" whenever
+    it connected via a reclaim identity (an interactive session) or was spawned
+    before a dashboard restart, and it never reads "Working" during ordinary
+    work. This map lets /api/agents fall back to the same DB signals the channel
+    roster already trusts, so both surfaces agree.
+
+    fresh   — heartbeat within LIVE_SECONDS. Both the Monitor
+              (members.last_seen/messenger_heartbeat, ~10s) and the activity
+              hooks / trio RPCs (sessions.last_seen) keep it fresh, so a busy
+              agent with either signal stays live; a crash clears it in ~1 min.
+    working — mid-turn per member_status: acted since its last turn end, AND that
+              session is itself fresh. Uses the RAW session activity
+              (sessions.last_seen), never the Monitor-inflated
+              members.last_seen — mirrors _fetch_roster.
+
+    Aggregation is PER SESSION, not a column-wise MAX: last_turn_end is written
+    per channel by the turn hook, so MAX(activity) vs MAX(turn_end) across an
+    agent's channels would compare activity in one channel against a turn-end in
+    another (false idle/working for a multi-channel agent). Instead each
+    member/session row is classified on its own (activity vs its own turn-end)
+    and the agent is fresh/working if ANY of its rows is. Gating `working` on the
+    row's own freshness keeps the tuple coherent: working ⇒ fresh (never a
+    live:false, busy:true payload downstream).
+    """
+    out: Dict[str, Tuple[bool, bool]] = {}
+    try:
+        rows = db.execute(
+            "SELECT m.id AS aid, m.last_seen AS m_ls, "
+            "  m.messenger_heartbeat AS m_hb, m.status_text AS status_text, "
+            "  s.last_seen AS s_ls, s.last_turn_end AS s_turn_end, "
+            "  s.blocked_since AS blocked_since "
+            "FROM members m "
+            "LEFT JOIN sessions s "
+            "  ON s.member_id = m.id AND s.channel = m.channel AND s.revoked_at IS NULL"
+        ).fetchall()
+    except sqlite3.Error:
+        return out
+    now = datetime.now(timezone.utc).timestamp()
+    for r in rows:
+        # This channel's own freshest heartbeat, from any source.
+        hb = max(r["m_ls"] or "", r["m_hb"] or "", r["s_ls"] or "") or None
+        secs = _iso_secs(hb)
+        row_fresh = secs is not None and (now - secs) < LIVE_SECONDS
+        status = member_status(
+            hb, r["status_text"] or "",
+            session_activity_iso=(r["s_ls"] or None),
+            last_turn_end_iso=(r["s_turn_end"] or None),
+            blocked_since_iso=(r["blocked_since"] or None))
+        row_working = row_fresh and status == "working"
+        prev_fresh, prev_working = out.get(r["aid"], (False, False))
+        out[r["aid"]] = (prev_fresh or row_fresh, prev_working or row_working)
+    return out
+
+
+def _agent_is_live(is_running: bool, heartbeat_fresh: bool, state: str) -> bool:
+    """Whether /api/agents should report an agent connected.
+
+    Live if this process holds a running handle (is_running), OR it is
+    heartbeating AND its DB state says it should be up. Excluding sleeping/
+    stopped/errored is what stops a just-hibernated agent — whose last heartbeat
+    is still <LIVE_SECONDS old — from flashing "connected" for a minute before it
+    settles to Sleeping/Resting.
+    """
+    if is_running:
+        return True
+    return heartbeat_fresh and (state or "").lower() not in (
+        nsup.ST_SLEEPING, nsup.ST_STOPPED, nsup.ST_ERRORED)
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -3857,12 +3935,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "FROM agents WHERE archived_at IS "
                 + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
+            alive_map = _agent_liveness(db)
             agents = []
             for r in rows:
                 chans = public_agent_channels(db, r["id"])
                 dm_ready = (not archived) and db.execute(
                     "SELECT 1 FROM agent_channels WHERE agent_id=? AND channel=?",
                     (r["id"], AGENT_INBOX_CHANNEL)).fetchone() is not None
+                _hb_fresh, _agent_working = alive_map.get(r["id"], (False, False))
+                _agent_live = _agent_is_live(
+                    sup.is_running(r["id"]), _hb_fresh, r["state"] or "")
                 agents.append({
                     "id": r["id"], "name": r["name"], "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
@@ -3878,8 +3960,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "dm_ready": dm_ready,
                     "abandoned": not chans and not dm_ready,
                     "archived_at": r["archived_at"],
-                    "live": sup.is_running(r["id"]),
-                    "busy": sup.is_busy(r["id"]),
+                    # Live if this process holds a live handle OR the agent is
+                    # heartbeating (reclaim/cross-restart agents have no handle
+                    # here) AND its DB state says it should be up — so a just-
+                    # hibernated/stopped/errored agent whose last heartbeat is
+                    # still <60s old reads sleeping/offline immediately, not a
+                    # 60s "Active" flash. Busy if compacting OR mid-turn (is_busy
+                    # alone is compaction-only, so "Working" never showed for real
+                    # work), gated on live so the pair can never be
+                    # live:false/busy:true.
+                    "live": _agent_live,
+                    "busy": sup.is_busy(r["id"]) or (_agent_working and _agent_live),
                     "queued": sup.queued_count(r["id"]),
                     "created_at": r["created_at"],
                     "last_active_at": r["last_active_at"],
