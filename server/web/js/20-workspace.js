@@ -187,7 +187,12 @@
     if (!state.channel) { pile.classList.add('hidden'); return; }
     pile.classList.remove('hidden');
     pile.replaceChildren();
-    const members = [...(state.members?.values?.() || [])];
+    const allMembers = [...(state.members?.values?.() || [])];
+    // For a DM, show only conversation participants — not the whole inbox
+    // channel roster (which lists every agent ever created).
+    const members = state.dmKey && Array.isArray(state.dmMemberIds) && state.dmMemberIds.length
+      ? allMembers.filter(m => state.dmMemberIds.includes(m.id))
+      : allMembers;
     const operator = state.operator || state.meta?.operator;
     if (operator?.id && !members.some(member => member.id === operator.id)) members.push(operator);
     const visible = members.slice(0, 4);
@@ -686,6 +691,19 @@
     finally { state.searchLoading = false; }
   }
   function channelStatus(member) {
+    // Agent roster objects carry {state, live, busy} from the supervisor —
+    // the same source as the Agent roster page. Prefer those when present so
+    // the details panel agrees with the roster instead of falling back to the
+    // heartbeat-based channel roster status (which reads stale/dead for a
+    // sleeping agent because no monitor is running to heartbeat).
+    if (member?.live != null && member?.state != null) {
+      if (member.state === 'compacting') return 'sleeping';
+      if (member.live) return member.busy ? 'working' : 'idle';
+      const raw = String(member.state).toLowerCase();
+      if (raw === 'error' || raw === 'errored') return 'errored';
+      if (raw === 'sleeping') return raw;
+      return 'offline';
+    }
     const raw = String(member?.status || (member?.busy ? 'working' : member?.live ? 'active' : 'offline')).toLowerCase();
     if (raw === 'error') return 'errored';
     if (raw === 'stale' || raw === 'dead') return 'offline';
@@ -743,11 +761,24 @@
     // For a DM, show only the conversation participants — not the whole channel
     // roster. Agent DMs all share AGENT_INBOX_CHANNEL, so the unfiltered roster
     // would list every agent ever created, each stamped "active" at spawn.
+    // Agent participants use the supervisor-backed {state, live, busy} from
+    // state.agents (same source as the Agent roster page) so the status chip
+    // agrees with the roster instead of the heartbeat-based channel status.
     const allMembers = [...(state.members?.values?.() || [])];
-    const members = dm && Array.isArray(state.dmMemberIds) && state.dmMemberIds.length
-      ? allMembers.filter(m => state.dmMemberIds.includes(m.id))
+    const agentsById = new Map((state.agents || []).map(a => [a.id, a]));
+    const operator = state.operator || state.meta?.operator;
+    const resolveDmMember = id => {
+      const agent = agentsById.get(id);
+      const rosterM = allMembers.find(m => m.id === id);
+      if (agent) return { ...rosterM, ...agent };
+      return rosterM || (id === operator?.id ? operator : { id, name: id });
+    };
+    const dmIds = Array.isArray(state.dmMemberIds) ? state.dmMemberIds.slice() : [];
+    if (operator?.id && !dmIds.includes(operator.id)) dmIds.push(operator.id);
+    const members = dm && dmIds.length
+      ? dmIds.map(resolveDmMember)
       : allMembers;
-    const memberCount = dm ? (state.dmMemberIds?.length || members.length) : (members.length || Number(channel?.members) || 0);
+    const memberCount = dm ? dmIds.length : (members.length || Number(channel?.members) || 0);
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
