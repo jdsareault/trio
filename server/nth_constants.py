@@ -2,12 +2,43 @@
 # Both nth_server.py and nth_monitor.py import from here.
 
 import json
+import re
+from pathlib import Path
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
 # Hidden transport shared by the managed-agent app. Messages here are always
 # private-scoped by nth_server, even when a model accidentally uses trio_send.
 AGENT_INBOX_CHANNEL = "nth-agent-inbox"
+
+# Shared attachment storage path. The web upload endpoint and the Claude
+# agent runtime both need this directory to be readable.
+ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
+
+# Excludes '.' (unlike an earlier version of this pattern) so a channel value
+# can never sanitize down to '..' and walk ATTACH_DIR/.. — legitimate channel
+# codes (CHANNEL_CODE_PATTERN in nth_server.py/nth_web.py) never contain a
+# dot anyway, so this costs nothing (LOTC/Sauron: not reachable today given
+# that pattern, but this sink shouldn't depend on a second file's regex
+# staying dot-free forever).
+_CHANNEL_DIR_SANITIZE_RE = re.compile(r"[^\w\-]")
+
+
+def channel_attach_dir(channel: str, base: Path | None = None) -> Path:
+    """The on-disk attachment directory for one channel, under `base`
+    (defaults to this module's ATTACH_DIR).
+
+    THE single sanitizer for this path — both the web upload/serve handlers
+    (nth_web.py) and the per-agent --add-dir grant (nth_supervisor.py) must
+    route through this so they can never drift into scoping two different
+    directories for the "same" channel (LOTC/Aragorn).
+
+    Callers that import ATTACH_DIR into their own module namespace (nth_web.py
+    does, and tests monkeypatch THAT copy for isolation) must pass their own
+    `base=ATTACH_DIR` explicitly — this module's ATTACH_DIR global is a
+    separate binding and would silently ignore such a patch otherwise."""
+    root = base if base is not None else ATTACH_DIR
+    return root / _CHANNEL_DIR_SANITIZE_RE.sub("_", channel or "")
 
 # ── Real DMs: the member-aware visibility predicate ───────────────────
 # Lives here, in the module every side (nth_server, nth_web, nth_monitor)

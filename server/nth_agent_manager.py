@@ -83,10 +83,6 @@ class UnifiedAgentSupervisor:
         finally:
             db.close()
         manager = self.codex if provider == "codex" else self.claude
-        if provider == "claude":
-            # Claude runtime honors cwd (passed to Popen) but does not use
-            # permission_profile — that is a Codex-only concept.
-            kwargs.pop("permission_profile", None)
         return manager.spawn(agent_id, **kwargs)
 
     def wake(self, agent_id: str, **kwargs):
@@ -184,9 +180,17 @@ class UnifiedAgentSupervisor:
         return []
 
     def pending_approvals(self) -> List[Dict[str, Any]]:
-        return self.codex.pending_approvals()
+        return self.claude.pending_approvals() + self.codex.pending_approvals()
 
     def resolve_approval(self, approval_id: str, decision: str) -> bool:
+        # Claude's DB-backed approvals are tagged with a "cap_" id prefix
+        # (see nth_supervisor.AgentSupervisor.pending_approvals) so a single
+        # dashboard resolve endpoint can route to the right provider without
+        # the caller needing to know which one raised it. Claude only
+        # understands accept/decline (no Codex-style "acceptForSession").
+        if approval_id.startswith("cap_"):
+            mapped = "accept" if decision in ("accept", "acceptForSession") else "decline"
+            return self.claude.resolve_approval(approval_id, mapped)
         return self.codex.resolve_approval(approval_id, decision)
 
     def diagnostics(self, provider: str, *, deep: bool = False) -> Dict[str, Any]:

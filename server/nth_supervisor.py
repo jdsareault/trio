@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from nth_constants import AGENT_INBOX_CHANNEL
+from nth_constants import AGENT_INBOX_CHANNEL, ATTACH_DIR
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
@@ -53,6 +53,19 @@ TRIO_TOOL_NAMES = (
 )
 MANAGED_ALLOWED_TOOLS = ",".join(
     f"mcp__nth-trio__trio_{name}" for name in TRIO_TOOL_NAMES)
+
+# The MCP tool Claude Code calls itself (never the model) to resolve a gated
+# tool call — see nth_server.nth_permission_prompt. Only meaningful when the
+# agent actually has the nth-trio MCP server wired in (mcp_config) and its
+# permission mode can actually produce a prompt (not bypassPermissions).
+PERMISSION_PROMPT_TOOL = "mcp__nth-trio__trio_permission_prompt"
+
+# Map the web dashboard permission profile to a `claude --permission-mode`.
+PERMISSION_MODES = {
+    "observe": "manual",
+    "balanced": "auto",
+    "autonomous": "bypassPermissions",
+}
 
 # Valid agent lifecycle states (mirror the supervisor state machine in the
 # design doc). Kept as plain strings in agents.state. ST_IDLE is set by the hub
@@ -158,8 +171,9 @@ def build_spawn_argv(
     system_prompt: str = "",
     mcp_config: str = "",
     resume_session_id: str = "",
-    permission_mode: str = "acceptEdits",
-    disallowed_tools: str = "AskUserQuestion",
+    permission_mode: str = "auto",
+    extra_dirs: Optional[List[str]] = None,
+    disallowed_tools: str = f"AskUserQuestion,{PERMISSION_PROMPT_TOOL}",
     allowed_tools: str = MANAGED_ALLOWED_TOOLS,
     effort: str = "",
     _runtime: Optional[ClaudeRuntime] = None,
@@ -193,8 +207,25 @@ def build_spawn_argv(
         argv += ["--append-system-prompt", system_prompt]
     if mcp_config:
         argv += ["--mcp-config", mcp_config]
+        # Only wire the approval gate when there's an MCP server to resolve it
+        # against, and only when the mode can actually produce a prompt —
+        # bypassPermissions never asks, so the flag would be dead weight.
+        if permission_mode != "bypassPermissions":
+            argv += ["--permission-prompt-tool", PERMISSION_PROMPT_TOOL]
     if resume_session_id:
         argv += ["--resume", resume_session_id]
+    # Attachments live under one shared ATTACH_DIR root, but --add-dir grants
+    # the agent's raw Read tool filesystem access with NO trio-level
+    # visibility check — trio's can_see/DM-withholding model doesn't apply to
+    # it. Adding the WHOLE root here (as this used to do) let any agent read
+    # every OTHER channel's uploaded attachments too, not just its own
+    # (LOTC/Aragorn). Callers must pass the specific channel-scoped
+    # subdirectories this agent is actually allowed to see; ATTACH_DIR itself
+    # is still ensured so uploads have somewhere to land.
+    ATTACH_DIR.mkdir(parents=True, exist_ok=True)
+    add_dirs = {d for d in (extra_dirs or []) if d}
+    for d in add_dirs:
+        argv += ["--add-dir", d]
     return argv
 
 
@@ -537,7 +568,8 @@ class AgentSupervisor:
     # ── lifecycle ──
     def spawn(self, agent_id: str, *, model: str = "", system_prompt: str = "",
               mcp_config: str = "", resume_session_id: str = "", effort: str = "",
-              cwd: str = "",
+              cwd: str = "", permission_profile: str = "balanced",
+              extra_dirs: Optional[List[str]] = None,
               session_timeout: float = 10.0) -> AgentProc:
         """Launch (or resume) an agent process and sync its DB row. Serialized
         per-agent. Blocks briefly to capture the session_id from the init
@@ -554,9 +586,11 @@ class AgentSupervisor:
                 existing = self._procs.get(agent_id)
                 if existing and existing.alive():
                     return existing
+            permission_mode = PERMISSION_MODES.get(permission_profile, "auto")
             argv = self.runtime.build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
-                resume_session_id=resume_session_id, effort=effort)
+                resume_session_id=resume_session_id, effort=effort,
+                permission_mode=permission_mode, extra_dirs=extra_dirs)
             proc = AgentProc(
                 agent_id, argv,
                 on_event=lambda aid, evt: self._handle_event(aid, evt, source=proc),
@@ -623,6 +657,7 @@ class AgentSupervisor:
             effort=spawn_kw.get("effort",
                                 row["effort"] if "effort" in row.keys() else ""),
             cwd=spawn_kw.get("cwd", row["cwd"] or ""),
+            extra_dirs=spawn_kw.get("extra_dirs"),
             resume_session_id=row["session_id"] or "")
 
     def stop(self, agent_id: str) -> bool:
@@ -667,6 +702,7 @@ class AgentSupervisor:
                 system_prompt=spawn_kw.get("system_prompt", ""),
                 mcp_config=spawn_kw.get("mcp_config", ""),
                 cwd=spawn_kw.get("cwd", row["cwd"] or ""),
+                extra_dirs=spawn_kw.get("extra_dirs"),
                 resume_session_id="",
             )
 
@@ -737,6 +773,44 @@ class AgentSupervisor:
                         if not pending:
                             self._pending.pop(agent_id, None)
             return ok
+
+    # ── approvals ──
+    # DB-backed, unlike Codex's in-memory approval inbox (nth_codex_runtime.py)
+    # — trio_permission_prompt runs inside the spawned `claude` subprocess's
+    # own nth_server.py MCP child, a different OS process from whatever hub
+    # holds this AgentSupervisor, so the `approvals` table (nth_server.get_db)
+    # is the only thing both sides can see.
+    def pending_approvals(self) -> List[Dict[str, Any]]:
+        db = self._db()
+        try:
+            columns = {r[1] for r in db.execute("PRAGMA table_info(approvals)")}
+            if not columns:
+                return []
+            rows = db.execute(
+                "SELECT * FROM approvals WHERE provider='claude' AND status='pending' "
+                "ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def resolve_approval(self, approval_id: str, decision: str) -> bool:
+        if decision not in ("accept", "decline"):
+            return False
+        db = self._db()
+        try:
+            columns = {r[1] for r in db.execute("PRAGMA table_info(approvals)")}
+            if not columns:
+                # No such table yet (a hub-only DB nth_server.py hasn't
+                # migrated) — nothing to resolve, not an error (LOTC/Ents).
+                return False
+            cur = db.execute(
+                "UPDATE approvals SET status='resolved', decision=?, resolved_at=? "
+                "WHERE id=? AND provider='claude' AND status='pending'",
+                (decision, now_iso(), approval_id))
+            db.commit()
+            return cur.rowcount > 0
+        finally:
+            db.close()
 
     def is_running(self, agent_id: str) -> bool:
         with self._lock:

@@ -26,10 +26,11 @@
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
-  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean' };
+  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, dictation: true, messageHistoryDays: 3 };
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', dictation: 'boolean', messageHistoryDays: 'number' };
   function cast(key, value) {
     if (schema[key] === 'boolean') return !!value;
+    if (schema[key] === 'number') { const n = Number(value); return Number.isFinite(n) && n >= 0 ? n : defaults[key]; }
     if (Array.isArray(schema[key])) return schema[key].includes(value) ? value : defaults[key];
     return value ?? defaults[key];
   }
@@ -129,6 +130,13 @@
     const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
     const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Notify me when an agent mentions me or finishes a task.'],['chime','Notification chime','Play a short sound with desktop notifications.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
     behaviors.forEach(([key,label,description]) => { const row = document.createElement('div'); row.className = 'pref-row'; const text = document.createElement('div'); text.className = 'pr-txt'; text.innerHTML = `<div class="l">${esc(label)}</div><div class="d">${esc(description)}</div>`; const toggle = document.createElement('label'); toggle.className = 'switch'; toggle.innerHTML = `<input type="checkbox" ${p[key] ? 'checked' : ''} aria-label="${esc(label)}"><span class="track"></span><span class="knob"></span>`; toggle.querySelector('input').addEventListener('change', event => save({[key]:event.target.checked})); row.append(text, toggle); behavior.append(row); });
+    const historyRow = document.createElement('div'); historyRow.className = 'pref-row';
+    const historyText = document.createElement('div'); historyText.className = 'pr-txt'; historyText.innerHTML = '<div class="l">Hide old messages</div><div class="d">Collapse messages older than this age so they don\'t clog the conversation. Expand them inline when needed.</div>';
+    const historySelect = document.createElement('select'); historySelect.className = 'pref-select'; historySelect.setAttribute('aria-label', 'Hide old messages after');
+    const historyOptions = [[1,'1 day'],[3,'3 days'],[7,'7 days'],[14,'14 days'],[30,'30 days'],[0,'Never']];
+    historyOptions.forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = String(value); opt.textContent = label; if (Number(p.messageHistoryDays) === value) opt.selected = true; historySelect.append(opt); });
+    historySelect.addEventListener('change', () => save({ messageHistoryDays: Number(historySelect.value) }));
+    historyRow.append(historyText, historySelect); behavior.append(historyRow);
     const diagnosticsGroup = document.createElement('section'); diagnosticsGroup.className = 'pref-group'; diagnosticsGroup.innerHTML = '<h3>Diagnostics</h3>';
     const diagnostic = diagnostics(); Object.entries(diagnostic).forEach(([key,value]) => { const row = document.createElement('div'); row.className = 'diag-card'; row.innerHTML = `<span class="di ${key === 'online' || key === 'stt' ? 'ok' : 'off'}">●</span><div class="dtxt"><div class="dl">${esc(key.replace(/([A-Z])/g,' $1'))}<span class="stat-chip-sm ${key === 'online' ? 'ok' : 'off'}">${esc(String(value))}</span></div></div>`; diagnosticsGroup.append(row); });
     const resetButton = document.createElement('button'); resetButton.type = 'button'; resetButton.className = 'reset-prefs'; resetButton.textContent = 'Reset to defaults'; resetButton.addEventListener('click', () => { reset(); renderPage(panel); }); diagnosticsGroup.append(resetButton);

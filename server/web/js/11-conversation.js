@@ -396,6 +396,31 @@
   }
 
   function ordered() { return [...state.messages.values()].sort((a, b) => Number(a.id) - Number(b.id)); }
+  function messageHistoryDays() {
+    const prefs = Trio.preferences?.read?.() || Trio.state.preferences || {};
+    const n = Number(prefs.messageHistoryDays);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  function olderExpanded() { state.olderExpanded = state.olderExpanded || {}; return !!state.olderExpanded[convId()]; }
+  function isHiddenOld(msg) {
+    const days = messageHistoryDays();
+    if (days <= 0) return false;
+    if (olderExpanded()) return false;
+    const t = new Date(msg.created_at).getTime();
+    if (isNaN(t)) return false;
+    return t < Date.now() - days * 86400000;
+  }
+  function olderToggle(oldCount, expanded) {
+    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'older-toggle';
+    if (expanded) {
+      btn.textContent = 'Hide older messages';
+      btn.addEventListener('click', () => { state.olderExpanded[convId()] = false; render(); });
+    } else {
+      btn.textContent = 'Show ' + oldCount + ' older message' + (oldCount === 1 ? '' : 's');
+      btn.addEventListener('click', () => { state.olderExpanded[convId()] = true; render(); });
+    }
+    return btn;
+  }
   function render() {
     const list = dom(); if (!list) return;
     const stick = nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
@@ -414,14 +439,42 @@
         empty.append(retry);
       }
       list.append(empty);
+      const saved = state.scrollPositions[convId()];
+      if (stick) { list.scrollTop = list.scrollHeight; markRead(); }
+      else if (saved != null) { list.scrollTop = saved; }
+      return;
     }
+    // Age-based collapse: hide messages older than the configured threshold
+    // (default 3 days) unless the user has expanded this conversation.
+    const days = messageHistoryDays();
+    const cutoff = days > 0 ? Date.now() - days * 86400000 : 0;
+    const expanded = olderExpanded();
+    let splitIndex = 0;
+    if (cutoff > 0) {
+      splitIndex = messages.length;
+      for (let i = 0; i < messages.length; i++) {
+        const t = new Date(messages[i].created_at).getTime();
+        if (isNaN(t) || t >= cutoff) { splitIndex = i; break; }
+      }
+    }
+    const oldCount = splitIndex;
+    const hideOld = cutoff > 0 && oldCount > 0 && !expanded;
+    const rendered = hideOld ? messages.slice(splitIndex) : messages;
+    if (hideOld) list.append(olderToggle(oldCount, false));
+    else if (cutoff > 0 && oldCount > 0 && expanded) list.append(olderToggle(oldCount, true));
+    // Unread divider index, mapped into the rendered slice.
     let unread = messages.findIndex(msg => Number(msg.id) > Number(state.lastSeenId));
     if (state.lastSeenId === 0) unread = -1;
+    let unreadRel = -1;
+    if (unread >= 0) {
+      if (hideOld) unreadRel = unread <= splitIndex ? 0 : unread - splitIndex;
+      else unreadRel = unread;
+    }
     let lastDate = '';
-    messages.forEach((msg, index) => {
+    rendered.forEach((msg, index) => {
       const d = date(msg.created_at);
       if (d && d !== lastDate) { lastDate = d; const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = d; list.append(day); }
-      if (index === unread) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
+      if (index === unreadRel) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
       const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card);
     });
     const saved = state.scrollPositions[convId()];
@@ -448,15 +501,20 @@
     const existing = state.messageDomById.get(msg.id);
     const list = dom();
     if (!existing) {
-      const card = cardFor(state.messages.get(msg.id));
       if (list) {
-        // Defense in depth against an EventHub prime/live race delivering a
-        // newer id ahead of older history: insert in id order instead of
-        // blindly appending, so a late-arriving older message still lands
-        // before the newer cards already painted.
-        const nextSibling = [...list.children].find(el => el.dataset?.messageId && Number(el.dataset.messageId) > Number(msg.id));
-        if (nextSibling) list.insertBefore(card, nextSibling); else list.append(card);
-        state.messageDomById.set(msg.id, card);
+        if (isHiddenOld(state.messages.get(msg.id))) {
+          // Keep it in state but don't paint a card while older messages
+          // are collapsed for this conversation.
+        } else {
+          const card = cardFor(state.messages.get(msg.id));
+          // Defense in depth against an EventHub prime/live race delivering a
+          // newer id ahead of older history: insert in id order instead of
+          // blindly appending, so a late-arriving older message still lands
+          // before the newer cards already painted.
+          const nextSibling = [...list.children].find(el => el.dataset?.messageId && Number(el.dataset.messageId) > Number(msg.id));
+          if (nextSibling) list.insertBefore(card, nextSibling); else list.append(card);
+          state.messageDomById.set(msg.id, card);
+        }
       }
       else { render(); }
       if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
@@ -484,12 +542,14 @@
   function onMessage(event) { ingest(event.detail); }
   function onRoster(event) { if (Array.isArray(event.detail?.members)) state.members = new Map(event.detail.members.map(m => [m.id, m])); render(); }
   function onBoot(event) { state.operator = event.detail?.operator || state.operator; }
+  function onPrefsChanged() { render(); }
   function init() {
     state.operator = state.operator || state.meta?.operator;
     events.addEventListener('boot', onBoot); listeners.boot = onBoot;
     events.addEventListener('message', onMessage); listeners.message = onMessage;
     events.addEventListener('message_update', onMessage); listeners.message_update = onMessage;
     events.addEventListener('roster', onRoster); listeners.roster = onRoster;
+    events.addEventListener('preferences:changed', onPrefsChanged); listeners['preferences:changed'] = onPrefsChanged;
     render();
     const list = dom(); const jump = document.getElementById('jump-latest');
     if (list && jump) {
