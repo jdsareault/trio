@@ -20,6 +20,53 @@
     return 'plain';
   }
 
+  // ── Per-conversation mute ─────────────────────────────────────────────
+  // LOTC/Frodo: the channel menu's "Mute notifications" item was a stub —
+  // clicking it just toasted "muted" and did nothing. Cross-channel chimes
+  // make that broken promise a real problem (a chatty channel you can't
+  // silence now interrupts you from anywhere, not just while it's open),
+  // so this needed to become real, not just get worse quietly.
+  const MUTE_STORAGE_KEY = 'trio.mutedConversations.v1';
+  function readMuted() {
+    try { return new Set(JSON.parse(localStorage.getItem(MUTE_STORAGE_KEY) || '[]')); }
+    catch { return new Set(); }
+  }
+  function writeMuted(set) {
+    try { localStorage.setItem(MUTE_STORAGE_KEY, JSON.stringify([...set])); }
+    catch { /* storage unavailable (private mode / quota) — mute just won't persist */ }
+  }
+  function isMuted(key) { return !!key && readMuted().has(key); }
+  // Returns the NEW muted state (true = now muted) so callers can render
+  // the right label/toast without a separate isMuted() round-trip.
+  function toggleMute(key) {
+    if (!key) return false;
+    const set = readMuted();
+    const nowMuted = !set.has(key);
+    if (nowMuted) set.add(key); else set.delete(key);
+    writeMuted(set);
+    return nowMuted;
+  }
+  // A live message carries recipients (participant ids) but not the DM's
+  // own `key` (that's a server-assigned id from /api/dms, not derivable
+  // from the message alone) — resolve it by matching the participant SET
+  // against the DM list already loaded client-side. Falls back to the
+  // channel code for a channel message, or '' if neither resolves (a DM
+  // whose thread hasn't been opened/loaded yet won't have an entry in
+  // state.dms.your_dms — best-effort: it just won't be mutable yet, not a
+  // crash or a wrong mute).
+  function conversationKeyFor(msg) {
+    if (!msg) return '';
+    if (msg.recipients?.length) {
+      const participants = new Set([...msg.recipients, msg.member_id].filter(Boolean));
+      const dm = (state.dms?.your_dms || []).find(d => {
+        const ids = new Set(d.member_ids || []);
+        return ids.size === participants.size && [...participants].every(id => ids.has(id));
+      });
+      if (dm) return 'dm:' + dm.key;
+    }
+    return msg.channel || '';
+  }
+
   // ── Chime synthesis (WebAudio, no audio asset) ───────────────────────
   // Three presets instead of one fixed tone, so different tiers can sound
   // distinct (a DM shouldn't sound like an untargeted channel message).
@@ -131,6 +178,7 @@
   function onMessage(event) {
     const msg = event.detail;
     if (!msg || msg.id == null || isPrimedHistory(msg) || alreadySeen(msg.id)) return;
+    if (isMuted(conversationKeyFor(msg))) return; // per-conversation override beats tier settings entirely
     const operatorId = (state.operator || state.meta?.operator)?.id;
     const tier = classify(msg, operatorId);
     if (!tier) return;
@@ -150,5 +198,5 @@
   }
   events.addEventListener('message', onMessage);
 
-  Trio.notifications = { classify, playPreset, isPrimedHistory, SOUNDS, TIERS: ['dm', 'mention', 'ref', 'plain'] };
+  Trio.notifications = { classify, playPreset, isPrimedHistory, isMuted, toggleMute, conversationKeyFor, SOUNDS, TIERS: ['dm', 'mention', 'ref', 'plain'] };
 })();

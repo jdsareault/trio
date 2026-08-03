@@ -2828,7 +2828,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
         db = sqlite3.connect(str(self.db_path), timeout=5)
         db.row_factory = sqlite3.Row
         try:
-            channels = [r["code"] for r in db.execute("SELECT code FROM channels").fetchall()]
+            # LOTC/Legolas: get_channel_runtime() creates and permanently
+            # caches an EventHub + StallWatchdog (2 background threads,
+            # never evicted short of process shutdown) for any channel it
+            # hasn't seen yet. Subscribing to EVERY channel that ever
+            # existed — including ones nobody has opened in months — turns
+            # one operator's first workspace-stream connection into an
+            # unbounded, permanent thread-count ratchet as channels
+            # accumulate over the app's life. Recently-active + not-archived
+            # is a cheap, one-line bound: a channel nobody's touched in 30
+            # days getting its hub warmed on first live view (a few hundred
+            # ms) instead of pre-warmed here is an acceptable trade.
+            channels = [r["code"] for r in db.execute(
+                "SELECT code FROM channels WHERE archived_at IS NULL "
+                "AND updated_at > datetime('now', '-30 days')").fetchall()]
         finally:
             db.close()
         self.send_response(200)

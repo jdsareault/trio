@@ -642,10 +642,17 @@
     if (!menu.hidden) { closeChannelMenu(); return; }
     const isChannel = !!state.channel && !state.dmKey;
     const archived = !!state.readOnly;
+    // LOTC/Frodo: this used to be a stub — clicking it just toasted "muted"
+    // and did nothing, which cross-channel chimes turned from a cosmetic gap
+    // into a real "the only escape hatch is fake" problem. The key here must
+    // match what Trio.notifications.conversationKeyFor() resolves for a live
+    // message in this same conversation (channel code, or 'dm:'+dmKey).
+    const muteKey = state.dmKey ? 'dm:' + state.dmKey : state.channel;
+    const muted = Trio.notifications?.isMuted?.(muteKey);
     const rows = [
       `<button type="button" role="menuitem" data-menu-action="details">${menuSvg('details')}<span>${isChannel ? 'Channel details' : 'Conversation details'}</span></button>`,
       `<button type="button" role="menuitem" data-menu-action="search">${menuSvg('search')}<span>${isChannel ? 'Search this channel' : 'Search this conversation'}</span></button>`,
-      `<button type="button" role="menuitem" data-menu-action="mute">${menuSvg('mute')}<span>Mute notifications</span></button>`,
+      `<button type="button" role="menuitem" data-menu-action="mute">${menuSvg('mute')}<span>${muted ? 'Unmute notifications' : 'Mute notifications'}</span></button>`,
       '<div class="menu-sep" role="separator"></div>',
       isChannel
         ? `<button type="button" role="menuitem" class="danger" data-menu-action="archive">${menuSvg('archive')}<span>${archived ? 'Restore channel' : 'Archive channel'}</span></button>`
@@ -661,7 +668,11 @@
       const action = item.dataset.menuAction;
       if (action === 'details') showDetails();
       if (action === 'search') openSearch();
-      if (action === 'mute') { closeChannelMenu(); toast('Notifications muted for this conversation'); }
+      if (action === 'mute') {
+        closeChannelMenu();
+        const nowMuted = Trio.notifications?.toggleMute?.(muteKey);
+        toast(nowMuted ? 'Notifications muted for this conversation' : 'Notifications unmuted for this conversation');
+      }
       if (action === 'archive') { closeChannelMenu(); archiveCurrent(); }
     }));
     menu.querySelector('button')?.focus();
