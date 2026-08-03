@@ -50,19 +50,21 @@
       cwd: agent.cwd || '',
       permissions: agent.permission_profile || agent.permissions || '',
       compacting: lifecycle === 'compacting',
+      archived: !!agent.archived || !!agent.archived_at,
       needsAttention: lifecycle === 'blocked' || lifecycle === 'errored' || lifecycle === 'error' || !!agent.error,
     };
   }
   function actionCaps(vm) {
     const caps = [];
-    if (vm.lifecycle === 'compacting') return ['stop', 'delete'];
+    if (vm.archived) return ['unarchive'];
+    if (vm.lifecycle === 'compacting') return ['stop', 'archive'];
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('stop');
     if (!vm.live && (vm.lifecycle === 'idle' || vm.lifecycle === 'sleeping' || vm.lifecycle === 'stopped' || vm.lifecycle === 'offline' || vm.lifecycle === 'stale')) caps.push('wake');
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active') caps.push('interrupt');
     if (vm.lifecycle === 'working' || vm.lifecycle === 'active' || vm.lifecycle === 'idle') caps.push('hibernate');
     if (vm.lifecycle === 'idle') caps.push('compact');
     if (!['errored','blocked'].includes(vm.lifecycle)) caps.push('clear');
-    caps.push('delete');
+    caps.push('archive');
     return caps;
   }
   function actionLabel(action) {
@@ -73,14 +75,15 @@
       compact: 'Compact context',
       wake: 'Wake',
       clear: 'Clear context',
-      delete: 'Delete agent',
+      archive: 'Archive agent',
+      unarchive: 'Unarchive agent',
     })[action] || action;
   }
-  function isDestructiveAction(action) { return action === 'clear' || action === 'delete'; }
+  function isDestructiveAction(action) { return action === 'clear' || action === 'archive'; }
   function confirmAction(vm, actionName) {
     if (!isDestructiveAction(actionName)) return true;
-    const subject = actionName === 'delete' ? 'Permanently delete ' : 'Clear context for ';
-    return window.confirm(subject + vm.name + '?');
+    if (actionName === 'archive') return window.confirm('Archive ' + vm.name + '? It stops the agent and hides it from the roster, but can be restored later.');
+    return window.confirm('Clear context for ' + vm.name + '?');
   }
   function statusIcon(vm) {
     if (vm.needsAttention) return '!';
@@ -137,6 +140,7 @@
   }
   function matches(vm) {
     const f = state.agentFilter;
+    if (f === 'archived') return vm.archived;
     if (f === 'active') return vm.live;
     if (f === 'working') return vm.busy;
     if (f === 'resting') return !vm.busy && !vm.needsAttention;
@@ -144,7 +148,7 @@
     return true;
   }
   function directoryCard(vm) {
-    const article = document.createElement('article'); article.className = 'agent-card agent-card-openable' + (vm.needsAttention ? ' needs-attention' : '');
+    const article = document.createElement('article'); article.className = 'agent-card agent-card-openable' + (vm.needsAttention ? ' needs-attention' : '') + (vm.archived ? ' is-archived' : '');
     article.tabIndex = 0;
     article.setAttribute('aria-label', 'Manage agent ' + vm.name);
     const openDetails = event => {
@@ -158,12 +162,16 @@
       }
     });
     const initials = (vm.name || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
-    const tone = vm.needsAttention ? 'var(--danger)' : vm.busy ? 'var(--warn)' : vm.live ? 'var(--ok)' : 'var(--accent)';
+    const tone = vm.archived ? 'var(--ink-3)' : vm.needsAttention ? 'var(--danger)' : vm.busy ? 'var(--warn)' : vm.live ? 'var(--ok)' : 'var(--accent)';
     article.style.setProperty('--card-accent', tone);
-    const avatar = vm.avatarUrl ? `<img src="${esc(vm.avatarUrl)}" alt="" class="directory-avatar">` : `<span class="directory-avatar">${esc(initials)}</span>`;
-    article.innerHTML = `<div class="ac-top">${avatar}<span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.compacting || vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.compacting ? 'Compacting context…' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
+    const avatar = vm.avatarUrl ? `<span class="directory-avatar avatar-svg"><img src="${esc(vm.avatarUrl)}" alt="" class="avatar-svg-image"></span>` : `<span class="directory-avatar">${esc(initials)}</span>`;
+    const chipCls = vm.archived ? 'archived' : vm.needsAttention ? 'offline' : vm.compacting || vm.busy ? 'thinking' : vm.live ? 'online' : 'idle';
+    const chipLabel = vm.archived ? 'Archived' : vm.needsAttention ? 'Needs attention' : vm.compacting ? 'Compacting context…' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting';
+    article.innerHTML = `<div class="ac-top">${avatar}<span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.archived ? 'Archived — restore to rejoin.' : vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${chipCls}"><span class="st-dot"></span>${esc(chipLabel)}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
     const actions = document.createElement('div'); actions.className = 'agent-actions';
-    const message = document.createElement('button'); message.type = 'button'; message.textContent = 'Message'; message.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); actions.append(message);
+    if (!vm.archived) {
+      const message = document.createElement('button'); message.type = 'button'; message.textContent = 'Message'; message.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); actions.append(message);
+    }
     article.append(actions); return article;
   }
   function renderPage(panel) {
@@ -171,7 +179,7 @@
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Agent roster</h2><p>Everyone working in this workspace</p>';
     const toolbar = document.createElement('div'); toolbar.className = 'roster-toolbar';
     const segment = document.createElement('div'); segment.className = 'seg';
-    [['all','All'],['active','Active'],['working','Working'],['resting','Resting'],['needs-attention','Needs attention']].forEach(([filter,label]) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.className = state.agentFilter === filter ? 'on' : ''; b.addEventListener('click', () => { state.agentFilter = filter; renderPage(panel); }); segment.append(b); });
+    [['all','All'],['active','Active'],['working','Working'],['resting','Resting'],['needs-attention','Needs attention'],['archived','Archived']].forEach(([filter,label]) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.className = state.agentFilter === filter ? 'on' : ''; b.addEventListener('click', () => { const crossing = (state.agentFilter === 'archived') !== (filter === 'archived'); state.agentFilter = filter; if (crossing) refresh(); else renderPage(panel); }); segment.append(b); });
     const search = document.createElement('input'); search.className = 'agent-page-search'; search.placeholder = 'Search agents…'; search.value = state.agentsSearch || ''; search.setAttribute('aria-label', 'Search agents'); search.addEventListener('input', () => { state.agentsSearch = search.value; renderPage(panel); });
     const createButton = document.createElement('button'); createButton.type = 'button'; createButton.className = 'btn primary'; createButton.textContent = 'New agent'; createButton.addEventListener('click', create);
     toolbar.append(segment, search, createButton);
@@ -189,12 +197,12 @@
       const q = state.agentsSearch.toLowerCase();
       list = list.filter(vm => (vm.name + ' ' + vm.model + ' ' + vm.provider).toLowerCase().includes(q));
     }
-    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}<button type="button" class="agent-new">New agent</button></div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
+    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention','archived'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}<button type="button" class="agent-new">New agent</button></div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
     n.querySelector('.modal-close').onclick = () => n.hidden = true;
     n.querySelector('.agent-new').onclick = () => create();
     const listNode = n.querySelector('.agent-list');
     list.forEach(vm => listNode.append(agentCard(vm)));
-    n.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { state.agentFilter = b.dataset.filter; render(agents); });
+    n.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { const crossing = (state.agentFilter === 'archived') !== (b.dataset.filter === 'archived'); state.agentFilter = b.dataset.filter; if (crossing) refresh(); else render(agents); });
     const input = n.querySelector('.agent-search');
     input.oninput = () => { state.agentsSearch = input.value; render(agents); };
   }
@@ -295,7 +303,8 @@
   }
   async function refresh() {
     try {
-      const data = await Trio.api.get('/api/agents');
+      const archived = state.agentFilter === 'archived';
+      const data = await Trio.api.get('/api/agents' + (archived ? '?archived=1' : ''));
       state.agents = data.agents || [];
       Trio.store.set('agents.list', data.agents || []);
       Trio.store.set('agents.loading', false);
