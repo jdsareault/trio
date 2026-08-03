@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Tests for the two newest Atrium indicators:
 
-  * Context-fullness: nth_supervisor now reads the `usage` object off a
-    Claude Code stream-json `result` event and persists a context_pct /
-    context_tokens reading on the agents row (server/nth_supervisor.py
-    _handle_event -> _set_context). /api/agents and the channel roster
-    (_fetch_roster) both surface it.
+  * Context-fullness: nth_supervisor now reads the `usage` object off each
+    Claude Code stream-json `assistant` event (a single request's own
+    prompt size — NOT the turn-level `result` event, whose usage is
+    accumulated across every internal API call the turn made) and persists
+    a context_pct / context_tokens reading on the agents row
+    (server/nth_supervisor.py _handle_event -> _set_context), sized against
+    a per-model context window (context_window_for: 1M for Sonnet/Opus,
+    200k for Haiku). /api/agents and the channel roster (_fetch_roster)
+    both surface it.
   * /api/usage: reads Claude Code's own ~/.claude/statusline-state.json
     (five_hour/seven_day used_percentage) for the home-screen quota
     display. Codex has no equivalent source and always reports
@@ -44,6 +48,27 @@ def check(name, cond):
         failures.append(name)
 
 
+# ── context_window_for: per-model window lookup ──────────────────────────
+# LOTC/jdsareault (post-review question): the original hardcoded 200k was
+# stale internal-knowledge, not a verified figure — Sonnet/Opus default to
+# a 1M window as of the 4.6/5 model generation (no beta header required),
+# only Haiku stays at 200k. Verify the lookup and its safe-fallback
+# direction (unrecognized model -> the SMALLER window, so a genuinely-full
+# context is never silently under-reported as merely high).
+check("context_window_for: haiku tier alias -> 200k", sup.context_window_for("haiku") == 200_000)
+check("context_window_for: versioned haiku model id -> 200k",
+      sup.context_window_for("claude-haiku-4-5-20251001") == 200_000)
+check("context_window_for: sonnet tier alias -> 1M", sup.context_window_for("sonnet") == 1_000_000)
+check("context_window_for: opus tier alias -> 1M", sup.context_window_for("opus") == 1_000_000)
+check("context_window_for: case-insensitive", sup.context_window_for("HAIKU") == 200_000)
+check("context_window_for: a genuinely empty/unset model string conservatively "
+      "assumes the smaller window (we truly know nothing)",
+      sup.context_window_for("") == 200_000)
+check("context_window_for: an unrecognized-but-present model id assumes the "
+      "current-generation default (1M), not the legacy 200k",
+      sup.context_window_for("some-future-model") == 1_000_000)
+
+
 def http(port, path, method="GET", body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -80,9 +105,12 @@ try:
     db.commit()
     db.close()
 
+    # Haiku is the one current tier still on a 200k window (Sonnet/Opus
+    # default to 1M as of the 4.6/5 generation) — spawn as haiku so this
+    # first check's math is a round, easy-to-read number.
     os.environ["FAKE_AGENT_USAGE_TOKENS"] = "40000,0,20000"  # 60,000 / 200,000 = 30%
     manager = sup.AgentSupervisor(db_path=srv.DB_PATH)
-    manager.spawn(agent_id, model="sonnet")
+    manager.spawn(agent_id, model="haiku")
     check("feed reaches the fake headless agent",
           manager.feed(agent_id, AGENT_INBOX_CHANNEL, "hello"))
 
@@ -98,7 +126,7 @@ try:
         time.sleep(0.02)
     check("context_tokens sums input+cache_creation+cache_read",
           r is not None and r["context_tokens"] == 60000)
-    check("context_pct is tokens / 200k context window",
+    check("context_pct is tokens / haiku's 200k context window",
           r is not None and abs((r["context_pct"] or 0) - 30.0) < 0.01)
 finally:
     if manager is not None:

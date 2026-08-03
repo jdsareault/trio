@@ -78,10 +78,28 @@ ST_SLEEPING = "sleeping"
 ST_STOPPED = "stopped"
 ST_ERRORED = "errored"
 
-# Context window used to turn a result event's token usage into a fullness
-# percentage. 200k is Claude's standard context window across the current
-# model family.
+# Context window used to turn a turn's token usage into a fullness
+# percentage. As of the 4.6/5 model generation, 1M tokens is the DEFAULT
+# context window for Sonnet/Opus (no beta header needed) — only Haiku stays
+# at the older 200k. Matched by substring against the model string Claude
+# Code was spawned with (tier alias like "sonnet" or a full versioned model
+# id), case-insensitive. An unrecognized/empty model string conservatively
+# assumes the SMALLER window — under-reporting fullness (a full context
+# read as merely high) is worse than over-reporting it, since it would hide
+# a genuinely-imminent compaction.
 DEFAULT_CONTEXT_WINDOW = 200_000
+_MODEL_CONTEXT_WINDOWS = (
+    ("haiku", 200_000),
+)
+_LARGE_CONTEXT_WINDOW = 1_000_000
+
+
+def context_window_for(model: str) -> int:
+    m = (model or "").lower()
+    for needle, window in _MODEL_CONTEXT_WINDOWS:
+        if needle in m:
+            return window
+    return _LARGE_CONTEXT_WINDOW if m else DEFAULT_CONTEXT_WINDOW
 
 _warned_override = False
 
@@ -406,6 +424,7 @@ class AgentSupervisor:
         self._procs: Dict[str, AgentProc] = {}
         self._pending: Dict[str, Deque[Dict[str, Any]]] = {}
         self._compacting: set[str] = set()
+        self._models: Dict[str, str] = {}
         self._agent_locks: Dict[str, threading.RLock] = {}
         self._lock = threading.Lock()
         self._accepting = True
@@ -469,8 +488,10 @@ class AgentSupervisor:
                     tokens = max(0, int(usage.get("input_tokens") or 0)
                                  + int(usage.get("cache_creation_input_tokens") or 0)
                                  + int(usage.get("cache_read_input_tokens") or 0))
+                    with self._lock:
+                        window = context_window_for(self._models.get(agent_id, ""))
                     pct = max(0.0, min(100.0, round(
-                        100.0 * tokens / DEFAULT_CONTEXT_WINDOW, 1)))
+                        100.0 * tokens / window, 1)))
                     self._set_context(agent_id, pct, tokens)
                 except Exception:
                     pass
@@ -640,6 +661,8 @@ class AgentSupervisor:
                 on_event=lambda aid, evt: self._handle_event(aid, evt, source=proc),
                 on_session=self._persist_session,
                 cwd=cwd)
+            with self._lock:
+                self._models[agent_id] = model
             self._set_state(agent_id, ST_SPAWNING)
             # Register the proc BEFORE start() so the reader thread's early
             # events find themselves in _procs and pass the stale-source guard
@@ -710,6 +733,7 @@ class AgentSupervisor:
         with self._plock(agent_id):
             with self._lock:
                 proc = self._procs.pop(agent_id, None)
+                self._models.pop(agent_id, None)
             if proc:
                 proc.stop()
             self._forget_pending(agent_id)
