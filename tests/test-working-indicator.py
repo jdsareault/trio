@@ -147,6 +147,68 @@ finally:
 check("roster: no turn data -> legacy 'active' (no regression)", status_of(legacy) == "active")
 
 
+# ── _agent_liveness(): the /api/agents live + working fallback ────────────────
+# Bug: /api/agents read `live` only from the supervisor's in-memory _procs and
+# `busy` only from compaction, so an agent this process never spawned (a
+# reclaim-connected identity, or one spawned before a dashboard restart) showed
+# "Not currently connected" and never "Working" during real work. _agent_liveness
+# derives both from the same heartbeat + turn signals the roster already trusts.
+def liveness(aid):
+    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
+    try:
+        return web._agent_liveness(c).get(aid)
+    finally:
+        c.close()
+
+
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(0), iso(0), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-2), iso(-30), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: fresh heartbeat + acted since turn end -> (live, working)",
+      liveness(agent) == (True, True))
+
+# fresh but idle: its turn ended after its last activity -> live, not working.
+c = raw()
+try:
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-30), iso(-5), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: fresh but turn ended after activity -> (live, not working)",
+      liveness(agent) == (True, False))
+
+# THE CORE FIX: only the Monitor heartbeat is fresh (session activity is old) —
+# the agent is still live because it is heartbeating, even though this process
+# holds no handle for it. Without the fallback this agent read as disconnected.
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-200), iso(-5), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-200), iso(-220), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: Monitor heartbeat alone keeps an unspawned agent live",
+      (liveness(agent) or (False,))[0] is True)
+
+# no heartbeat within LIVE_SECONDS from any source -> not live, not working.
+c = raw()
+try:
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
+              (iso(-200), iso(-200), CH, agent))
+    c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
+              (iso(-200), iso(-100), "wi-sid-1"))
+finally:
+    c.close()
+check("_agent_liveness: no heartbeat within LIVE_SECONDS -> not live",
+      liveness(agent) == (False, False))
+
+
 os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
 shutil.rmtree(_tmp, ignore_errors=True)
 print()
