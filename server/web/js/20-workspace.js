@@ -687,7 +687,9 @@
   }
   function channelStatus(member) {
     const raw = String(member?.status || (member?.busy ? 'working' : member?.live ? 'active' : 'offline')).toLowerCase();
-    return raw === 'error' ? 'errored' : ['working','blocked','errored','sleeping','active','idle','offline'].includes(raw) ? raw : 'active';
+    if (raw === 'error') return 'errored';
+    if (raw === 'stale' || raw === 'dead') return 'offline';
+    return ['working','blocked','errored','sleeping','active','idle','offline'].includes(raw) ? raw : 'offline';
   }
   function channelStatusLabel(status) { return status === 'errored' ? 'Errored' : status[0].toUpperCase() + status.slice(1); }
   function channelStatusChip(status) { return `<span class="channel-status-chip ${status}"><span class="dot"></span>${channelStatusLabel(status)}</span>`; }
@@ -738,8 +740,14 @@
     const archived = !!channel?.archived || !!state.readOnly;
     const dm = state.dmKey ? (state.dms?.your_dms || []).find(d => d.key === state.dmKey) : null;
     const title = dm ? (dm.name || state.dmKey) : '#' + (state.channel || 'Atrium');
-    const members = [...(state.members?.values?.() || [])];
-    const memberCount = members.length || Number(channel?.members) || 0;
+    // For a DM, show only the conversation participants — not the whole channel
+    // roster. Agent DMs all share AGENT_INBOX_CHANNEL, so the unfiltered roster
+    // would list every agent ever created, each stamped "active" at spawn.
+    const allMembers = [...(state.members?.values?.() || [])];
+    const members = dm && Array.isArray(state.dmMemberIds) && state.dmMemberIds.length
+      ? allMembers.filter(m => state.dmMemberIds.includes(m.id))
+      : allMembers;
+    const memberCount = dm ? (state.dmMemberIds?.length || members.length) : (members.length || Number(channel?.members) || 0);
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
