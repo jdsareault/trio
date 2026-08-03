@@ -674,6 +674,13 @@ def _parse_sigils_against_roster(
     return mention_ids, ref_ids, bang_ids
 
 
+def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
+    """True when a SQLite OperationalError is a transient write-lock/busy
+    condition (worth retrying) rather than a schema or syntax fault."""
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIdentity) -> Tuple[str, str]:
     """Insert-or-update this operator's members row. On every send we
     refresh the summary so trust source is fresh if a guest later upgrades
@@ -3656,33 +3663,51 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if code == AGENT_INBOX_CHANNEL:
             self._error(400, "that channel name is reserved for private agent messages")
             return
-        db = sqlite3.connect(str(self.db_path), timeout=5)
-        db.row_factory = sqlite3.Row
-        try:
-            db.execute("PRAGMA busy_timeout=3000")
-            if db.execute("SELECT 1 FROM channels WHERE code = ?", (code,)).fetchone():
-                self._error(409, "channel already exists")
+        # The create writes three rows in one transaction while the EventHub
+        # poller and member heartbeats are also writing under WAL.  A brief
+        # write-lock used to surface as a one-shot 500 that the operator saw
+        # as a silent "modal closed, no channel" (the create modal closes
+        # before this async request resolves).  Retry transient locks with a
+        # short backoff so a routine contention spike self-heals.
+        last_err = None
+        for attempt in range(4):
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute("PRAGMA busy_timeout=5000")
+                if db.execute("SELECT 1 FROM channels WHERE code = ?", (code,)).fetchone():
+                    self._error(409, "channel already exists")
+                    return
+                now = now_iso()
+                with db:
+                    db.execute(
+                        "INSERT INTO channels (code, status, created_at, updated_at) "
+                        "VALUES (?, 'active', ?, ?)", (code, now, now))
+                    op_id, op_name = ensure_operator_row(db, code, ident)
+                    created = db.execute(
+                        "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (code, op_id, op_name,
+                         f"[channel created] {topic}" if topic else "[channel created]", now))
+                    if topic:
+                        db.execute("UPDATE channels SET pinned_message_id = ? WHERE code = ?",
+                                   (created.lastrowid, code))
+                self._json({"ok": True, "channel": {"code": code, "topic": topic}}, status=201)
                 return
-            now = now_iso()
-            with db:
-                db.execute(
-                    "INSERT INTO channels (code, status, created_at, updated_at) "
-                    "VALUES (?, 'active', ?, ?)", (code, now, now))
-                op_id, op_name = ensure_operator_row(db, code, ident)
-                created = db.execute(
-                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (code, op_id, op_name,
-                     f"[channel created] {topic}" if topic else "[channel created]", now))
-                if topic:
-                    db.execute("UPDATE channels SET pinned_message_id = ? WHERE code = ?",
-                               (created.lastrowid, code))
-        except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
-            return
-        finally:
-            db.close()
-        self._json({"ok": True, "channel": {"code": code, "topic": topic}}, status=201)
+            except sqlite3.OperationalError as e:
+                last_err = e
+                if _is_lock_error(e) and attempt < 3:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                self._error(500, f"db error: {e}")
+                return
+            except sqlite3.Error as e:
+                self._error(500, f"db error: {e}")
+                return
+            finally:
+                db.close()
+        # Exhausted all attempts on lock contention.
+        self._error(503, f"channel create is busy, please retry: {last_err}")
 
     def _handle_dms(self, parsed) -> None:
         """Return the operator's unified, cross-channel DM surface.
