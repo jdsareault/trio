@@ -12,6 +12,16 @@
   // level meter needs its own getUserMedia grab regardless of engine, and
   // local mode keeps its recorder stream independent for a cleaner teardown.
   let meterStream = null, audioCtx = null, analyser = null, meterRaf = null;
+  // LOTC/Sauron+Uruk-Hai: toggleDictation()'s "already active" guard only
+  // sees `recognition`/`recorder`, both still null during localDictation()'s
+  // getUserMedia await — a double-click in that window ran two concurrent
+  // localDictation() calls, each overwriting the SAME module vars, leaking
+  // the first stream/recorder/AudioContext with nothing left able to stop
+  // them (and corrupting `chunks`, shared across both). `starting` closes
+  // that window; `dictationGen` (bumped on every stop) lets an in-flight
+  // async callback (e.g. browserDictation's metering getUserMedia) detect
+  // it's stale — see LOTC/Aragorn's unmount-race finding below.
+  let starting = false, dictationGen = 0;
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   function inputValue(newValue) { const el = input(); if (!el) return ''; if (newValue !== undefined) el.value = newValue; return el.value; }
@@ -233,6 +243,7 @@
     }
   }
   function stopDictation() {
+    dictationGen++; // invalidate any in-flight async callback from this session (LOTC/Aragorn)
     if (recognition) { recognition.stop(); recognition = null; }
     if (recorder?.state === 'recording') recorder.stop();
     stopTracks(); stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false);
@@ -240,22 +251,52 @@
   async function browserDictation() {
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Speech) throw new Error('Browser speech recognition is unavailable');
+    const myGen = dictationGen; // captured now — stopDictation()/unmount() bump this
     recognition = new Speech(); recognition.continuous = true; recognition.interimResults = true;
     let finalText = '';
     recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; inputValue((inputValue() + ' ' + finalText + interim).trim()); updateSendState(); };
     recognition.onend = () => { recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false); };
+    // LOTC/Aragorn: request the metering stream only once `onstart` confirms
+    // SpeechRecognition's OWN mic permission already resolved, instead of
+    // firing a second concurrent getUserMedia() request right away — on a
+    // first-ever grant that raced two simultaneous browser permission
+    // prompts for what looks like one user action.
+    recognition.onstart = () => {
+      window.navigator.mediaDevices?.getUserMedia?.({ audio: true }).then(s => {
+        // Stale by the time this resolved (stopped/unmounted, or a newer
+        // dictation session started) — don't leak a mic stream + AudioContext
+        // with nothing left able to close them (LOTC/Aragorn, critical).
+        if (dictationGen !== myGen) { s.getTracks().forEach(t => t.stop()); return; }
+        meterStream = s; startMeter(s);
+      }).catch(() => {});
+    };
     recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Listening (browser speech)…' });
-    // Best-effort visualization only — SpeechRecognition owns its own audio
-    // capture internally and never exposes that stream to page JS.
-    window.navigator.mediaDevices?.getUserMedia?.({ audio: true }).then(s => { meterStream = s; startMeter(s); }).catch(() => {});
   }
   async function localDictation() {
     if (!hasLocalDictation()) throw new Error('Local dictation is unavailable in this browser');
-    stream = await window.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
+    // LOTC/Sauron+Uruk-Hai: `toggleDictation`'s "already active" guard checks
+    // `recognition`/`recorder`, both still null during the getUserMedia
+    // await below — a rapid double-click ran two of these concurrently,
+    // each overwriting the SAME module vars (stream/recorder/chunks/
+    // audioCtx/analyser/meterRaf), leaking the first stream+AudioContext
+    // with nothing left able to stop them, and corrupting the shared
+    // `chunks` array between two live recorders.
+    if (starting) return;
+    starting = true;
+    try {
+      stream = await window.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
+    } finally { starting = false; }
     recorder = new window.MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
     recorder.onstop = async () => {
       setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
+      // LOTC/Sauron: the fallback below starts a NEW dictation session
+      // (browserDictation) without awaiting it, so this handler's own
+      // `finally` used to run right after and unconditionally strip the
+      // 'dictating' class / reset the button — wiping out the state the
+      // fallback had just set, even though its mic (`recognition`) was
+      // still live and listening. `fellBack` skips that stomp.
+      let fellBack = false;
       try {
         const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
         const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio });
@@ -263,16 +304,29 @@
         if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
         inputValue((inputValue() + ' ' + (data.text || '')).trim()); updateSendState();
       } catch (error) {
-        if (window.SpeechRecognition || window.webkitSpeechRecognition) { Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.'); browserDictation().catch(fallback => Trio.ui.toast(fallback.message)); }
+        if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+          fellBack = true;
+          Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.');
+          // Not awaited — this function's own `finally` below runs first
+          // (synchronously, before this promise settles) and already skips
+          // its teardown because `fellBack` is true; if the fallback itself
+          // then fails, its OWN teardown has to happen here instead.
+          browserDictation().catch(fallback => { Trio.ui.toast(fallback.message); document.body.classList.remove('dictating'); setDictationButtonState(false); });
+        }
         else Trio.ui.toast(error.message || 'Transcription failed');
       } finally {
-        stopTracks(); document.body.classList.remove('dictating'); setDictationButtonState(false);
+        stopTracks();
+        if (!fellBack) { document.body.classList.remove('dictating'); setDictationButtonState(false); }
       }
     };
     recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Recording (local Whisper)…' });
     startMeter(stream);
   }
   async function toggleDictation() {
+    // Mid-getUserMedia-await: neither recorder nor stream exists yet, so
+    // there's nothing for stopDictation() to stop — just ignore the extra
+    // click rather than tearing down a session that hasn't started.
+    if (starting) return;
     if (recognition || recorder?.state === 'recording') return stopDictation();
     const mode = Trio.preferences?.read?.().sttMode || 'local';
     if (mode === 'web') return browserDictation();
