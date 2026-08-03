@@ -794,6 +794,11 @@ class AgentSupervisor:
             return False
         db = self._db()
         try:
+            columns = {r[1] for r in db.execute("PRAGMA table_info(approvals)")}
+            if not columns:
+                # No such table yet (a hub-only DB nth_server.py hasn't
+                # migrated) — nothing to resolve, not an error (LOTC/Ents).
+                return False
             cur = db.execute(
                 "UPDATE approvals SET status='resolved', decision=?, resolved_at=? "
                 "WHERE id=? AND provider='claude' AND status='pending'",

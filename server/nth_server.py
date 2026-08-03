@@ -958,8 +958,6 @@ def nth_connect(
     reclaiming = bool(resume_member_id and resume_member_id.strip())
     reclaimed_existing = False
     member_id = resume_member_id.strip() if reclaiming else generate_member_id()
-    _AGENT_IDENTITY["id"] = member_id
-    _AGENT_IDENTITY["name"] = name
     now = now_iso()
     db = get_db()
 
@@ -1107,6 +1105,16 @@ def nth_connect(
             db.commit()
             action = "created"
 
+        # Captured only now that join/reclaim has actually succeeded (not
+        # before reclaim_secret validation, which can reject this call) and
+        # using the FINAL member_id — the non-reclaim path can re-mint it on
+        # a collision (line ~1085), so an earlier snapshot could be stale.
+        # A rejected reclaim attempt must never poison this process's
+        # approval-inbox identity with someone else's spoofed member_id
+        # (Aragorn).
+        _AGENT_IDENTITY["id"] = member_id
+        _AGENT_IDENTITY["name"] = name
+
         # Record the self-reported model tier on the freshly-joined row (one
         # UPDATE covers both the join and create branches).
         if model:
@@ -1246,6 +1254,13 @@ def nth_connect(
 APPROVAL_TIMEOUT_SECONDS = 120.0
 APPROVAL_POLL_INTERVAL_SECONDS = 0.5
 
+# Caps mirroring MAX_SUMMARY_LENGTH/MAX_SKILLS_LENGTH above — a gated tool
+# call's name/input is driven by the CLI runtime rather than a user directly,
+# but nothing stops an oversized value from bloating this row and the
+# dashboard's /api/approvals payload (Aragorn).
+MAX_APPROVAL_FIELD_LENGTH = 200
+MAX_APPROVAL_INPUT_LENGTH = 4000
+
 
 @mcp.tool(name=f"{TOOL_PREFIX}_permission_prompt")
 def nth_permission_prompt(tool_name: str, input: dict | None = None) -> str:
@@ -1262,13 +1277,17 @@ def nth_permission_prompt(tool_name: str, input: dict | None = None) -> str:
     """
     approval_id = f"cap_{secrets.token_hex(6)}"
     now = now_iso()
+    agent_id = (_AGENT_IDENTITY["id"] or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    agent_name = (_AGENT_IDENTITY["name"] or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    safe_tool_name = (tool_name or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    tool_input = json.dumps(input or {})[:MAX_APPROVAL_INPUT_LENGTH]
     db = get_db()
     try:
         db.execute(
             "INSERT INTO approvals (id, agent_id, agent_name, provider, "
             "tool_name, tool_input, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (approval_id, _AGENT_IDENTITY["id"], _AGENT_IDENTITY["name"], "claude",
-             tool_name, json.dumps(input or {}), "pending", now))
+            (approval_id, agent_id, agent_name, "claude",
+             safe_tool_name, tool_input, "pending", now))
         db.commit()
     finally:
         db.close()
@@ -1293,10 +1312,20 @@ def nth_permission_prompt(tool_name: str, input: dict | None = None) -> str:
     if not resolved:
         db = get_db()
         try:
-            db.execute(
+            cur = db.execute(
                 "UPDATE approvals SET status='expired', resolved_at=? "
                 "WHERE id=? AND status='pending'", (now_iso(), approval_id))
             db.commit()
+            if cur.rowcount == 0:
+                # A human resolved it in the gap between our last poll and
+                # this expiry write (WHERE status='pending' made it a no-op)
+                # — honor what's actually persisted rather than reporting a
+                # stale deny for a decision the operator already made (Sauron).
+                row = db.execute(
+                    "SELECT decision FROM approvals WHERE id = ?",
+                    (approval_id,)).fetchone()
+                if row and row["decision"]:
+                    decision = row["decision"]
         finally:
             db.close()
 
