@@ -771,13 +771,13 @@
     // heartbeat-based channel roster status (which reads stale/dead for a
     // sleeping agent because no monitor is running to heartbeat).
     if (member?.live != null && member?.state != null) {
+      const rawState = String(member.state).toLowerCase();
       // Compaction is its own state — surface it as "Compacting", not
       // "Sleeping", so the drawer/face-pile agree with the Agent roster card.
-      if (member.state === 'compacting') return 'compacting';
+      if (rawState === 'compacting') return 'compacting';
       if (member.live) return member.busy ? 'working' : 'idle';
-      const raw = String(member.state).toLowerCase();
-      if (raw === 'error' || raw === 'errored') return 'errored';
-      if (raw === 'sleeping') return raw;
+      if (rawState === 'error' || rawState === 'errored') return 'errored';
+      if (rawState === 'sleeping') return rawState;
       return 'offline';
     }
     const raw = String(member?.status || (member?.busy ? 'working' : member?.live ? 'active' : 'offline')).toLowerCase();
