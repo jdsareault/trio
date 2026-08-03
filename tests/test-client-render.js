@@ -186,6 +186,28 @@ check('agent view model normalizes lifecycle and status', () => {
   assert.strictEqual(vm.wakePolicy, 'about');
   assert.strictEqual(vm.needsAttention, true);
 });
+check('agent view model surfaces its reasoning effort', () => {
+  const vm = H.Trio.agents.viewModel({ id: 'ag_1', effort: 'high' });
+  assert.strictEqual(vm.effort, 'high');
+  assert.strictEqual(H.Trio.agents.viewModel({ id: 'ag_2' }).effort, '');
+});
+check('effortsForModel reads the model-specific list from discovered models, not a global default', () => {
+  H.Trio.state.agentModels = {
+    claude: [{ id: 'haiku', name: 'Claude Haiku', efforts: ['low', 'medium', 'high'] }],
+    codex: [{ id: 'fake-codex', name: 'Fake Codex', efforts: ['low', 'high'] }],
+  };
+  assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('claude', 'haiku')), ['low', 'medium', 'high']);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('codex', 'fake-codex')), ['low', 'high']);
+});
+check('effortsForModel falls back to a safe default for an undiscovered model', () => {
+  H.Trio.state.agentModels = { claude: [] };
+  assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('claude', 'unknown-model')), ['low', 'medium', 'high']);
+});
+check('effortOptions renders a <select>-ready option list with the current value selected', () => {
+  const html = H.Trio.agents.effortOptions(['low', 'high'], 'high');
+  assert.ok(html.includes('<option value="low">low</option>'));
+  assert.ok(html.includes('<option value="high" selected>high</option>'));
+});
 check('agent last-active timestamps are local and human-readable', () => {
   const iso = '2026-08-02T00:45:14+00:00';
   const options = { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
