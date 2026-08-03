@@ -73,21 +73,26 @@
   // ── Priming guard ─────────────────────────────────────────────────────
   // /api/events seeds each new SSE subscription with a burst of recent
   // history (nth_web.py EventHub.subscribe's "prime" payloads) through the
-  // SAME queue as live messages — there's no field distinguishing the two.
-  // Without a guard, opening a channel (or a reconnect) replays a chime/
-  // popup for every recent message at once. Settle window mirrors the old
-  // dashboard's scheduleInitialSettle() (git history: f4f0c27).
-  const PRIME_SETTLE_MS = 800;
-  let priming = true, settleTimer = null;
-  function armPriming() {
-    priming = true;
-    clearTimeout(settleTimer);
-    settleTimer = setTimeout(() => { priming = false; }, PRIME_SETTLE_MS);
+  // SAME queue and event type as live messages — nothing in the payload
+  // shape distinguishes the two. Without a guard, opening a channel (or a
+  // reconnect) replays a chime/popup for every recent message at once.
+  //
+  // LOTC/Sauron: an earlier version of this guard used a single shared
+  // "priming" flag armed by any 'connection' event across BOTH the
+  // per-channel (/api/events) and cross-channel (/api/workspace/events)
+  // streams — since both funnel into the same Trio.events target with no
+  // way to tell which stream a message came from, a reconnect on the
+  // (currently unused, but extant) workspace stream could silently
+  // suppress a genuinely live chime on an already-open, unrelated channel.
+  // Comparing each message's own timestamp against wall-clock time is
+  // immune to that: it's a property of the message, not of which stream
+  // delivered it, so it needs no per-stream bookkeeping at all.
+  const PRIME_MAX_AGE_MS = 5000;
+  function isPrimedHistory(msg) {
+    const createdAt = Date.parse(msg.created_at || '');
+    if (!Number.isFinite(createdAt)) return false; // unparseable — don't guess, let it through
+    return Date.now() - createdAt > PRIME_MAX_AGE_MS;
   }
-  events.addEventListener('connection', event => {
-    const s = event.detail?.state;
-    if (s === 'live' || s === 'workspace:live') armPriming();
-  });
 
   // ── Desktop notification ─────────────────────────────────────────────
   function showDesktopNotification(msg, tier) {
@@ -105,7 +110,7 @@
 
   function onMessage(event) {
     const msg = event.detail;
-    if (priming || !msg || msg.id == null) return;
+    if (!msg || msg.id == null || isPrimedHistory(msg)) return;
     const operatorId = (state.operator || state.meta?.operator)?.id;
     const tier = classify(msg, operatorId);
     if (!tier) return;
@@ -120,5 +125,5 @@
   }
   events.addEventListener('message', onMessage);
 
-  Trio.notifications = { classify, playPreset, SOUNDS, TIERS: ['dm', 'mention', 'ref', 'plain'] };
+  Trio.notifications = { classify, playPreset, isPrimedHistory, SOUNDS, TIERS: ['dm', 'mention', 'ref', 'plain'] };
 })();
