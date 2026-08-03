@@ -234,13 +234,23 @@
       button.disabled = processing || button.dataset.unavailable === 'true';
       button.querySelector('.mic-icon')?.toggleAttribute('hidden', active);
       button.querySelector('.stop-icon')?.toggleAttribute('hidden', !active);
-      button.title = processing ? (statusText || 'Transcribing…')
+      const label = processing ? (statusText || 'Transcribing…')
         : active ? 'Stop dictation' : (button.disabled ? 'Dictation is unavailable in this browser' : 'Dictate');
+      button.title = label;
+      // LOTC/Frodo: aria-label was static ("Dictate") regardless of state, so
+      // a screen reader's announced name never matched the visible tooltip.
+      button.setAttribute('aria-label', label);
     }
     if (status) {
       status.hidden = !statusText;
       status.textContent = statusText;
     }
+    // LOTC/Frodo: the visible status text was removed for the recording-start
+    // case (redundant with the red button + waveform for sighted users), but
+    // that text was a screen reader's only chance at a state announcement.
+    // #trio-aria-live already exists for exactly this — announce here
+    // without reinstating any visible clutter. Idle state clears it.
+    Trio.ui?.setLive?.(processing ? (statusText || 'Transcribing') : active ? 'Recording' : '');
   }
   function stopDictation() {
     dictationGen++; // invalidate any in-flight async callback from this session (LOTC/Aragorn)
