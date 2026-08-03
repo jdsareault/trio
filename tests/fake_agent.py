@@ -58,10 +58,28 @@ def main() -> int:
         if isinstance(msg, dict):
             m = msg.get("message") or {}
             content = m.get("content", "") if isinstance(m, dict) else ""
-        emit({"type": "assistant",
-              "message": {"role": "assistant",
-                          "content": f"echo: {content}"},
-              "session_id": session_id})
+        assistant_evt = {"type": "assistant",
+                          "message": {"role": "assistant",
+                                      "content": f"echo: {content}"},
+                          "session_id": session_id}
+        # Opt-in usage payload: exercises nth_supervisor's context-fullness
+        # capture without every other fake_agent-driven test needing to know
+        # about it. Lives on the ASSISTANT event's message.usage (matching
+        # a real API response), not the result event — the result event's
+        # usage is accumulated across a turn's internal API calls, not a
+        # single request's actual context size. Format:
+        # "input,cache_creation,cache_read" (all ints).
+        usage_env = os.environ.get("FAKE_AGENT_USAGE_TOKENS")
+        if usage_env:
+            parts = [int(p) for p in usage_env.split(",")]
+            while len(parts) < 3:
+                parts.append(0)
+            assistant_evt["message"]["usage"] = {
+                "input_tokens": parts[0],
+                "cache_creation_input_tokens": parts[1],
+                "cache_read_input_tokens": parts[2],
+            }
+        emit(assistant_evt)
         emit({"type": "result", "subtype": "success", "is_error": False,
               "result": f"echo: {content}", "session_id": session_id})
     return 0

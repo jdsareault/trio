@@ -88,6 +88,37 @@ check('toolSuffix: omits target when absent', ts({ last_tool_name: 'Read' }, 'wo
 check('toolSuffix: hidden once the turn has ended (stale trivia)', ts({ last_tool_name: 'Bash' }, 'idle') === '');
 check('toolSuffix: hidden when no tool activity recorded', ts({}, 'working') === '');
 
+// Context-fullness + usage-quota indicators (nth_supervisor persists
+// context_pct from the last `assistant` event's own token usage — NOT the
+// turn-level `result` event, whose usage is accumulated across every
+// internal API call the turn made and would overcount; /api/usage feeds
+// the home screen from Claude Code's own statusline-state.json).
+const usageTone = base.Trio.workspace.usageTone;
+check('usageTone: under 70% is ok', usageTone(50) === 'ok');
+check('usageTone: 70-89% is warn', usageTone(75) === 'warn');
+check('usageTone: 90%+ is danger', usageTone(95) === 'danger');
+check('usageTone: boundary at exactly 70 is warn', usageTone(70) === 'warn');
+check('usageTone: boundary at exactly 90 is danger', usageTone(90) === 'danger');
+
+// LOTC/Frodo: "% ctx" alone was directionally ambiguous (used vs.
+// remaining) — "% full" states the direction in the badge face itself.
+const contextBadge = base.Trio.workspace.contextBadge;
+check('contextBadge: renders the rounded percentage', contextBadge({ context_pct: 42.6 }).includes('43% full'));
+check('contextBadge: colors by usageTone', contextBadge({ context_pct: 95 }).includes('danger'));
+check('contextBadge: empty when context_pct is unknown (human, unspawned agent)', contextBadge({}) === '');
+check('contextBadge: renders "0% full" (not treated as missing) when context_pct is exactly 0', contextBadge({ context_pct: 0 }).includes('0% full'));
+
+// Floors (never rounds up) so the label is always a safe lower bound —
+// +5h+30s still reads "5h" rather than drifting to "4h" or "6h" depending
+// on exactly when the check runs.
+const resetLabel = base.Trio.workspace.resetLabel;
+check('resetLabel: empty for a falsy timestamp', resetLabel(0) === '' && resetLabel(null) === '');
+check('resetLabel: under an hour reads distinctly from "resets now"', resetLabel(Math.floor(Date.now() / 1000) + 1800) === 'resets within the hour');
+check('resetLabel: hours-away format', resetLabel(Math.floor(Date.now() / 1000) + 3600 * 5 + 30).startsWith('resets in 5h'));
+check('resetLabel: days-away format', resetLabel(Math.floor(Date.now() / 1000) + 3600 * 48 + 30).includes('resets in 2d'));
+check('resetLabel: already passed reads as "resets now", distinct from "within the hour" (clock skew safety)',
+      resetLabel(Math.floor(Date.now() / 1000) - 100) === 'resets now');
+
 base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
 check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');

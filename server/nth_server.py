@@ -508,6 +508,8 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         "avatar_name": "TEXT NOT NULL DEFAULT ''",
         "archived_at": "TEXT",
         "archived_by": "TEXT",
+        "context_pct": "REAL",
+        "context_tokens": "INTEGER",
     }
     for column, definition in agent_columns.items():
         try:
