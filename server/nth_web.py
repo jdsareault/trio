@@ -1940,6 +1940,17 @@ def ensure_agents_schema(conn) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_channel ON agent_channels (channel)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_channels_member ON agent_channels (member_id)")
+    # Claude-side approval inbox (nth_server.nth_permission_prompt writes
+    # here); mirrors the canonical DDL in nth_server.get_db().
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS approvals (
+            id TEXT PRIMARY KEY, agent_id TEXT NOT NULL DEFAULT '',
+            agent_name TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'claude',
+            tool_name TEXT NOT NULL DEFAULT '', tool_input TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending', decision TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, resolved_at TEXT)
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status, id)")
 
 
 def ensure_archive_schema(conn) -> None:
