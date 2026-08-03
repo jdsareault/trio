@@ -342,13 +342,19 @@
     const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
     const defaultProvider = state.providers[0] || 'codex';
     const models = modelOptions(state.agentModels[defaultProvider]);
-    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>`;
+    const channelOpts = (state.channels || []).filter(c => !c.archived)
+      .map(c => `<label><input type="checkbox" name="placement" value="${esc(c.code)}"> ${esc(c.code)}</label>`).join('');
+    const channelsField = channelOpts
+      ? `<fieldset class="field"><legend>Channels <span class="hint">optional — place later if blank</span></legend>${channelOpts}</fieldset>`
+      : '';
+    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
       const name = (f.get('name') || '').trim();
       const provider = f.get('provider');
       const model = f.get('model');
       const cwd = (f.get('cwd') || '').trim();
+      const channels = [...node.querySelectorAll('input[name="placement"]:checked')].map(cb => cb.value);
       if (!provider) { Trio.ui.toast('Provider is required'); return; }
       if (!model) { Trio.ui.toast('Model is required'); return; }
       const key = 'create:' + name;
@@ -356,7 +362,7 @@
       pendingAgentActions.add(key);
       Trio.ui.toast('Creating agent…');
       try {
-        const result = await Trio.api.post('/api/agents', { name, provider, model, cwd, permission_profile: f.get('permission_profile') || 'balanced', channels: [Trio.store.get('session.channel')].filter(Boolean) });
+        const result = await Trio.api.post('/api/agents', { name, provider, model, cwd, permission_profile: f.get('permission_profile') || 'balanced', channels });
         await refresh();
         if (result?.agent?.id) Trio.workspace?.openDmByKey?.(result.agent.id);
       } catch (e) { Trio.ui.toast(e.message || 'Could not create agent'); }
