@@ -142,6 +142,27 @@ check('dictation control disables itself when no speech engine is available', ()
   assert.strictEqual(button.disabled, true);
   assert.strictEqual(button.title, 'Dictation is unavailable in this browser');
 });
+check('dictation button: active recording shows no redundant status text (the meter already signals it)', () => {
+  H.Trio.composer.setDictationButtonState(true);
+  const status = cx.document.getElementById('dictate-status');
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(status.hidden, true);
+  assert.strictEqual(status.textContent, '');
+  assert.strictEqual(button.classList.contains('recording'), true);
+});
+check('dictation button: processing (transcribing) still shows its status text — that IS invisible work the meter can\'t represent', () => {
+  H.Trio.composer.setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
+  const status = cx.document.getElementById('dictate-status');
+  assert.strictEqual(status.hidden, false);
+  assert.strictEqual(status.textContent, 'Transcribing (local Whisper)…');
+});
+check('dictation button: back to idle clears both the recording state and any status text', () => {
+  H.Trio.composer.setDictationButtonState(false);
+  const status = cx.document.getElementById('dictate-status');
+  const button = cx.document.getElementById('dictate-btn');
+  assert.strictEqual(status.hidden, true);
+  assert.strictEqual(button.classList.contains('recording'), false);
+});
 check('task filters default to open and all shows every row', () => {
   H.Trio.state.tasks = [{ id: 1, message: 'Open task', status: 'open' }, { id: 2, message: 'Claimed task', status: 'claimed' }];
   H.Trio.workspace.showView('tasks');

@@ -270,7 +270,10 @@
         meterStream = s; startMeter(s);
       }).catch(() => {});
     };
-    recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Listening (browser speech)…' });
+    // No statusText here — the level meter already shows "I'm recording";
+    // a redundant "Listening…" label next to a red pulsing button and a
+    // waveform is one signal too many (jdsareault).
+    recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
   }
   async function localDictation() {
     if (!hasLocalDictation()) throw new Error('Local dictation is unavailable in this browser');
@@ -319,7 +322,10 @@
         if (!fellBack) { document.body.classList.remove('dictating'); setDictationButtonState(false); }
       }
     };
-    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true, { statusText: 'Recording (local Whisper)…' });
+    // No statusText while actively recording (see browserDictation) — the
+    // "Transcribing (local Whisper)…" text right after IS still useful,
+    // since that's invisible processing time the waveform can't represent.
+    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
     startMeter(stream);
   }
   async function toggleDictation() {
@@ -472,5 +478,5 @@
   }
   function mount() { init(); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly };
+  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
 })();
