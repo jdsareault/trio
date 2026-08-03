@@ -79,6 +79,32 @@ try:
     check("/api/channels: 200 for operator", st == 200 and d.get("ok"))
     check("/api/channels: lists both channels", {"chan-a", "chan-b"} <= codes)
 
+    # Unread count: chan-a has a [joined] message + alpha-only-msg, both
+    # authored by Aa (never marked read by the operator) — /api/channels
+    # should report both, and marking them read should zero it out.
+    # Regression check for a badge that existed in the UI but always rendered
+    # empty because the API never sent the field.
+    import sqlite3 as _sqlite3
+    _db = _sqlite3.connect(str(srv.DB_PATH))
+    chan_a_ids = [r[0] for r in
+                  _db.execute("SELECT id FROM messages WHERE channel='chan-a'")]
+    _db.close()
+    by_code = {c["code"]: c for c in d.get("channels", [])}
+    check("/api/channels: chan-a starts with all its messages unread",
+          by_code.get("chan-a", {}).get("unread") == len(chan_a_ids))
+    check("/api/channels: chan-a has unread > 0 to begin with",
+          by_code.get("chan-a", {}).get("unread", 0) > 0)
+
+    st, d = http(port, "/api/messages/mark-read", method="POST",
+                 body={"ids": chan_a_ids})
+    check("mark-read: 200", st == 200)
+    st, d = http(port, "/api/channels")
+    by_code = {c["code"]: c for c in d.get("channels", [])}
+    check("/api/channels: marking every message read drops chan-a to 0",
+          by_code.get("chan-a", {}).get("unread") == 0)
+    check("/api/channels: chan-b unread is untouched by marking chan-a read",
+          by_code.get("chan-b", {}).get("unread", 0) > 0)
+
     # Per-request scoping: tasks/search read only the requested channel.
     st, d = http(port, "/api/tasks?channel=chan-a")
     check("tasks?channel=chan-a: scoped + 200", st == 200 and d.get("channel") == "chan-a")
