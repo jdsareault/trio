@@ -4073,12 +4073,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "wake_mode must be all, about, or at")
             return
         cwd = (body.get("cwd") or "").strip()
-        if provider == "codex":
-            cwd_path = Path(cwd or os.getcwd()).expanduser().resolve()
+        if cwd:
+            # Expand ~ and resolve for ALL providers — Popen(cwd=) and the
+            # Codex thread/start RPC both require a real absolute path; an
+            # unexpanded "~/..." string is rejected by the OS as nonexistent.
+            cwd_path = Path(cwd).expanduser().resolve()
             if not cwd_path.is_dir():
                 self._error(400, "cwd must be an existing directory")
                 return
             cwd = str(cwd_path)
+        if provider == "codex":
             try:
                 models = get_supervisor().list_models("codex")
             except Exception as exc:
