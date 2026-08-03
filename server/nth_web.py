@@ -3431,11 +3431,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
                 "     WHERE msg.channel = c.code) AS last_at, "
-                "  (SELECT COUNT(*) FROM messages msg "
-                "     WHERE msg.channel = c.code AND msg.member_id != ? "
-                "     AND (msg.recipients IS NULL OR msg.recipients = '' OR msg.recipients = '[]') "
+                "  (SELECT COUNT(*) FROM ("
+                # Capped to the most recent 500 messages (idx_messages_channel_id
+                # serves this as an index scan) so a long-lived, high-traffic
+                # channel's unread count stays O(1)-ish per poll instead of
+                # scanning its full history every 15s per open dashboard.
+                "     SELECT id, member_id, recipients FROM messages "
+                "     WHERE channel = c.code ORDER BY id DESC LIMIT 500"
+                "   ) recent "
+                "     WHERE recent.member_id != ? "
+                "     AND (recent.recipients IS NULL OR recent.recipients = '' OR recent.recipients = '[]') "
                 "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
-                "                     WHERE mr.message_id = msg.id AND mr.member_id = ?)"
+                "                     WHERE mr.message_id = recent.id AND mr.member_id = ?)"
                 "  ) AS unread "
                 "FROM channels c WHERE c.code != ? "
                 + ("AND c.archived_at IS NOT NULL " if archived

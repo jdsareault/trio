@@ -71,6 +71,16 @@ check('channelStatus: roster-shaped idle agent is idle', cs({ live: true, busy: 
 check('channelStatus: roster-shaped dead agent falls back to offline', cs({ live: false, state: 'stopped' }) === 'offline');
 check('channelStatus: heartbeat-shaped member reports its own status', cs({ status: 'working' }) === 'working');
 check('channelStatus: unrecognized status falls back to offline', cs({ status: 'bogus' }) === 'offline');
+// LOTC/Sauron: a bare identity object (the operator's {id,name,source} shape
+// carries no status/live/state at all) must not silently read as offline —
+// renderFacePile special-cases the operator by id rather than relying on
+// channelStatus here, but channelStatus's own default for a field-less
+// object is still worth locking in explicitly.
+check('channelStatus: field-less identity object defaults to offline', cs({ id: 'op', name: 'You' }) === 'offline');
+// A DM-merged object can carry both shapes at once ({...rosterMember, ...agent}
+// in the channel-drawer) — the roster shape (live/state) must win over a
+// possibly-stale heartbeat `status` field, since it's the fresher source.
+check('channelStatus: mixed shapes prefer the live roster fields over a stale heartbeat status', cs({ status: 'idle', live: true, busy: true, state: 'active' }) === 'working');
 
 const ts = base.Trio.workspace.toolSuffix;
 check('toolSuffix: shows the live tool while working', ts({ last_tool_name: 'Bash', last_tool_target: 'npm test' }, 'working') === ' — using Bash: npm test');

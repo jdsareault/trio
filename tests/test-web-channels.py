@@ -95,6 +95,25 @@ try:
     check("/api/channels: chan-a has unread > 0 to begin with",
           by_code.get("chan-a", {}).get("unread", 0) > 0)
 
+    # A private DM into chan-a must NOT inflate the channel's unread badge —
+    # DMs have their own separate unread mechanism (dms.your_dms[].unread).
+    # Cc joins first (that [joined] broadcast is expected to count) so the
+    # DM sent after is the only variable being isolated.
+    rc = json.loads(srv.nth_connect(summary="t", name="Cc", channel="chan-a"))
+    st, d = http(port, "/api/channels")
+    by_code = {c["code"]: c for c in d.get("channels", [])}
+    unread_before_dm = by_code.get("chan-a", {}).get("unread")
+    srv.nth_dm(channel="chan-a", member_id=ra["member_id"],
+               message="alpha-private-dm", to=rc["member_id"])
+    st, d = http(port, "/api/channels")
+    by_code = {c["code"]: c for c in d.get("channels", [])}
+    check("/api/channels: a DM into chan-a does not inflate its unread count",
+          by_code.get("chan-a", {}).get("unread") == unread_before_dm)
+    chan_a_ids = [r[0] for r in
+                  _sqlite3.connect(str(srv.DB_PATH)).execute(
+                      "SELECT id FROM messages WHERE channel='chan-a' "
+                      "AND (recipients IS NULL OR recipients='' OR recipients='[]')")]
+
     st, d = http(port, "/api/messages/mark-read", method="POST",
                  body={"ids": chan_a_ids})
     check("mark-read: 200", st == 200)

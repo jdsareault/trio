@@ -213,7 +213,10 @@
     const visible = members.slice(0, 4);
     visible.forEach(member => {
       const node = document.createElement('span');
-      const status = channelStatus(member);
+      // The human operator viewing this dashboard is inherently present —
+      // their bare {id,name,source} shape carries no status/live/state for
+      // channelStatus to read, which previously fell through to 'offline'.
+      const status = (operator?.id && member.id === operator.id) ? 'active' : channelStatus(member);
       node.innerHTML = avatarFor(member, status);
       const face = node.firstElementChild;
       const label = member.name || member.id || 'Channel member';
@@ -732,8 +735,8 @@
     const name = member.name || member.id || 'Unknown member';
     const status = channelStatus(member);
     const statusText = member.status_text || member.statusText || (status === 'active' ? 'Active in this channel' : channelStatusLabel(status));
-    const tool = status === 'working' && member.last_tool_name
-      ? `<div class="channel-member-tool">${esc(member.last_tool_name)}${member.last_tool_target ? ': ' + esc(member.last_tool_target) : ''}</div>` : '';
+    const hint = toolSuffix(member, status).replace(/^ — /, '');
+    const tool = hint ? `<div class="channel-member-tool">${esc(hint)}</div>` : '';
     return `<div class="channel-member">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}</div>${channelStatusChip(status)}</div>`;
   }
   function detailTask(task) {
