@@ -61,6 +61,23 @@ check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' },
 check('selector unread dms', s.unreadDms({ dms: { your_dms: [{ unread: 3 }, { unread: 0 }, {} ] } }) === 3);
 check('selector recent channels', s.recentChannels({ channels: [{ code: 'x' }, { code: 'y', archived: true }, { code: 'z' }] }).length === 2);
 
+// Live-activity indicators (face-pile + channel-drawer): channelStatus must
+// prefer the agent-roster {live, busy, state} shape when present so those two
+// views agree with the Agent roster page, and toolSuffix must only surface
+// the last-tool hint while genuinely mid-turn (not on a stale finished turn).
+const cs = base.Trio.workspace.channelStatus;
+check('channelStatus: roster-shaped busy agent is working', cs({ live: true, busy: true, state: 'active' }) === 'working');
+check('channelStatus: roster-shaped idle agent is idle', cs({ live: true, busy: false, state: 'active' }) === 'idle');
+check('channelStatus: roster-shaped dead agent falls back to offline', cs({ live: false, state: 'stopped' }) === 'offline');
+check('channelStatus: heartbeat-shaped member reports its own status', cs({ status: 'working' }) === 'working');
+check('channelStatus: unrecognized status falls back to offline', cs({ status: 'bogus' }) === 'offline');
+
+const ts = base.Trio.workspace.toolSuffix;
+check('toolSuffix: shows the live tool while working', ts({ last_tool_name: 'Bash', last_tool_target: 'npm test' }, 'working') === ' — using Bash: npm test');
+check('toolSuffix: omits target when absent', ts({ last_tool_name: 'Read' }, 'working') === ' — using Read');
+check('toolSuffix: hidden once the turn has ended (stale trivia)', ts({ last_tool_name: 'Bash' }, 'idle') === '');
+check('toolSuffix: hidden when no tool activity recorded', ts({}, 'working') === '');
+
 base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
 check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');
