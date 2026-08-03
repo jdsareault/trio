@@ -135,6 +135,32 @@ try:
     check("search on chanA does NOT leak chanB message (isolation)",
           d.get("count") == 0)
 
+    # /api/channel-size: rough token estimate for the channel-details
+    # drawer's "Channel size" indicator. char/4 over content + member_name,
+    # plus a fixed per-message allowance for the JSON envelope overhead
+    # (id/from/content/at/... field names) actually delivered to a model —
+    # not just what a human would count reading the raw text.
+    st, d = http(port, "/api/channel-size?channel=chan-a")
+    check("channel-size: 200 + scoped to the requested channel",
+          st == 200 and d.get("channel") == "chan-a")
+    db = _sqlite3.connect(str(srv.DB_PATH))
+    total_count, content_chars, name_chars = db.execute(
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)),0), COALESCE(SUM(LENGTH(member_name)),0) "
+        "FROM messages WHERE channel='chan-a'").fetchone()
+    db.close()
+    # Every message in the channel counts here (including the private DM
+    # sent above) — this is a total occupancy estimate, not the broadcast-
+    # only unread count from the /api/channels checks above.
+    check("channel-size: message_count matches the channel's actual row count "
+          "(all messages, including DMs — unlike the unread badge)",
+          d.get("message_count") == total_count)
+    expected_tokens = round((content_chars + name_chars + d["message_count"] * 80) / 4)
+    check("channel-size: estimated_tokens matches char/4 + per-message JSON overhead",
+          d.get("estimated_tokens") == expected_tokens)
+
+    st, _ = http(port, "/api/channel-size?channel=__ghost__")
+    check("channel-size: bogus channel -> 404", st == 404)
+
     # Bogus channel: 404 on read AND write, and no orphan rows written.
     st, _ = http(port, "/api/tasks?channel=__ghost__")
     check("read bogus channel -> 404", st == 404)

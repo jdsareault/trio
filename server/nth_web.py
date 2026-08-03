@@ -2654,6 +2654,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not self._authorize_channel():
                 return
             self._handle_tasks(parsed)
+        elif path == "/api/channel-size":
+            if not self._authorize_channel():
+                return
+            self._handle_channel_size(parsed)
         elif path == "/api/tools":
             if not self._authorize_channel():
                 return
@@ -4627,6 +4631,54 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "channel": self.channel,
                     "count": len(tasks), "tasks": tasks})
+
+    def _handle_channel_size(self, parsed) -> None:
+        """Rough token-count estimate for the channel-details drawer's
+        'Channel size' indicator: how much of a model's context window this
+        channel's history would occupy. Deliberately approximate per the
+        product ask — char-count / 4, plus a fixed per-message allowance for
+        the JSON scaffolding (id/from/content/at/... field names and
+        punctuation) each message costs beyond its own content when actually
+        delivered to a model, not just the raw text a human would count.
+        Mirrors _handle_tasks' identity gate + short read-connection idioms.
+        """
+        qs = parse_qs(parsed.query)
+        want = (qs.get("channel", [""])[0] or "").strip()
+        if want and want != self.channel:
+            self._error(403, "channel mismatch")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Overhead per message for the JSON envelope a poll/history response
+        # wraps each message in (id, from, content, at, mentions, refs, ...
+        # field names and punctuation) beyond the two variable-length fields
+        # (content, member_name) already counted directly.
+        JSON_OVERHEAD_CHARS_PER_MESSAGE = 80
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.execute("PRAGMA busy_timeout=3000")
+            count, content_chars, name_chars = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0), "
+                "COALESCE(SUM(LENGTH(member_name)), 0) "
+                "FROM messages WHERE channel = ?",
+                (self.channel,)).fetchone()
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        total_chars = content_chars + name_chars + count * JSON_OVERHEAD_CHARS_PER_MESSAGE
+        self._json({
+            "ok": True, "channel": self.channel, "message_count": count,
+            "estimated_tokens": round(total_chars / 4),
+        })
 
     def _handle_tools(self, parsed) -> None:
         """Read-only expandable detail for the roster tool-use chip (#1/#2):

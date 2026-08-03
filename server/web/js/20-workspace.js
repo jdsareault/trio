@@ -893,12 +893,62 @@
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
-    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v">${state.messages?.size || 0}</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
+    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section"><h3>Members · ${memberCount}</h3>${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages today</span><span class="v" id="channel-drawer-msgcount">${state.messages?.size || 0}</span></div>${dm ? '' : `<div class="kv"><span class="k">Channel size</span><span class="v" id="channel-drawer-size">…</span></div>`}<div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
     $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });
     $('edit-channel-objective')?.addEventListener('click', () => toast('Objective editing is coming soon'));
     $('archive-channel-drawer')?.addEventListener('click', () => { closeDetails(); archiveCurrent(); });
+    refreshDrawerActivity();
+  }
+  // 2-significant-figure K/M formatting (1.2K, 12K, 120K, 1.2M) — avoids
+  // Number.toPrecision's exponential-notation quirk for 3-digit values
+  // (e.g. (123).toPrecision(2) === "1.2e+2", not "120").
+  function roundToSigFigs(value, figs) {
+    if (!value) return 0;
+    const magnitude = Math.pow(10, figs - Math.ceil(Math.log10(Math.abs(value))));
+    return Math.round(value * magnitude) / magnitude;
+  }
+  const CHANNEL_SIZE_WARN_TOKENS = 850000;
+  function formatTokenEstimate(tokens) {
+    const n = Number(tokens) || 0;
+    if (n >= 1e6) return roundToSigFigs(n / 1e6, 2) + 'M';
+    if (n >= 1e3) return roundToSigFigs(n / 1e3, 2) + 'K';
+    return String(Math.round(n));
+  }
+  const WARNING_TRIANGLE_SVG = '<svg class="size-warn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Approaching context limit"><path d="m10.29 3.86-8.18 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.89-3.14l-8.18-14a2 2 0 0 0-3.42 0Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+  let drawerActivityFetchToken = 0;
+  // Live-refresh both the message count (from already-in-memory state — no
+  // request needed) and the channel-size estimate (a cheap aggregate) every
+  // time this is called. Previously "Messages today" only reflected
+  // whatever was true at the moment the drawer happened to open — a message
+  // arriving while it stayed open just sat there stale until close+reopen.
+  async function refreshDrawerActivity() {
+    const drawer = $('channel-drawer');
+    if (!drawer || !drawer.classList.contains('open')) return;
+    const countEl = $('channel-drawer-msgcount');
+    if (countEl) countEl.textContent = String(state.messages?.size || 0);
+    const sizeEl = $('channel-drawer-size');
+    if (!sizeEl || !state.channel) return;
+    const fetchToken = ++drawerActivityFetchToken;
+    try {
+      const data = await api.get('/api/channel-size?channel=' + encodeURIComponent(state.channel));
+      // The drawer may have closed, or moved to a different channel/DM,
+      // while this request was in flight — a stale response landing after
+      // must not overwrite what's now on screen.
+      if (fetchToken !== drawerActivityFetchToken) return;
+      const el = $('channel-drawer-size');
+      if (!el) return;
+      const tokens = data.estimated_tokens || 0;
+      const warn = tokens > CHANNEL_SIZE_WARN_TOKENS;
+      el.innerHTML = `${esc(formatTokenEstimate(tokens))} tokens (est.)${warn ? ' ' + WARNING_TRIANGLE_SVG : ''}`;
+      el.classList.toggle('size-warn', warn);
+    } catch { if (fetchToken === drawerActivityFetchToken && sizeEl) sizeEl.textContent = '—'; }
+  }
+  let drawerActivityDebounce = null;
+  function onMessageForDrawer() {
+    clearTimeout(drawerActivityDebounce);
+    drawerActivityDebounce = setTimeout(refreshDrawerActivity, 400);
   }
   function openSearch() {
     if (!searchDialog) { searchDialog = document.createElement('dialog'); searchDialog.id = 'trio-search'; searchDialog.className = 'search-modal'; document.body.append(searchDialog); }
@@ -910,7 +960,7 @@
     input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
   }
   let refreshInterval = null;
-  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge};
+  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('message', onMessageForDrawer); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('message', onMessageForDrawer); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity};
 })();

@@ -119,6 +119,19 @@ check('resetLabel: days-away format', resetLabel(Math.floor(Date.now() / 1000) +
 check('resetLabel: already passed reads as "resets now", distinct from "within the hour" (clock skew safety)',
       resetLabel(Math.floor(Date.now() / 1000) - 100) === 'resets now');
 
+// Channel-size indicator: 2-significant-figure K/M formatting per the
+// product spec (1.2K, 12K, 120K, 1.2M, 12M). Number.toPrecision(2) alone
+// would render 3-digit values in exponential notation (e.g. "1.2e+2"
+// instead of "120") — formatTokenEstimate must avoid that.
+const formatTokenEstimate = base.Trio.workspace.formatTokenEstimate;
+check('formatTokenEstimate: sub-thousand values render as a plain integer', formatTokenEstimate(500) === '500');
+check('formatTokenEstimate: low thousands round to 2 sig figs with a K suffix', formatTokenEstimate(1234) === '1.2K');
+check('formatTokenEstimate: mid thousands round to 2 sig figs with a K suffix', formatTokenEstimate(12345) === '12K');
+check('formatTokenEstimate: high thousands round to 2 sig figs without exponential notation', formatTokenEstimate(123456) === '120K');
+check('formatTokenEstimate: low millions round to 2 sig figs with an M suffix', formatTokenEstimate(1234567) === '1.2M');
+check('formatTokenEstimate: mid millions round to 2 sig figs with an M suffix', formatTokenEstimate(12345678) === '12M');
+check('formatTokenEstimate: zero renders as "0"', formatTokenEstimate(0) === '0');
+
 base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
 check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');
