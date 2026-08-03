@@ -119,6 +119,31 @@ check('resetLabel: days-away format', resetLabel(Math.floor(Date.now() / 1000) +
 check('resetLabel: already passed reads as "resets now", distinct from "within the hour" (clock skew safety)',
       resetLabel(Math.floor(Date.now() / 1000) - 100) === 'resets now');
 
+// Channel-size indicator: 2-significant-figure K/M formatting per the
+// product spec (1.2K, 12K, 120K, 1.2M, 12M). Number.toPrecision(2) alone
+// would render 3-digit values in exponential notation (e.g. "1.2e+2"
+// instead of "120") — formatTokenEstimate must avoid that.
+const formatTokenEstimate = base.Trio.workspace.formatTokenEstimate;
+check('formatTokenEstimate: sub-thousand values render as a plain integer', formatTokenEstimate(500) === '500');
+check('formatTokenEstimate: low thousands round to 2 sig figs with a K suffix', formatTokenEstimate(1234) === '1.2K');
+check('formatTokenEstimate: mid thousands round to 2 sig figs with a K suffix', formatTokenEstimate(12345) === '12K');
+check('formatTokenEstimate: high thousands round to 2 sig figs without exponential notation', formatTokenEstimate(123456) === '120K');
+check('formatTokenEstimate: low millions round to 2 sig figs with an M suffix', formatTokenEstimate(1234567) === '1.2M');
+check('formatTokenEstimate: mid millions round to 2 sig figs with an M suffix', formatTokenEstimate(12345678) === '12M');
+check('formatTokenEstimate: zero renders as "0"', formatTokenEstimate(0) === '0');
+
+// LOTC/Frodo: "Messages loaded" (formerly mislabeled "Messages today") is
+// state.messages.size, which 11-conversation.js's pruneMessages(500) caps —
+// a busy channel pins at 500 and stops moving even as more arrive. "500+"
+// makes that cap visible instead of the counter looking frozen/broken.
+const messageCountLabel = base.Trio.workspace.messageCountLabel;
+base.Trio.state.messages = new Map([[1, {}], [2, {}], [3, {}]]);
+check('messageCountLabel: shows the exact count under the cap', messageCountLabel() === '3');
+base.Trio.state.messages = new Map(Array.from({ length: 500 }, (_, i) => [i, {}]));
+check('messageCountLabel: shows "500+" at the pruneMessages cap, not a frozen "500"', messageCountLabel() === '500+');
+base.Trio.state.messages = new Map();
+check('messageCountLabel: empty state reads "0"', messageCountLabel() === '0');
+
 base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
 check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');

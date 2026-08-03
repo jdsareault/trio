@@ -293,6 +293,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .channel-drawer-actions .btn.danger{ border-color:color-mix(in oklab,var(--danger) 55%,var(--line)); color:var(--danger); }
 .channel-drawer-actions .btn.danger:hover{ background:var(--danger-tint); }
 .channel-drawer-empty{ color:var(--ink-3); font-size:13.5px; }
+.channel-drawer-empty-inline{ color:var(--ink-3); font-weight:500; font-size:13px; }
 @media (max-width:880px){
   .app.channel-details-open{ grid-template-columns:1fr; grid-template-rows:minmax(0,1fr) minmax(320px,62dvh); }
   .channel-drawer{ grid-column:1; grid-row:2; border-top:1px solid var(--line); border-left:0; }
@@ -601,6 +602,8 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .kv{ display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px dashed var(--line-soft); font-size:13.5px; }
 .kv .k{ color:var(--ink-3); }
 .kv .v{ font-weight:600; }
+.kv .v.size-warn{ display:inline-flex; align-items:center; gap:5px; color:color-mix(in oklab,var(--warn) 78%,var(--ink)); }
+.size-warn-icon{ width:14px; height:14px; flex:none; }
 .chan-list-mini{ display:flex; flex-wrap:wrap; gap:6px; }
 .detail-foot{ padding:16px 24px; border-top:1px solid var(--line-soft); display:flex; gap:10px; }
 .detail-foot .btn{ flex:1; justify-content:center; }

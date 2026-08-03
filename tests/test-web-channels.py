@@ -135,6 +135,40 @@ try:
     check("search on chanA does NOT leak chanB message (isolation)",
           d.get("count") == 0)
 
+    # /api/channel-size: rough token estimate for the channel-details
+    # drawer's "Channel size" indicator. char/4 over content + member_name,
+    # plus a fixed per-message allowance for the JSON envelope overhead
+    # (id/from/content/at/... field names) actually delivered to a model —
+    # not just what a human would count reading the raw text.
+    st, d = http(port, "/api/channel-size?channel=chan-a")
+    check("channel-size: 200 + scoped to the requested channel",
+          st == 200 and d.get("channel") == "chan-a")
+    db = _sqlite3.connect(str(srv.DB_PATH))
+    total_count, content_chars, name_chars = db.execute(
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)),0), COALESCE(SUM(LENGTH(member_name)),0) "
+        "FROM messages WHERE channel='chan-a' "
+        "AND (recipients IS NULL OR recipients='' OR recipients='[]')").fetchone()
+    db.close()
+    # LOTC/Aragorn: the private DM sent above must NOT be folded into this
+    # total — every other aggregate in this file treats `recipients` as a
+    # hard visibility boundary, and this endpoint is reachable by any
+    # authorized channel member, not just an all-seeing operator.
+    check("channel-size: message_count excludes the private DM sent above "
+          "(broadcast-only, like the unread badge)",
+          d.get("message_count") == total_count)
+    db = _sqlite3.connect(str(srv.DB_PATH))
+    all_count = db.execute("SELECT COUNT(*) FROM messages WHERE channel='chan-a'").fetchone()[0]
+    db.close()
+    check("channel-size: strictly fewer messages than the naive all-messages count "
+          "(the DM is genuinely excluded, not coincidentally equal)",
+          d.get("message_count") < all_count)
+    expected_tokens = round((content_chars + name_chars + d["message_count"] * 80) / 4)
+    check("channel-size: estimated_tokens matches char/4 + per-message JSON overhead",
+          d.get("estimated_tokens") == expected_tokens)
+
+    st, _ = http(port, "/api/channel-size?channel=__ghost__")
+    check("channel-size: bogus channel -> 404", st == 404)
+
     # Bogus channel: 404 on read AND write, and no orphan rows written.
     st, _ = http(port, "/api/tasks?channel=__ghost__")
     check("read bogus channel -> 404", st == 404)
