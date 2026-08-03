@@ -122,6 +122,32 @@ try:
     # _watch_loop comments).
     check("every message event in the feed is stamped with this hub's channel",
           all(e.get("channel") == CH for e in got if e.get("type") == "message"))
+
+    # Same requirement for the roster event the prime snapshot includes —
+    # LOTC bug: this was unstamped, so the client's dispatch() applied ANY
+    # roster tick (from any multiplexed channel) unconditionally, letting
+    # a viewer's member list get replaced by a completely different
+    # channel's (worst case: AGENT_INBOX_CHANNEL's — every agent ever
+    # created) roster mid-view.
+    check("the roster event in the feed is stamped with this hub's channel",
+          any(e.get("type") == "roster" and e.get("channel") == CH for e in got))
+
+    # LOTC/Sauron follow-up: the check above only proves the PRIME-snapshot
+    # roster (subscribe()'s one-time payload) is stamped. The LIVE poll
+    # loop's own roster broadcast (_watch_loop, fires on an actual
+    # membership change, separate code path) needs its own proof — trigger
+    # a real roster change and confirm the live broadcast carries the
+    # channel too.
+    srv.nth_connect(summary="t", name="LiveJoiner", channel=CH)
+    time.sleep(1.0)  # DB_POLL_INTERVAL is 0.5s; give the watch loop a full cycle
+    live_got = []
+    try:
+        while True:
+            live_got.append(json.loads(q.get_nowait()))
+    except Exception:
+        pass
+    check("the LIVE (poll-loop) roster broadcast is also stamped with this hub's channel",
+          any(e.get("type") == "roster" and e.get("channel") == CH for e in live_got))
 finally:
     hub.stop()
 

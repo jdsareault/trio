@@ -595,5 +595,50 @@ check('avatarTone: tolerates state.agents in its pre-refresh {list,...} shape (n
   assert.doesNotThrow(() => H.Trio.avatarTone('ag_x'));
 });
 
+// Cross-channel roster clobber: the workspace-wide SSE stream multiplexes
+// EVERY channel's roster events into one connection, alongside the
+// per-channel stream for whatever's currently open. A roster event used to
+// overwrite Trio.state.members unconditionally regardless of which channel
+// it was for — so viewing channel A while channel B's (or, worse,
+// AGENT_INBOX_CHANNEL's — every agent ever created) roster ticked would
+// silently replace A's member list. Reported live: a viewer saw the
+// participant list "keep changing around", including a flash of every
+// agent ever created.
+check('roster clobber: a roster event for a DIFFERENT channel does NOT overwrite state.members', () => {
+  H.Trio.state.channel = 'chanA';
+  H.Trio.state.members = new Map([['real1', { id: 'real1', name: 'Real Member' }]]);
+  H.Trio.dispatchSSEEvent({ type: 'roster', channel: 'nth-agent-inbox', members: [
+    { id: 'ag1', name: 'Agent One' }, { id: 'ag2', name: 'Agent Two' },
+  ] });
+  assert.deepStrictEqual([...H.Trio.state.members.keys()], ['real1']);
+});
+check('roster clobber: a roster event for the CURRENTLY open channel is applied normally', () => {
+  H.Trio.state.channel = 'chanA';
+  H.Trio.state.members = new Map([['stale', { id: 'stale', name: 'Stale' }]]);
+  H.Trio.dispatchSSEEvent({ type: 'roster', channel: 'chanA', members: [
+    { id: 'fresh', name: 'Fresh Member' },
+  ] });
+  assert.deepStrictEqual([...H.Trio.state.members.keys()], ['fresh']);
+});
+check('roster clobber: a roster event missing the channel field fails closed (not applied)', () => {
+  H.Trio.state.channel = 'chanA';
+  H.Trio.state.members = new Map([['real1', { id: 'real1', name: 'Real Member' }]]);
+  H.Trio.dispatchSSEEvent({ type: 'roster', members: [{ id: 'ghost', name: 'Ghost' }] });
+  assert.deepStrictEqual([...H.Trio.state.members.keys()], ['real1']);
+});
+check('roster clobber: the roster CustomEvent still dispatches even when not applied to state.members', () => {
+  let seen = null;
+  const handler = event => { seen = event.detail; };
+  H.Trio.events.addEventListener('roster', handler);
+  try {
+    H.Trio.state.channel = 'chanA';
+    H.Trio.dispatchSSEEvent({ type: 'roster', channel: 'chanB', members: [{ id: 'x' }] });
+    assert.ok(seen, 'roster event should still fire for listeners that want to filter themselves');
+    assert.strictEqual(seen.channel, 'chanB');
+  } finally {
+    H.Trio.events.removeEventListener('roster', handler);
+  }
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);
