@@ -280,6 +280,9 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .channel-status-chip.blocked,.channel-status-chip.errored{ background:var(--danger-tint); color:color-mix(in oklab,var(--danger) 72%,var(--ink)); }
 .channel-status-chip.sleeping{ background:var(--sleep-tint); color:color-mix(in oklab,var(--sleep) 76%,var(--ink)); }
 .channel-status-chip.active,.channel-status-chip.idle{ background:var(--ok-tint); color:color-mix(in oklab,var(--ok) 74%,var(--ink)); }
+.channel-status-chip.compacting{ background:color-mix(in oklab,var(--st-thinking) 18%,var(--surface)); color:color-mix(in oklab,var(--st-thinking) 74%,var(--ink)); }
+.channel-status-chip.compacting .dot{ animation:breathe 2.4s var(--ease) infinite; }
+@media (prefers-reduced-motion: reduce){ .channel-status-chip.compacting .dot{ animation:none; } }
 .channel-status-chip.offline{ background:var(--bg-sink); color:var(--ink-3); }
 .channel-task{ display:flex; align-items:flex-start; gap:10px; padding:7px 0; color:var(--ink-2); font-size:13.5px; line-height:1.4; }
 .channel-task .tstate{ flex:none; margin-top:1px; }
@@ -651,6 +654,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
    status system — presence chips + rings (label + icon, not color alone)
    ============================================================ */
 .st-working .st-ring, .st-dot.working{ background:var(--warn); }
+.st-compacting .st-ring, .st-dot.compacting{ background:var(--st-thinking); }
 .st-active .st-ring, .st-dot.active{ background:var(--ok); }
 .st-sleeping .st-ring, .st-dot.sleeping{ background:var(--sleep); }
 .st-stopped .st-ring, .st-dot.stopped{ background:var(--st-offline); }

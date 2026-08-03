@@ -125,6 +125,7 @@ class FakeElement {
   get parentNode() { return this._parent; }
   get parentElement() { return this._parent && this._parent.nodeType !== 11 ? this._parent : null; }
   get firstChild() { return this.children[0] || null; }
+  get firstElementChild() { return this.children.find(c => c.nodeType !== 3) || null; }
   get childNodes() { return this.children; }
 
   get textContent() {

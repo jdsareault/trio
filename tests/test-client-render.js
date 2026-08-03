@@ -411,9 +411,38 @@ check('channel drawer never shows the operator as offline while they are viewing
     'operator rendered offline while actively viewing the page: ' + html);
 });
 check('channelStatus prefers roster-backed compacting/error states over heartbeat status', () => {
-  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'compacting', busy: true }), 'sleeping');
+  // Compaction surfaces as its own 'compacting' status (not 'sleeping'), so the
+  // drawer/face-pile match the Agent roster card's "Compacting" label.
+  assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'compacting', busy: true }), 'compacting');
   assert.strictEqual(H.Trio.workspace.channelStatus({ live: false, state: 'errored' }), 'errored');
   assert.strictEqual(H.Trio.workspace.channelStatus({ live: true, state: 'running', busy: false }), 'idle');
+});
+check('channel drawer labels a compacting agent "Compacting", not "Sleeping"', () => {
+  H.Trio.state.dmKey = null;
+  H.Trio.state.channel = 'atrium-test';
+  H.Trio.state.channels = [{ code: 'atrium-test', topic: 'Testing' }];
+  H.Trio.state.members = new Map([['ag_c', { id: 'ag_c', name: 'Comp', status: 'active' }]]);
+  H.Trio.state.agents = [{ id: 'ag_c', name: 'Comp', state: 'compacting', live: true, busy: true }];
+  H.Trio.workspace.showDetails();
+  const html = cx.document.getElementById('channel-drawer-body').innerHTML;
+  assert.ok(html.includes('channel-status-chip compacting') && html.includes('Compacting'),
+    'expected a "Compacting" chip, got: ' + html);
+  assert.ok(!html.includes('channel-status-chip sleeping'),
+    'compacting agent still mislabeled as sleeping: ' + html);
+});
+// Face-pile parity: renderFacePile must merge state.agents like the drawer, so
+// its dot matches the drawer/roster instead of the heartbeat-only roster status.
+check('face-pile merges agent {live,busy,state} so its status matches the drawer', () => {
+  H.Trio.state.dmKey = null;
+  H.Trio.state.channel = 'atrium-test';
+  H.Trio.state.operator = { id: 'op', name: 'op' };
+  // roster row alone would read 'offline' (no live/state); the agent record says compacting.
+  H.Trio.state.members = new Map([['ag_c', { id: 'ag_c', name: 'Comp' }]]);
+  H.Trio.state.agents = [{ id: 'ag_c', name: 'Comp', state: 'compacting', live: true, busy: true }];
+  H.Trio.workspace.renderFacePile();
+  const html = cx.document.getElementById('face-pile').innerHTML;
+  assert.ok(html.includes('st-compacting'),
+    'face-pile did not reflect the merged compacting state: ' + html);
 });
 
 // Notification tier classification — DM > @mention/!bang > #ref > plain,

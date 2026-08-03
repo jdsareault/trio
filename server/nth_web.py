@@ -517,16 +517,19 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
     return out
 
 
-def _agent_is_live(is_running: bool, heartbeat_fresh: bool, state: str) -> bool:
+def _agent_is_live(is_running: bool, heartbeat_fresh: bool, working: bool,
+                   state: str) -> bool:
     """Whether /api/agents should report an agent connected.
 
-    Live if this process holds a running handle (is_running), OR it is
-    heartbeating AND its DB state says it should be up. Excluding sleeping/
-    stopped/errored is what stops a just-hibernated agent — whose last heartbeat
-    is still <LIVE_SECONDS old — from flashing "connected" for a minute before it
-    settles to Sleeping/Resting.
+    Live if this process holds a running handle (is_running) OR the agent is
+    genuinely mid-turn (working) — a working agent is active regardless of a
+    supervisor `state` that may be stale for a reclaim-connected identity the
+    supervisor never manages. Otherwise a fresh heartbeat counts only when the
+    DB state says the agent should be up: excluding sleeping/stopped/errored
+    stops a just-hibernated (idle) agent — whose last heartbeat is still
+    <LIVE_SECONDS old — from flashing "connected" before it settles to Sleeping.
     """
-    if is_running:
+    if is_running or working:
         return True
     return heartbeat_fresh and (state or "").lower() not in (
         nsup.ST_SLEEPING, nsup.ST_STOPPED, nsup.ST_ERRORED)
@@ -3944,7 +3947,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     (r["id"], AGENT_INBOX_CHANNEL)).fetchone() is not None
                 _hb_fresh, _agent_working = alive_map.get(r["id"], (False, False))
                 _agent_live = _agent_is_live(
-                    sup.is_running(r["id"]), _hb_fresh, r["state"] or "")
+                    sup.is_running(r["id"]), _hb_fresh, _agent_working, r["state"] or "")
                 agents.append({
                     "id": r["id"], "name": r["name"], "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),

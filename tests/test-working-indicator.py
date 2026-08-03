@@ -57,18 +57,20 @@ check("blocked self-heals: activity advanced past blocked_since -> working",
       web.member_status(iso(-5), "", session_activity_iso=iso(-2),
                         last_turn_end_iso=iso(-30), blocked_since_iso=iso(-30)) == "working")
 
-# ── _agent_is_live(): the /api/agents state gate ─────────────────────────────
+# ── _agent_is_live(is_running, heartbeat_fresh, working, state) ──────────────
 check("_agent_is_live: in-process handle wins regardless of heartbeat/state",
-      web._agent_is_live(True, False, "sleeping") is True)
+      web._agent_is_live(True, False, False, "sleeping") is True)
 check("_agent_is_live: fresh heartbeat + running state -> live",
-      web._agent_is_live(False, True, "running") is True)
-check("_agent_is_live: fresh heartbeat but sleeping -> NOT live (no hibernate flash)",
-      web._agent_is_live(False, True, "sleeping") is False)
-check("_agent_is_live: fresh heartbeat but stopped/errored -> NOT live",
-      web._agent_is_live(False, True, "stopped") is False
-      and web._agent_is_live(False, True, "errored") is False)
-check("_agent_is_live: stale heartbeat + running -> NOT live",
-      web._agent_is_live(False, False, "running") is False)
+      web._agent_is_live(False, True, False, "running") is True)
+check("_agent_is_live: mid-turn working overrides a stale 'sleeping' state -> live",
+      web._agent_is_live(False, True, True, "sleeping") is True)
+check("_agent_is_live: fresh but idle + sleeping -> NOT live (no hibernate flash)",
+      web._agent_is_live(False, True, False, "sleeping") is False)
+check("_agent_is_live: fresh but idle + stopped/errored -> NOT live",
+      web._agent_is_live(False, True, False, "stopped") is False
+      and web._agent_is_live(False, True, False, "errored") is False)
+check("_agent_is_live: stale heartbeat + running + not working -> NOT live",
+      web._agent_is_live(False, False, False, "running") is False)
 
 
 # ── the turn hook stamps sessions.last_turn_end ──────────────────────────────
