@@ -3419,6 +3419,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(403, "operator only")
             return
         archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
+        operator_id = ident.member_id
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
@@ -3429,12 +3430,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "  (SELECT COUNT(*) FROM members m "
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
-                "     WHERE msg.channel = c.code) AS last_at "
+                "     WHERE msg.channel = c.code) AS last_at, "
+                "  (SELECT COUNT(*) FROM ("
+                # Capped to the most recent 500 messages (idx_messages_channel_id
+                # serves this as an index scan) so a long-lived, high-traffic
+                # channel's unread count stays O(1)-ish per poll instead of
+                # scanning its full history every 15s per open dashboard.
+                "     SELECT id, member_id, recipients FROM messages "
+                "     WHERE channel = c.code ORDER BY id DESC LIMIT 500"
+                "   ) recent "
+                "     WHERE recent.member_id != ? "
+                "     AND (recent.recipients IS NULL OR recent.recipients = '' OR recent.recipients = '[]') "
+                "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                     WHERE mr.message_id = recent.id AND mr.member_id = ?)"
+                "  ) AS unread "
                 "FROM channels c WHERE c.code != ? "
                 + ("AND c.archived_at IS NOT NULL " if archived
                    else "AND c.archived_at IS NULL ") +
                 "ORDER BY last_at DESC",
-                (AGENT_INBOX_CHANNEL,)).fetchall()
+                (operator_id, operator_id, AGENT_INBOX_CHANNEL)).fetchall()
             channels = []
             for r in rows:
                 last_at = r["last_at"]
@@ -3467,6 +3481,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "last_at": last_at,
                     "preview": preview,
                     "archived_at": r["archived_at"],
+                    "unread": r["unread"] or 0,
                 })
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")

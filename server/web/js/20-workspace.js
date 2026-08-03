@@ -213,10 +213,15 @@
     const visible = members.slice(0, 4);
     visible.forEach(member => {
       const node = document.createElement('span');
-      node.innerHTML = avatarFor(member, member.status === 'working' ? 'thinking' : 'online');
+      // The human operator viewing this dashboard is inherently present —
+      // their bare {id,name,source} shape carries no status/live/state for
+      // channelStatus to read, which previously fell through to 'offline'.
+      const status = (operator?.id && member.id === operator.id) ? 'active' : channelStatus(member);
+      node.innerHTML = avatarFor(member, status);
       const face = node.firstElementChild;
-      face.setAttribute('aria-label', member.name || member.id || 'Channel member');
-      face.title = member.name || member.id || 'Channel member';
+      const label = member.name || member.id || 'Channel member';
+      face.setAttribute('aria-label', label + (status === 'working' ? ' — actively working' : ''));
+      face.title = label + toolSuffix(member, status);
       pile.append(face);
     });
     if (members.length > visible.length) {
@@ -717,11 +722,22 @@
   }
   function channelStatusLabel(status) { return status === 'errored' ? 'Errored' : status[0].toUpperCase() + status.slice(1); }
   function channelStatusChip(status) { return `<span class="channel-status-chip ${status}"><span class="dot"></span>${channelStatusLabel(status)}</span>`; }
+  // Live "what are they doing" hint sourced from sessions.last_tool_name/
+  // last_tool_target (nth_activity_hook) — only meaningful while `working`,
+  // since a finished turn's last tool call is stale trivia otherwise.
+  function toolSuffix(member, status) {
+    if (status !== 'working' || !member?.last_tool_name) return '';
+    const target = member.last_tool_target ? `: ${member.last_tool_target}` : '';
+    const when = member.last_tool_at ? ` (${timeAgo(member.last_tool_at) || 'now'})` : '';
+    return ` — using ${member.last_tool_name}${target}${when}`;
+  }
   function detailMember(member) {
     const name = member.name || member.id || 'Unknown member';
     const status = channelStatus(member);
     const statusText = member.status_text || member.statusText || (status === 'active' ? 'Active in this channel' : channelStatusLabel(status));
-    return `<div class="channel-member">${avatarFor(member, status === 'working' ? 'thinking' : 'online')}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div></div>${channelStatusChip(status)}</div>`;
+    const hint = toolSuffix(member, status).replace(/^ — /, '');
+    const tool = hint ? `<div class="channel-member-tool">${esc(hint)}</div>` : '';
+    return `<div class="channel-member">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}</div>${channelStatusChip(status)}</div>`;
   }
   function detailTask(task) {
     const status = ['open','claimed','blocked','done'].includes(task.status) ? task.status : 'open';
@@ -807,5 +823,5 @@
   let refreshInterval = null;
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, channelStatus, toolSuffix};
 })();

@@ -61,6 +61,33 @@ check('selector blocked agents', s.blockedAgents({ agents: [{ status: 'error' },
 check('selector unread dms', s.unreadDms({ dms: { your_dms: [{ unread: 3 }, { unread: 0 }, {} ] } }) === 3);
 check('selector recent channels', s.recentChannels({ channels: [{ code: 'x' }, { code: 'y', archived: true }, { code: 'z' }] }).length === 2);
 
+// Live-activity indicators (face-pile + channel-drawer): channelStatus must
+// prefer the agent-roster {live, busy, state} shape when present so those two
+// views agree with the Agent roster page, and toolSuffix must only surface
+// the last-tool hint while genuinely mid-turn (not on a stale finished turn).
+const cs = base.Trio.workspace.channelStatus;
+check('channelStatus: roster-shaped busy agent is working', cs({ live: true, busy: true, state: 'active' }) === 'working');
+check('channelStatus: roster-shaped idle agent is idle', cs({ live: true, busy: false, state: 'active' }) === 'idle');
+check('channelStatus: roster-shaped dead agent falls back to offline', cs({ live: false, state: 'stopped' }) === 'offline');
+check('channelStatus: heartbeat-shaped member reports its own status', cs({ status: 'working' }) === 'working');
+check('channelStatus: unrecognized status falls back to offline', cs({ status: 'bogus' }) === 'offline');
+// LOTC/Sauron: a bare identity object (the operator's {id,name,source} shape
+// carries no status/live/state at all) must not silently read as offline —
+// renderFacePile special-cases the operator by id rather than relying on
+// channelStatus here, but channelStatus's own default for a field-less
+// object is still worth locking in explicitly.
+check('channelStatus: field-less identity object defaults to offline', cs({ id: 'op', name: 'You' }) === 'offline');
+// A DM-merged object can carry both shapes at once ({...rosterMember, ...agent}
+// in the channel-drawer) — the roster shape (live/state) must win over a
+// possibly-stale heartbeat `status` field, since it's the fresher source.
+check('channelStatus: mixed shapes prefer the live roster fields over a stale heartbeat status', cs({ status: 'idle', live: true, busy: true, state: 'active' }) === 'working');
+
+const ts = base.Trio.workspace.toolSuffix;
+check('toolSuffix: shows the live tool while working', ts({ last_tool_name: 'Bash', last_tool_target: 'npm test' }, 'working') === ' — using Bash: npm test');
+check('toolSuffix: omits target when absent', ts({ last_tool_name: 'Read' }, 'working') === ' — using Read');
+check('toolSuffix: hidden once the turn has ended (stale trivia)', ts({ last_tool_name: 'Bash' }, 'idle') === '');
+check('toolSuffix: hidden when no tool activity recorded', ts({}, 'working') === '');
+
 base.Trio.preferences.selectTheme('light-mist');
 check('theme choices include five light and five dark presets', base.Trio.preferences.lightThemes.length === 5 && base.Trio.preferences.darkThemes.length === 5);
 check('selecting a light preset saves it as the light default', base.Trio.preferences.read().lightTheme === 'light-mist' && base.Trio.preferences.read().theme === 'light-mist');
