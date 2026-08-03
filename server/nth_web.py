@@ -1856,11 +1856,21 @@ class UnifiedHubLock:
             self.handle.close()
             self.handle = None
 
-# Auto-assigned friendly agent names (editable later).
-_AGENT_NAMES = ["Aragorn", "Boromir", "Celeborn", "Denethor", "Eomer",
-                "Faramir", "Galadriel", "Haldir", "Imrahil", "Nimrodel",
-                "Orome", "Peregrin", "Radagast", "Samwise", "Theoden",
-                "Varda", "Beregond", "Elrond", "Gloin", "Halbarad"]
+# Auto-assigned character identities. Each name has a checked-in SVG avatar in
+# server/web/avatars/<name>/avatar.svg.
+_CHARACTERS = [
+    ("Doug", "Doug"), ("Clover", "Clover"), ("Calyx", "Calyx"),
+    ("Thorne", "Thorne"), ("Cedar", "Cedar"), ("Lark", "Lark"),
+    ("Raven", "Raven"), ("Marten", "Marten"), ("Stag", "Stag"),
+    ("Zephyr", "Zephyr"), ("Gale", "Gale"), ("Tempest", "Tempest"),
+    ("Frost", "Frost"), ("Mist", "Mist"), ("Cascade", "Cascade"),
+    ("Delta", "Delta"), ("Tidal", "Tidal"), ("Smith", "Smith"),
+    ("Fletcher", "Fletcher"), ("Mason", "Mason"), ("Cooper", "Cooper"),
+    ("Sawyer", "Sawyer"), ("Scribe", "Scribe"), ("Griffin", "Griffin"),
+    ("Sphynx", "Sphynx"), ("Ember", "Ember"), ("Scout", "Scout"),
+    ("Beacon", "Beacon"), ("Horizon", "Horizon"),
+]
+_CHARACTER_NAMES = [name for name, _avatar in _CHARACTERS]
 
 
 def ensure_agents_schema(conn) -> None:
@@ -1877,6 +1887,7 @@ def ensure_agents_schema(conn) -> None:
             cwd TEXT NOT NULL DEFAULT '',
             permission_profile TEXT NOT NULL DEFAULT 'balanced',
             wake_mode TEXT NOT NULL DEFAULT 'at',
+            avatar_name TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, last_active_at TEXT)
     """)
     agent_columns = {
@@ -1887,6 +1898,7 @@ def ensure_agents_schema(conn) -> None:
         "permission_profile": "TEXT NOT NULL DEFAULT 'balanced'",
         "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
         "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
+        "avatar_name": "TEXT NOT NULL DEFAULT ''",
     }
     for column, definition in agent_columns.items():
         try:
@@ -2267,17 +2279,33 @@ def _gen_agent_id() -> str:
 
 
 def pick_agent_name(db, desired: str = "") -> str:
-    """A free themed name (or the desired one if unused)."""
+    """A free requested name, or a random unused character name."""
     used = {r[0] for r in db.execute("SELECT name FROM agents").fetchall()}
     if desired and desired not in used:
         return desired
-    for n in _AGENT_NAMES:
-        if n not in used:
-            return n
+    available = [name for name in _CHARACTER_NAMES if name not in used]
+    if available:
+        return secrets.choice(available)
     i = 2
-    while f"{_AGENT_NAMES[0]}-{i}" in used:
+    while f"{_CHARACTER_NAMES[0]}-{i}" in used:
         i += 1
-    return f"{_AGENT_NAMES[0]}-{i}"
+    return f"{_CHARACTER_NAMES[0]}-{i}"
+
+
+def pick_agent_avatar(db, name: str) -> str:
+    """Return the character folder used for an agent's avatar."""
+    if name in _CHARACTER_NAMES:
+        return name
+    used = {r[0] for r in db.execute(
+        "SELECT avatar_name FROM agents WHERE avatar_name != ''").fetchall()}
+    available = [avatar for _name, avatar in _CHARACTERS if avatar not in used]
+    return secrets.choice(available or [avatar for _name, avatar in _CHARACTERS])
+
+
+def avatar_url(avatar_name: str) -> str:
+    if avatar_name not in {avatar for _name, avatar in _CHARACTERS}:
+        return ""
+    return f"/avatars/{avatar_name}/avatar.svg"
 
 
 def build_agent_preamble(name: str, channels: List[str], member_id: str = "",
@@ -2509,6 +2537,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
             self._serve_html(INDEX_HTML, set_cookie_token=token if is_new else None)
+        elif path.startswith("/avatars/"):
+            self._serve_avatar(path)
         elif path == "/api/meta":
             token, ident, is_new = self._resolve_identity()
             self._json({
@@ -2643,6 +2673,29 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         if set_cookie_token:
             self._set_cookie(set_cookie_token)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _serve_avatar(self, path: str) -> None:
+        """Serve only the checked-in character SVGs, without filesystem traversal."""
+        parts = path.strip("/").split("/")
+        if len(parts) != 3 or parts[0] != "avatars" or parts[2] != "avatar.svg":
+            self._error(404, "not found")
+            return
+        name = parts[1]
+        if name not in _CHARACTER_NAMES:
+            self._error(404, "not found")
+            return
+        asset = Path(__file__).resolve().parent / "web" / "avatars" / name / "avatar.svg"
+        try:
+            payload = asset.read_bytes()
+        except OSError:
+            self._error(404, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -3693,7 +3746,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             rows = db.execute(
                 "SELECT id, name, model, state, managed, session_id, pid, "
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
-                "wake_mode, created_at, last_active_at FROM agents ORDER BY created_at"
+                "wake_mode, avatar_name, created_at, last_active_at FROM agents ORDER BY created_at"
             ).fetchall()
             agents = []
             for r in rows:
@@ -3710,6 +3763,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "cwd": r["cwd"] or "",
                     "permission_profile": r["permission_profile"] or "balanced",
                     "wake_mode": r["wake_mode"] or "at",
+                    "avatar_url": avatar_url(r["avatar_name"] or r["name"]),
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,
                     "dm_ready": dm_ready,
@@ -4063,6 +4117,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
             name = pick_agent_name(db, desired)
+            assigned_avatar = pick_agent_avatar(db, name)
             now = now_iso()
             # One transaction: agents row + all placements commit or roll back
             # together, so a mid-loop failure can't leave a half-placed orphan.
@@ -4071,9 +4126,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 db.execute(
                     "INSERT INTO agents (id, name, model, base_prompt, state, "
                     "managed, effort, runtime_provider, cwd, permission_profile, "
-                    "wake_mode, reclaim_secret, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?)",
+                    "wake_mode, reclaim_secret, avatar_name, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?)",
                     (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
-                     provider, cwd, permission_profile, wake_mode, reclaim_secret, now))
+                     provider, cwd, permission_profile, wake_mode, reclaim_secret,
+                     assigned_avatar, now))
                 for c in channels + [AGENT_INBOX_CHANNEL]:
                     db.execute(
                         "INSERT OR IGNORE INTO members (id, channel, name, summary, "
@@ -4122,6 +4178,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "inbox is for direct messages and is not a public workspace channel.")
         self._json({"ok": True, "agent": {
             "id": agent_id, "name": name, "model": model, "channels": channels,
+            "avatar_url": avatar_url(assigned_avatar),
             "provider": provider, "cwd": cwd,
             "permission_profile": permission_profile, "wake_mode": wake_mode,
             "state": nsup.ST_RUNNING if proc.alive() else nsup.ST_ERRORED,

@@ -34,6 +34,7 @@
     return {
       id: agent.id,
       name: agent.name || agent.id,
+      avatarUrl: agent.avatar_url || '',
       provider: agent.provider || 'unknown',
       model: agent.model || '',
       effort: agent.effort || '',
@@ -159,7 +160,8 @@
     const initials = (vm.name || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     const tone = vm.needsAttention ? 'var(--danger)' : vm.busy ? 'var(--warn)' : vm.live ? 'var(--ok)' : 'var(--accent)';
     article.style.setProperty('--card-accent', tone);
-    article.innerHTML = `<div class="ac-top"><span class="directory-avatar">${esc(initials)}</span><span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.compacting || vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.compacting ? 'Compacting context…' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
+    const avatar = vm.avatarUrl ? `<img src="${esc(vm.avatarUrl)}" alt="" class="directory-avatar">` : `<span class="directory-avatar">${esc(initials)}</span>`;
+    article.innerHTML = `<div class="ac-top">${avatar}<span><div class="ac-name">${esc(vm.name)}</div><div class="ac-role">${esc(vm.provider)}${vm.model ? ' · ' + esc(vm.model) : ''}</div></span></div><div class="ac-bio">${esc(vm.statusText || (vm.live ? 'Connected and ready.' : 'Not currently connected.'))}</div><div class="ac-foot"><span class="status-chip ${vm.needsAttention ? 'offline' : vm.compacting || vm.busy ? 'thinking' : vm.live ? 'online' : 'idle'}"><span class="st-dot"></span>${esc(vm.needsAttention ? 'Needs attention' : vm.compacting ? 'Compacting context…' : vm.busy ? 'Working' : vm.live ? 'Active' : 'Resting')}</span>${(vm.placements || []).slice(0, 2).map(p => `<span class="tag">#${esc(p)}</span>`).join('')}</div>`;
     const actions = document.createElement('div'); actions.className = 'agent-actions';
     const message = document.createElement('button'); message.type = 'button'; message.textContent = 'Message'; message.addEventListener('click', () => Trio.workspace?.openDmByKey?.(vm.id)); actions.append(message);
     article.append(actions); return article;
@@ -340,14 +342,13 @@
     const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
     const defaultProvider = state.providers[0] || 'codex';
     const models = modelOptions(state.agentModels[defaultProvider]);
-    const html = `<label class="field">Name <input name="name" required pattern="[A-Za-z0-9_]{1,32}"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>`;
+    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label><label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
       const name = (f.get('name') || '').trim();
       const provider = f.get('provider');
       const model = f.get('model');
       const cwd = (f.get('cwd') || '').trim();
-      if (!name) { Trio.ui.toast('Name is required'); return; }
       if (!provider) { Trio.ui.toast('Provider is required'); return; }
       if (!model) { Trio.ui.toast('Model is required'); return; }
       const key = 'create:' + name;

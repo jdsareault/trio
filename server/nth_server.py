@@ -483,6 +483,7 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             cwd            TEXT NOT NULL DEFAULT '',
             permission_profile TEXT NOT NULL DEFAULT 'balanced',
             wake_mode      TEXT NOT NULL DEFAULT 'at',
+            avatar_name    TEXT NOT NULL DEFAULT '',
             created_at     TEXT NOT NULL,
             last_active_at TEXT
         )
@@ -496,6 +497,7 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         "permission_profile": "TEXT NOT NULL DEFAULT 'balanced'",
         "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
         "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
+        "avatar_name": "TEXT NOT NULL DEFAULT ''",
     }
     for column, definition in agent_columns.items():
         try:
