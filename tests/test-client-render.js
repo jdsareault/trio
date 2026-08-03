@@ -457,5 +457,101 @@ check('notifications: real message-event dispatch never throws for an old or a l
   assert.doesNotThrow(() => H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: live })));
 });
 
+// Cross-channel chimes: the workspace-wide SSE stream (00-core.js's
+// startWorkspaceEvents, operator-only) delivers messages from every channel,
+// not just the one currently open — including the open channel itself,
+// which the per-channel stream ALSO delivers. Two things follow: (1) a
+// message not in the currently-open channel deserves a desktop popup
+// regardless of tab focus (chime already fires unconditionally either way),
+// (2) the open channel's own messages must not double-fire from arriving on
+// both streams.
+check('notifications: a message in a channel you are NOT viewing pops up even with the tab focused', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 301, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanB', member_name: 'Bob', content: 'hi',
+  } }));
+  assert.strictEqual(created.length, 1);
+  assert.ok(created[0].title.includes('DM'));
+});
+check('notifications: a message in the currently-open channel does NOT pop up while the tab is focused', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 302, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanA', member_name: 'Bob', content: 'hi',
+  } }));
+  assert.strictEqual(created.length, 0);
+});
+check('notifications: the SAME message id delivered twice (per-channel + workspace stream) only fires once', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA';
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: false });
+  const detail = {
+    id: 303, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanB', member_name: 'Bob', content: 'hi',
+  };
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail }));
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail }));
+  assert.strictEqual(created.length, 1);
+});
+
+// Per-conversation mute: LOTC/Frodo found the "Mute notifications" menu item
+// was a stub (toasted "muted", did nothing) — a broken promise cross-channel
+// chimes made materially worse. toggleMute/isMuted/conversationKeyFor make it
+// real.
+check('mute: toggleMute flips and persists; isMuted reflects it', () => {
+  assert.strictEqual(H.Trio.notifications.isMuted('chanX'), false);
+  assert.strictEqual(H.Trio.notifications.toggleMute('chanX'), true);
+  assert.strictEqual(H.Trio.notifications.isMuted('chanX'), true);
+  assert.strictEqual(H.Trio.notifications.toggleMute('chanX'), false);
+  assert.strictEqual(H.Trio.notifications.isMuted('chanX'), false);
+});
+check('mute: an empty/falsy key is never considered muted and toggle no-ops', () => {
+  assert.strictEqual(H.Trio.notifications.isMuted(''), false);
+  assert.strictEqual(H.Trio.notifications.isMuted(undefined), false);
+  assert.strictEqual(H.Trio.notifications.toggleMute(''), false);
+});
+check('mute: a muted channel suppresses BOTH chime and desktop popup regardless of tier settings', () => {
+  const created = [];
+  cx.window.Notification = function (title, opts) { created.push({ title, opts }); return { close() {} }; };
+  cx.window.Notification.permission = 'granted';
+  H.Trio.state.operator = { id: 'me' };
+  H.Trio.state.channel = 'chanA'; // viewing a different channel — would otherwise pop up
+  H.Trio.preferences.save({ notifications: true, notifyTierDm: true, chime: true, chimeTierDm: true });
+  H.Trio.notifications.toggleMute('chanMuted');
+  H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: {
+    id: 401, member_id: 'ag1', recipients: ['me'], mentions: [], refs: [], bangs: [],
+    created_at: new Date().toISOString(), channel: 'chanMuted', member_name: 'Bob', content: 'hi',
+  } }));
+  assert.strictEqual(created.length, 0);
+  H.Trio.notifications.toggleMute('chanMuted'); // clean up for later tests
+});
+check('conversationKeyFor: resolves a channel message to its channel code', () => {
+  assert.strictEqual(H.Trio.notifications.conversationKeyFor({ channel: 'general', recipients: [] }), 'general');
+});
+check('conversationKeyFor: resolves a DM message to dm:<key> by matching the participant set', () => {
+  H.Trio.state.dms = { your_dms: [{ key: 'dm-1', member_ids: ['me', 'ag1'] }] };
+  const key = H.Trio.notifications.conversationKeyFor({ member_id: 'ag1', recipients: ['me'], channel: 'nth-agent-inbox' });
+  assert.strictEqual(key, 'dm:dm-1');
+});
+check('conversationKeyFor: an unresolvable DM (no matching thread loaded yet) falls back to the channel code, not a crash', () => {
+  H.Trio.state.dms = { your_dms: [] };
+  assert.doesNotThrow(() => H.Trio.notifications.conversationKeyFor({ member_id: 'ag1', recipients: ['me'], channel: 'nth-agent-inbox' }));
+  assert.strictEqual(H.Trio.notifications.conversationKeyFor({ member_id: 'ag1', recipients: ['me'], channel: 'nth-agent-inbox' }), 'nth-agent-inbox');
+});
+
 console.log((failures ? 'FAILED' : 'OK') + ' — ' + failures + ' failure(s)');
 process.exit(failures ? 1 : 0);

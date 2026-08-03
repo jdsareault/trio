@@ -20,6 +20,53 @@
     return 'plain';
   }
 
+  // ── Per-conversation mute ─────────────────────────────────────────────
+  // LOTC/Frodo: the channel menu's "Mute notifications" item was a stub —
+  // clicking it just toasted "muted" and did nothing. Cross-channel chimes
+  // make that broken promise a real problem (a chatty channel you can't
+  // silence now interrupts you from anywhere, not just while it's open),
+  // so this needed to become real, not just get worse quietly.
+  const MUTE_STORAGE_KEY = 'trio.mutedConversations.v1';
+  function readMuted() {
+    try { return new Set(JSON.parse(localStorage.getItem(MUTE_STORAGE_KEY) || '[]')); }
+    catch { return new Set(); }
+  }
+  function writeMuted(set) {
+    try { localStorage.setItem(MUTE_STORAGE_KEY, JSON.stringify([...set])); }
+    catch { /* storage unavailable (private mode / quota) — mute just won't persist */ }
+  }
+  function isMuted(key) { return !!key && readMuted().has(key); }
+  // Returns the NEW muted state (true = now muted) so callers can render
+  // the right label/toast without a separate isMuted() round-trip.
+  function toggleMute(key) {
+    if (!key) return false;
+    const set = readMuted();
+    const nowMuted = !set.has(key);
+    if (nowMuted) set.add(key); else set.delete(key);
+    writeMuted(set);
+    return nowMuted;
+  }
+  // A live message carries recipients (participant ids) but not the DM's
+  // own `key` (that's a server-assigned id from /api/dms, not derivable
+  // from the message alone) — resolve it by matching the participant SET
+  // against the DM list already loaded client-side. Falls back to the
+  // channel code for a channel message, or '' if neither resolves (a DM
+  // whose thread hasn't been opened/loaded yet won't have an entry in
+  // state.dms.your_dms — best-effort: it just won't be mutable yet, not a
+  // crash or a wrong mute).
+  function conversationKeyFor(msg) {
+    if (!msg) return '';
+    if (msg.recipients?.length) {
+      const participants = new Set([...msg.recipients, msg.member_id].filter(Boolean));
+      const dm = (state.dms?.your_dms || []).find(d => {
+        const ids = new Set(d.member_ids || []);
+        return ids.size === participants.size && [...participants].every(id => ids.has(id));
+      });
+      if (dm) return 'dm:' + dm.key;
+    }
+    return msg.channel || '';
+  }
+
   // ── Chime synthesis (WebAudio, no audio asset) ───────────────────────
   // Three presets instead of one fixed tone, so different tiers can sound
   // distinct (a DM shouldn't sound like an untargeted channel message).
@@ -95,22 +142,43 @@
   }
 
   // ── Desktop notification ─────────────────────────────────────────────
-  function showDesktopNotification(msg, tier) {
+  function showDesktopNotification(msg, tier, inCurrentChannel) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
-      const title = tier === 'dm' ? `DM — ${msg.member_name || msg.member_id}` : `#${state.channel || ''} — ${msg.member_name || msg.member_id}`;
+      const where = tier === 'dm' ? 'DM' : (!inCurrentChannel && msg.channel) ? `#${msg.channel}` : `#${state.channel || ''}`;
+      const title = `${where} — ${msg.member_name || msg.member_id}`;
       const n = new Notification(title, {
         body: String(msg.content || '').slice(0, 140),
         tag: 'trio-' + msg.id,
         silent: true, // the chime (if enabled) already covers sound; avoid a second, uncontrolled OS ding
       });
-      n.onclick = () => { window.focus(); n.close(); };
+      n.onclick = () => { window.focus(); if (msg.channel) Trio.workspace?.openChannel?.(msg.channel); n.close(); };
     } catch { /* best-effort */ }
+  }
+
+  // ── Cross-stream de-dup ───────────────────────────────────────────────
+  // The currently-open channel is covered by TWO independent SSE
+  // connections at once once the workspace-wide stream is running: the
+  // per-channel one (/api/events, scoped to state.channel) AND the
+  // cross-channel one (/api/workspace/events, multiplexing every channel's
+  // hub — see 00-core.js). Both dispatch the identical message through the
+  // same Trio.events target, so without de-dup the open channel's own
+  // messages would chime/notify TWICE. Message ids are globally unique and
+  // monotonic, so a bounded "seen" set is enough — no per-stream tagging
+  // needed. Capped so a long session can't grow this unboundedly.
+  const SEEN_CAP = 500;
+  const seenIds = new Set();
+  function alreadySeen(id) {
+    if (seenIds.has(id)) return true;
+    seenIds.add(id);
+    if (seenIds.size > SEEN_CAP) seenIds.delete(seenIds.values().next().value);
+    return false;
   }
 
   function onMessage(event) {
     const msg = event.detail;
-    if (!msg || msg.id == null || isPrimedHistory(msg)) return;
+    if (!msg || msg.id == null || isPrimedHistory(msg) || alreadySeen(msg.id)) return;
+    if (isMuted(conversationKeyFor(msg))) return; // per-conversation override beats tier settings entirely
     const operatorId = (state.operator || state.meta?.operator)?.id;
     const tier = classify(msg, operatorId);
     if (!tier) return;
@@ -118,12 +186,17 @@
     if (!prefs) return;
     const Tier = tier.charAt(0).toUpperCase() + tier.slice(1);
     if (prefs.chime && prefs['chimeTier' + Tier]) playPreset(prefs['chimeSound' + Tier], prefs.chimeVolume);
-    // Desktop popups are only useful when you're not already looking at the
-    // conversation — unlike the chime, which should still play so an
-    // audible cue reaches you even with the tab focused elsewhere.
-    if (prefs.notifications && prefs['notifyTier' + Tier] && document.hidden) showDesktopNotification(msg, tier);
+    // A message in a channel you're not currently viewing deserves a popup
+    // regardless of tab focus — you can't see it just by looking at the
+    // screen. For the channel you ARE viewing, keep the original behavior:
+    // only pop up while the tab itself is hidden (the chime already covers
+    // the tab-focused-elsewhere case).
+    const inCurrentChannel = !msg.channel || msg.channel === state.channel;
+    if (prefs.notifications && prefs['notifyTier' + Tier] && (document.hidden || !inCurrentChannel)) {
+      showDesktopNotification(msg, tier, inCurrentChannel);
+    }
   }
   events.addEventListener('message', onMessage);
 
-  Trio.notifications = { classify, playPreset, isPrimedHistory, SOUNDS, TIERS: ['dm', 'mention', 'ref', 'plain'] };
+  Trio.notifications = { classify, playPreset, isPrimedHistory, isMuted, toggleMute, conversationKeyFor, SOUNDS, TIERS: ['dm', 'mention', 'ref', 'plain'] };
 })();

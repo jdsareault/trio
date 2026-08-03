@@ -642,10 +642,17 @@
     if (!menu.hidden) { closeChannelMenu(); return; }
     const isChannel = !!state.channel && !state.dmKey;
     const archived = !!state.readOnly;
+    // LOTC/Frodo: this used to be a stub — clicking it just toasted "muted"
+    // and did nothing, which cross-channel chimes turned from a cosmetic gap
+    // into a real "the only escape hatch is fake" problem. The key here must
+    // match what Trio.notifications.conversationKeyFor() resolves for a live
+    // message in this same conversation (channel code, or 'dm:'+dmKey).
+    const muteKey = state.dmKey ? 'dm:' + state.dmKey : state.channel;
+    const muted = Trio.notifications?.isMuted?.(muteKey);
     const rows = [
       `<button type="button" role="menuitem" data-menu-action="details">${menuSvg('details')}<span>${isChannel ? 'Channel details' : 'Conversation details'}</span></button>`,
       `<button type="button" role="menuitem" data-menu-action="search">${menuSvg('search')}<span>${isChannel ? 'Search this channel' : 'Search this conversation'}</span></button>`,
-      `<button type="button" role="menuitem" data-menu-action="mute">${menuSvg('mute')}<span>Mute notifications</span></button>`,
+      `<button type="button" role="menuitem" data-menu-action="mute">${menuSvg('mute')}<span>${muted ? 'Unmute notifications' : 'Mute notifications'}</span></button>`,
       '<div class="menu-sep" role="separator"></div>',
       isChannel
         ? `<button type="button" role="menuitem" class="danger" data-menu-action="archive">${menuSvg('archive')}<span>${archived ? 'Restore channel' : 'Archive channel'}</span></button>`
@@ -661,7 +668,11 @@
       const action = item.dataset.menuAction;
       if (action === 'details') showDetails();
       if (action === 'search') openSearch();
-      if (action === 'mute') { closeChannelMenu(); toast('Notifications muted for this conversation'); }
+      if (action === 'mute') {
+        closeChannelMenu();
+        const nowMuted = Trio.notifications?.toggleMute?.(muteKey);
+        toast(nowMuted ? 'Notifications muted for this conversation' : 'Notifications unmuted for this conversation');
+      }
       if (action === 'archive') { closeChannelMenu(); archiveCurrent(); }
     }));
     menu.querySelector('button')?.focus();
@@ -901,5 +912,5 @@
   let refreshInterval = null;
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge};
 })();
