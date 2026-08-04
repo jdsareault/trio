@@ -589,6 +589,13 @@ def _parse_sigils_against_roster(
         "SELECT id, name FROM members WHERE channel = ?",
         (channel,),
     ).fetchall()
+    try:
+        global_names = {
+            row["id"]: (row["name"] or "").strip()
+            for row in db.execute("SELECT id, name FROM agents").fetchall()
+        }
+    except sqlite3.Error:
+        global_names = {}
     lowered = content.lower()
     all_ids = [m["id"] for m in members]
     at_all   = re.search(r"@all(?:\b|$)", lowered) is not None
@@ -622,22 +629,26 @@ def _parse_sigils_against_roster(
                 if mid not in hit_bang:
                     bang_ids.append(mid)
                     hit_bang.add(mid)
-        if name.lower() == "all" or not name:
-            continue
-        literal_names_lower.add(name.lower())
-        name_esc = re.escape(name)
-        if not at_all and mid not in hit_at:
-            if re.search(r"@" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                mention_ids.append(mid)
-                hit_at.add(mid)
-        if mid not in hit_ref:
-            if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                ref_ids.append(mid)
-                hit_ref.add(mid)
-        if not bang_all and mid not in hit_bang:
-            if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                bang_ids.append(mid)
-                hit_bang.add(mid)
+        # Match both the channel-local presence name and the global agent
+        # display name, while keeping the candidate set channel-scoped.
+        candidate_names = {name, global_names.get(mid, "")}
+        for candidate in candidate_names:
+            if candidate.lower() == "all" or not candidate:
+                continue
+            literal_names_lower.add(candidate.lower())
+            name_esc = re.escape(candidate)
+            if not at_all and mid not in hit_at:
+                if re.search(r"@" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    mention_ids.append(mid)
+                    hit_at.add(mid)
+            if mid not in hit_ref:
+                if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    ref_ids.append(mid)
+                    hit_ref.add(mid)
+            if not bang_all and mid not in hit_bang:
+                if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    bang_ids.append(mid)
+                    hit_bang.add(mid)
 
     # Guest-stem fallback. Group guest members by stem so we can detect
     # ambiguity (two guests named "Gabe (Guest)" / "gabe-guest" would both
@@ -3892,7 +3903,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             targets = []
             agent_rows = db.execute(
                 "SELECT id, name, state, model FROM agents "
-                "WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE"
+                "WHERE managed = 1 AND archived_at IS NULL ORDER BY name COLLATE NOCASE"
             ).fetchall()
             for a in agent_rows:
                 channels = public_agent_channels(db, a["id"])
@@ -4033,7 +4044,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
                 "wake_mode, avatar_name, created_at, last_active_at, archived_at, "
                 "context_pct, context_tokens "
-                "FROM agents WHERE archived_at IS "
+                "FROM agents WHERE managed = 1 AND archived_at IS "
                 + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
             alive_map = _agent_liveness(db)

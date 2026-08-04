@@ -170,37 +170,37 @@ def generate_member_id() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
 
-def _register_agent_identity(db: sqlite3.Connection, member_id: str,
-                             name: str, model: str, now: str) -> str:
-    """Register or refresh a self-connected agent's global identity.
+def _register_agent_identity(db: sqlite3.Connection, name: str,
+                             model: str, now: str) -> tuple[str, str]:
+    """Mint and INSERT a globally unique self-connected agent identity.
 
     ``members`` is channel-scoped, but an MCP connection is an agent, so its
     generated id must also be durable in the global ``agents`` registry. The
-    secret is returned to the caller once and is required for future
-    cross-channel reclaims. Existing managed rows retain their management
-    flag and secret; a legacy row with no secret is upgraded in place.
+    INSERT is authoritative: a concurrent collision retries with a new id and
+    can never return or update an existing agent's reclaim secret.
     """
-    row = db.execute(
-        "SELECT reclaim_secret FROM agents WHERE id = ?", (member_id,)
-    ).fetchone()
-    stored_secret = ((row["reclaim_secret"] if row and
-                      "reclaim_secret" in row.keys() else "") or "")
-    reclaim_secret = stored_secret or secrets.token_urlsafe(32)
-    if row is None:
-        db.execute(
-            "INSERT INTO agents "
-            "(id, name, model, managed, reclaim_secret, created_at, last_active_at) "
-            "VALUES (?, ?, ?, 0, ?, ?, ?)",
-            (member_id, name, model or "", reclaim_secret, now, now),
-        )
-    else:
-        db.execute(
-            "UPDATE agents SET name = ?, "
-            "model = CASE WHEN ? <> '' THEN ? ELSE model END, "
-            "reclaim_secret = ?, last_active_at = ? WHERE id = ?",
-            (name, model or "", model or "", reclaim_secret, now, member_id),
-        )
-    return reclaim_secret
+    while True:
+        member_id = generate_member_id()
+        collision = db.execute(
+            "SELECT 1 FROM agents WHERE id = ? "
+            "UNION ALL SELECT 1 FROM members WHERE id = ? LIMIT 1",
+            (member_id, member_id),
+        ).fetchone()
+        if collision is not None:
+            continue
+        reclaim_secret = secrets.token_urlsafe(32)
+        try:
+            db.execute(
+                "INSERT INTO agents "
+                "(id, name, model, managed, reclaim_secret, created_at, last_active_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (member_id, name, model or "", reclaim_secret, now, now),
+            )
+        except sqlite3.IntegrityError:
+            # Another connector won the race after our pre-check. The failed
+            # INSERT cannot expose its row; simply mint and try again.
+            continue
+        return member_id, reclaim_secret
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -999,20 +999,6 @@ def nth_connect(
     db = get_db()
     if reclaiming:
         member_id = resume_member_id.strip()
-    else:
-        # A self-registered id is global, not merely unique within this
-        # channel. Check both registries before exposing/registering it so a
-        # rare short-id collision cannot hand a new caller an existing
-        # agent's reclaim secret.
-        while True:
-            member_id = generate_member_id()
-            collision = db.execute(
-                "SELECT 1 FROM agents WHERE id = ? "
-                "UNION ALL SELECT 1 FROM members WHERE id = ? LIMIT 1",
-                (member_id, member_id),
-            ).fetchone()
-            if collision is None:
-                break
 
     # A registered agent is globally reclaimable, so authenticate it before
     # looking at the channel-local member row. Otherwise the first connect to
@@ -1032,6 +1018,22 @@ def nth_connect(
                 return json.dumps({
                     "error": "Cannot reclaim this identity: invalid or "
                              "missing reclaim_secret."})
+        else:
+            # An unknown requested id is never honored: otherwise a caller
+            # could claim an arbitrary canonical identity on first join. Keep
+            # the explicit human-row rejection, then fall through to a fresh
+            # self-registration with a new globally unique id.
+            requested_row = db.execute(
+                "SELECT kind FROM members WHERE id = ? AND channel = ?",
+                (member_id, channel),
+            ).fetchone()
+            if requested_row and (
+                    (requested_row["kind"] if "kind" in requested_row.keys()
+                     else "agent") or "agent") != "agent":
+                return json.dumps({"error": "Cannot reclaim this identity."})
+            reclaiming = False
+
+    response_reclaim_secret = ""
 
     try:
         existing = _get_channel(db, channel)
@@ -1059,22 +1061,6 @@ def nth_connect(
                         (existing_row["kind"] if "kind" in existing_row.keys()
                          else "agent") or "agent") != "agent":
                     return json.dumps({"error": "Cannot reclaim this identity."})
-                # Legacy member rows without a global registry entry retain the
-                # old same-channel secret check. Newly registered agents were
-                # authenticated above, before the channel-local lookup.
-                if reclaimed_existing and not registered_agent:
-                    agent_row = db.execute(
-                        "SELECT reclaim_secret FROM agents WHERE id = ?",
-                        (member_id,)).fetchone()
-                    stored_secret = ((agent_row["reclaim_secret"]
-                                      if agent_row and "reclaim_secret" in agent_row.keys()
-                                      else "") or "")
-                    supplied_secret = (reclaim_secret or "").strip()
-                    if not stored_secret or not supplied_secret or not \
-                            secrets.compare_digest(stored_secret, supplied_secret):
-                        return json.dumps({
-                            "error": "Cannot reclaim this identity: invalid or "
-                                     "missing reclaim_secret."})
 
             # Check member count (all members who ever joined). Skip for a
             # reclaim of an already-counted own row — otherwise a placed agent
@@ -1101,7 +1087,11 @@ def nth_connect(
                         "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
                         (now, member_id, channel))
             else:
-                # Join existing channel (retry once on member_id collision)
+                # Reserve the global identity before creating its channel
+                # presence. The INSERT-authoritative helper retries any
+                # concurrent agents-PK race without exposing another secret.
+                member_id, response_reclaim_secret = _register_agent_identity(
+                    db, name, model, now)
                 try:
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
@@ -1109,7 +1099,13 @@ def nth_connect(
                         (member_id, channel, name, summary, skills, now, now),
                     )
                 except sqlite3.IntegrityError:
-                    member_id = generate_member_id()
+                    db.execute(
+                        "DELETE FROM agents WHERE id = ? AND managed = 0 "
+                        "AND reclaim_secret = ?",
+                        (member_id, response_reclaim_secret),
+                    )
+                    member_id, response_reclaim_secret = _register_agent_identity(
+                        db, name, model, now)
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1144,6 +1140,8 @@ def nth_connect(
                     (member_id, channel, name, summary, skills, now, now),
                 )
             else:
+                member_id, response_reclaim_secret = _register_agent_identity(
+                    db, name, model, now)
                 try:
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
@@ -1151,7 +1149,13 @@ def nth_connect(
                         (member_id, channel, name, summary, skills, now, now),
                     )
                 except sqlite3.IntegrityError:
-                    member_id = generate_member_id()
+                    db.execute(
+                        "DELETE FROM agents WHERE id = ? AND managed = 0 "
+                        "AND reclaim_secret = ?",
+                        (member_id, response_reclaim_secret),
+                    )
+                    member_id, response_reclaim_secret = _register_agent_identity(
+                        db, name, model, now)
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1193,7 +1197,6 @@ def nth_connect(
                 "UPDATE members SET model = ? WHERE id = ? AND channel = ?",
                 (model, member_id, channel),
             )
-        response_reclaim_secret = ""
         if reclaiming and registered_agent:
             response_reclaim_secret = ((registered_agent["reclaim_secret"]
                                         if "reclaim_secret" in registered_agent.keys()
@@ -1202,9 +1205,6 @@ def nth_connect(
                 "UPDATE agents SET last_active_at = ? WHERE id = ?",
                 (now, member_id),
             )
-        elif not reclaiming:
-            response_reclaim_secret = _register_agent_identity(
-                db, member_id, name, model, now)
         db.commit()
 
         # Gather current state for the joiner
@@ -1444,6 +1444,13 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
             "SELECT id, name FROM members WHERE channel = ?",
             (channel,),
         ).fetchall()
+        try:
+            global_names = {
+                row["id"]: (row["name"] or "").strip()
+                for row in db.execute("SELECT id, name FROM agents").fetchall()
+            }
+        except sqlite3.Error:
+            global_names = {}
         content_lower = content.lower()
         all_ids = [m["id"] for m in all_members]
         # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
@@ -1479,29 +1486,30 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
                     if mid not in hit_bang:
                         bang_ids.append(mid)
                         hit_bang.add(mid)
-            # Skip a member named literally "all" — the @all/!all shortcuts
-            # already handle that keyword; matching it as a regular name
-            # would double-count. "all" is also a reserved display name
-            # we refuse during identity registration on the web side.
-            if name_stripped.lower() == "all" or not name_stripped:
-                continue
-            literal_names_lower.add(name_stripped.lower())
-            name_esc = re.escape(name_stripped)
-            if not at_all and mid not in hit_at:
-                at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if at_pat.search(content):
-                    mention_ids.append(mid)
-                    hit_at.add(mid)
-            if mid not in hit_ref:
-                hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if hash_pat.search(content):
-                    ref_ids.append(mid)
-                    hit_ref.add(mid)
-            if not bang_all and mid not in hit_bang:
-                bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if bang_pat.search(content):
-                    bang_ids.append(mid)
-                    hit_bang.add(mid)
+            # Match both the channel-local presence name and the global agent
+            # display name. The roster query above keeps this strictly scoped
+            # to members of the current channel.
+            candidate_names = {name_stripped, global_names.get(mid, "")}
+            for candidate in candidate_names:
+                if candidate.lower() == "all" or not candidate:
+                    continue
+                literal_names_lower.add(candidate.lower())
+                name_esc = re.escape(candidate)
+                if not at_all and mid not in hit_at:
+                    at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if at_pat.search(content):
+                        mention_ids.append(mid)
+                        hit_at.add(mid)
+                if mid not in hit_ref:
+                    hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if hash_pat.search(content):
+                        ref_ids.append(mid)
+                        hit_ref.add(mid)
+                if not bang_all and mid not in hit_bang:
+                    bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if bang_pat.search(content):
+                        bang_ids.append(mid)
+                        hit_bang.add(mid)
 
         # Guest-stem fallback: if the roster has `gabe-guest` (or the
         # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to

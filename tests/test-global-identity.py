@@ -65,6 +65,19 @@ try:
     check("valid reclaim returns the same secret",
           reclaimed.get("reclaim_secret") == secret)
 
+    unknown = json.loads(srv.nth_connect(
+        summary="forged", name="Forged", channel="identity-c",
+        resume_member_id="chosen-id", reclaim_secret="wrong"))
+    db = srv.get_db()
+    check("unknown reclaim mints a fresh id and secret",
+          unknown.get("member_id") != "chosen-id" and
+          bool(unknown.get("reclaim_secret")))
+    check("unknown reclaim registers only the fresh identity",
+          db.execute("SELECT 1 FROM agents WHERE id='chosen-id'").fetchone() is None and
+          db.execute("SELECT 1 FROM agents WHERE id=?",
+                     (unknown.get("member_id"),)).fetchone() is not None)
+    db.close()
+
     # A fresh short id must not collide with a pre-existing global identity.
     db = srv.get_db()
     db.execute(

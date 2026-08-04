@@ -25,12 +25,22 @@ tmp = Path(tempfile.mkdtemp(prefix="nth_agent_inbox_"))
 srv.DB_DIR = tmp
 srv.DB_PATH = tmp / "nth.db"
 try:
+    db = srv.get_db()
+    now = srv.now_iso()
+    db.execute(
+        "INSERT INTO agents (id, name, reclaim_secret, created_at) "
+        "VALUES ('ag_managed', 'Managed', 'managed-secret', ?)", (now,))
+    db.execute(
+        "INSERT INTO agents (id, name, reclaim_secret, created_at) "
+        "VALUES ('ag_other', 'Other', 'other-secret', ?)", (now,))
+    db.commit()
+    db.close()
     first = json.loads(srv.nth_connect(
         summary="managed", name="Managed", channel=AGENT_INBOX_CHANNEL,
-        resume_member_id="ag_managed"))
+        resume_member_id="ag_managed", reclaim_secret="managed-secret"))
     json.loads(srv.nth_connect(
         summary="other", name="Other", channel=AGENT_INBOX_CHANNEL,
-        resume_member_id="ag_other"))
+        resume_member_id="ag_other", reclaim_secret="other-secret"))
     db = srv.get_db()
     try:
         now = srv.now_iso()
