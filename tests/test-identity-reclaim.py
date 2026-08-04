@@ -67,17 +67,19 @@ def main() -> int:
         "AND content LIKE '[joined] Aragorn%'").fetchone()[0]
     check("reclaim: silent re-attach (no [joined] spam)", joins == 0)
 
-    # Reclaim with an id that has no row yet: create with THAT id, action=joined.
+    # An unknown requested id is never honored: mint a new registered identity.
     r3 = json.loads(srv.nth_connect(summary="a", name="Gimli",
                                     channel="rt", resume_member_id="ag_y"))
-    check("reclaim absent-row: creates with fixed id, action=joined",
-          r3.get("member_id") == "ag_y" and r3.get("action") == "joined")
+    check("unknown reclaim: mints a fresh id, action=joined",
+          r3.get("member_id") != "ag_y" and r3.get("action") == "joined")
+    check("unknown reclaim: fresh id gets its own secret",
+          bool(r3.get("reclaim_secret")))
 
-    # Reclaim into a BRAND-NEW channel (create branch) keeps the fixed id.
+    # The same rule applies when the requested channel does not exist.
     r4 = json.loads(srv.nth_connect(summary="a", name="Boromir",
                                     channel="fresh-chan", resume_member_id="ag_z"))
-    check("reclaim in new channel: fixed id preserved",
-          r4.get("member_id") == "ag_z" and r4.get("action") == "created")
+    check("unknown reclaim in new channel: fresh id preserved",
+          r4.get("member_id") != "ag_z" and r4.get("action") == "created")
 
     # SECURITY: a human/operator row (kind='human') must NOT be reclaimable.
     db = srv.get_db()

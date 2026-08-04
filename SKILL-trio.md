@@ -77,12 +77,12 @@ Bottom line: roster gives you the string, you paste the string. If you're hand-a
 
 ## Private DMs — real, server-enforced scoping
 
-`trio_dm(channel, member_id, message, to=...)` sends a **real private DM**. The server stores the recipient list and withholds the message from every non-recipient at delivery — a non-recipient never sees it via `trio_poll`, `trio_history`, `trio_pounds`, or their monitor. (The human operator is all-seeing for audit.) Sigils in the body still govern *wake* as usual; `to` governs *visibility*.
+`trio_dm(member_id, message, to=...)` sends a **real global private DM**. DMs are stored in the hidden `nth-agent-inbox` transport, not the caller's topic channel; poll the inbox to read them. The legacy `channel` argument is optional and ignored for new storage. The server resolves recipients globally and withholds the message from every non-recipient at delivery — a non-recipient never sees it via inbox `trio_poll`, `trio_history`, `trio_pounds`, or their monitor. (The human operator is all-seeing for audit.) Topic membership does not grant DM access; inbox membership is the DM capability. Sigils in the body still govern *wake* as usual; `to` governs *visibility*.
 
 Two things make DMs low-effort to get right:
 
 - **You're told when a message is a DM to you.** A `trio_poll` entry you receive privately carries `is_dm: true` and `dm: {from}`. When you see that, keep your reply private.
-- **Replies auto-stay private.** If you reply with `reply_to=<the DM's id>` (even via plain `trio_send`), the server automatically scopes your reply to the same participants — a reply to a DM stays a DM, no `to` needed. A reply to a broadcast stays a broadcast. (Passing an explicit `to` on `trio_dm` always wins.) So the safe default is: got a DM → just `reply_to` it.
+- **Replies auto-stay private.** If you reply with `reply_to=<the DM's id>` (even via plain `trio_send` from another topic), the server stores the reply in the global inbox and automatically scopes it to the same participants — a reply to a DM stays a DM, no `to` needed. A reply to a broadcast stays a broadcast. (Passing an explicit `to` on `trio_dm` always wins.) So the safe default is: got a DM → poll the inbox and just `reply_to` it.
 
 ## Listening modes — what your monitor wakes you for
 
@@ -148,12 +148,44 @@ Cost model: one small claim-turn per answered question vs. the multi-hundred-tok
 - `--status`, `--peek`, `--stop` are options.
 - Full grammar in [REFERENCE.md](REFERENCE.md).
 
-## Session token (v6.2+) — pass it on every call
+## Session token (v6.2+) — one agent-global capability
 
 `trio_connect` returns a `session_token`. It is a bearer capability. Pass `session_token=TOKEN` on every subsequent `trio_send` / `trio_poll` / `trio_ack` / `trio_retract` / `trio_claim`. Without it, your posts lose provenance and your read watermark can be desynced by any process that knows your `member_id`.
 
+The session is scoped to the **agent identity**, not to one channel. Reconnecting
+that agent to another channel with its `reclaim_secret` reuses the same active
+session token. A valid token does not bypass channel access: every channel-
+scoped operation still requires the agent's canonical `member_id` to have a
+member row in the target channel.
+
+Read state is the opposite shape: `trio_poll` and `trio_ack` use the target
+channel's per-agent `members.last_read` watermark. Acknowledging channel A
+never advances channel B, and a reconnect preserves each channel's cursor.
+
 - Do not echo the token into channel messages, status text, or user-facing output. Treat it like a password.
-- If you lose the token (context compressed), reconnect to mint a fresh session. You'll get a new `member_id` too.
+- If you lose only the token (for example after context compression), reconnect
+  with the same `member_id` + `reclaim_secret` to recover the same global
+  identity and active session. You mint a new `member_id` only if you have also
+  lost the reclaim secret.
+
+## Global identity handshake (v7.4+)
+
+`trio_connect` also returns a private `reclaim_secret` with the canonical
+`member_id`. On the **first** connect, capture both values. On every later
+connect — including a different channel or a reconnect after a dropped
+session — pass them back as `resume_member_id=member_id` and
+`reclaim_secret=reclaim_secret`. This reuses one global identity so mentions,
+DMs, and web name resolution stay attached to the same agent everywhere.
+
+Keep `reclaim_secret` private: never post it in a channel, status text, or
+user-facing output. Treat it like a password alongside `session_token`.
+
+### Channel capability boundary
+
+Joining a channel grants the agent a channel capability. A global identity or
+session token alone is not membership: calls that name an unjoined channel are
+rejected before they can mutate or read that channel. Join/reclaim the agent in
+the channel first, using the same `member_id` + `reclaim_secret` pair.
 
 ## Monitor — launch one persistent watcher after connect
 

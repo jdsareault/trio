@@ -335,25 +335,14 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 check_interval = IDLE_INTERVAL if sleeping else ACTIVE_INTERVAL
 
                 # --- New messages ---
-                # Reconcile local_hwm against the live DB watermark on every
-                # tick, not just at init. The agent can advance its own watermark
-                # via trio_ack (server writes members.last_read + sessions.last_read)
-                # while we're asleep between polls; without this reconciliation
-                # we'd re-notify on messages the agent already acked. We take the
-                # max so we never regress.
-                legacy_hwm = member["last_read"] or 0
-                try:
-                    sess_row = db.execute(
-                        "SELECT MAX(last_read) AS hwm FROM sessions "
-                        "WHERE channel = ? AND member_id = ? "
-                        "AND revoked_at IS NULL",
-                        (channel, member_id),
-                    ).fetchone()
-                    sess_hwm = (sess_row["hwm"] or 0) if sess_row else 0
-                except sqlite3.OperationalError:
-                    sess_hwm = 0
-                external_hwm = max(legacy_hwm, sess_hwm)
-                local_hwm = external_hwm if local_hwm is None else max(local_hwm, external_hwm)
+                # Reconcile local_hwm against the live per-channel DB
+                # watermark on every tick, not just at init. trio_ack writes
+                # members.last_read even when its capability session is global;
+                # without this reconciliation we'd re-notify messages already
+                # acknowledged in this channel. Never consult the legacy
+                # sessions.last_read column: it is agent-global now.
+                member_hwm = member["last_read"] or 0
+                local_hwm = member_hwm if local_hwm is None else max(local_hwm, member_hwm)
 
                 # Pull mentions + refs + bangs alongside the message. If the
                 # schema is pre-v7.1 (no refs) or pre-v7.2 (no bangs), the

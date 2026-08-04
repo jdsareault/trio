@@ -68,6 +68,12 @@ def _find_free_port(preferred: int = 8000) -> int:
 SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# One-time schema migration marker. P1 sessions were channel-scoped; once
+# token lookup becomes global, retaining those bearer tokens would silently
+# grant cross-channel authority. The first post-upgrade get_db() revokes them;
+# later calls leave newly minted global sessions alone.
+GLOBAL_SESSION_MIGRATION = "p2-global-agent-session-v1"
+
 # One nth_server.py subprocess is spawned per managed Claude agent (each
 # `claude` invocation gets its own --mcp-config stdio child), so this process
 # only ever speaks for one Trio identity. Captured on trio_connect so
@@ -168,6 +174,39 @@ def generate_channel_code(topic: str = "") -> str:
 def generate_member_id() -> str:
     """Short unique member identifier."""
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+
+
+def _register_agent_identity(db: sqlite3.Connection, name: str,
+                             model: str, now: str) -> tuple[str, str]:
+    """Mint and INSERT a globally unique self-connected agent identity.
+
+    ``members`` is channel-scoped, but an MCP connection is an agent, so its
+    generated id must also be durable in the global ``agents`` registry. The
+    INSERT is authoritative: a concurrent collision retries with a new id and
+    can never return or update an existing agent's reclaim secret.
+    """
+    while True:
+        member_id = generate_member_id()
+        collision = db.execute(
+            "SELECT 1 FROM agents WHERE id = ? "
+            "UNION ALL SELECT 1 FROM members WHERE id = ? LIMIT 1",
+            (member_id, member_id),
+        ).fetchone()
+        if collision is not None:
+            continue
+        reclaim_secret = secrets.token_urlsafe(32)
+        try:
+            db.execute(
+                "INSERT INTO agents "
+                "(id, name, model, managed, reclaim_secret, created_at, last_active_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (member_id, name, model or "", reclaim_secret, now, now),
+            )
+        except sqlite3.IntegrityError:
+            # Another connector won the race after our pre-check. The failed
+            # INSERT cannot expose its row; simply mint and try again.
+            continue
+        return member_id, reclaim_secret
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -368,10 +407,9 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             PRIMARY KEY (owner_id, thread_key)
         )
     """)
-    # v6: sessions table. Per-session watermark + capability role so
-    # sub-agents spawned with a read_only token cannot forge posts under
-    # the parent's member_id. member_id stays the public identity;
-    # session_token is the private mutation capability.
+    # v6/P2: sessions table. The capability is now agent-global; channel is
+    # retained for legacy observability/ownership rows. member_id stays the
+    # public identity; session_token is the private mutation capability.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_token   TEXT PRIMARY KEY,
@@ -388,6 +426,25 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name       TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    # P1 minted one live bearer token per channel. Revoke that pre-upgrade
+    # population exactly once before P2's global token lookup can authenticate
+    # it in another channel. INSERT OR IGNORE is the idempotent guard and also
+    # serializes concurrent first callers through SQLite's write transaction.
+    migration = conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (GLOBAL_SESSION_MIGRATION, now_iso()),
+    )
+    if migration.rowcount:
+        conn.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL",
+            (now_iso(),),
+        )
     # last_turn_end: stamped by the nth_turn_hook Stop/StopFailure hook when a
     # Claude turn ends, so the dashboard can tell "working" (acted since the last
     # turn end) from "idle" (turn ended, waiting). Added here too for DBs that
@@ -412,6 +469,10 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_member_global
+        ON sessions (member_id)
     """)
     # Reverse lookup: the stall-watchdog resolves a StopFailure hook's
     # session_id back to a member via sessions.fingerprint.
@@ -490,6 +551,7 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             permission_profile TEXT NOT NULL DEFAULT 'balanced',
             wake_mode      TEXT NOT NULL DEFAULT 'at',
             avatar_name    TEXT NOT NULL DEFAULT '',
+            reclaim_secret TEXT NOT NULL DEFAULT '',
             created_at     TEXT NOT NULL,
             last_active_at TEXT,
             archived_at    TEXT,
@@ -730,6 +792,46 @@ def _get_member(db, channel, member_id):
     ).fetchone()
 
 
+def _ensure_agent_inbox_membership(db: sqlite3.Connection, agent_id: str,
+                                   now: str) -> None:
+    """Make the global DM transport a durable capability for this agent.
+
+    Topic-channel presence is optional and may be culled, but an agent's
+    membership in the hidden inbox is what authorizes global DM reads/writes.
+    Keep that presence synchronized from the canonical ``agents`` row whenever
+    an externally launched agent connects or reclaims its identity.
+    """
+    agent = db.execute(
+        "SELECT name, model, base_prompt FROM agents WHERE id = ?",
+        (agent_id,),
+    ).fetchone()
+    if not agent:
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+        "VALUES (?, 'active', ?, ?)",
+        (AGENT_INBOX_CHANNEL, now, now),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO members "
+        "(id, channel, name, summary, skills, last_seen, last_read, joined_at, "
+        " active, kind, model) VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+        (agent_id, AGENT_INBOX_CHANNEL, agent["name"],
+         (agent["base_prompt"] or "")[:200], "", now, now, agent["model"] or ""),
+    )
+    db.execute(
+        "UPDATE members SET active=1, name=?, summary=?, model=? "
+        "WHERE id=? AND channel=?",
+        (agent["name"], (agent["base_prompt"] or "")[:200],
+         agent["model"] or "", agent_id, AGENT_INBOX_CHANNEL),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO agent_channels "
+        "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+        (agent_id, AGENT_INBOX_CHANNEL, agent_id, now),
+    )
+
+
 def _is_member_active(last_seen: str | None) -> bool:
     """Compute liveness from last_seen timestamp vs wall clock."""
     if not last_seen:
@@ -752,9 +854,10 @@ def _seconds_since(iso_timestamp: str) -> float:
 
 def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
     """Tear down a member: release its claimed tasks, drop its locks, delete the
-    row, and revoke its sessions. Shared by nth_cull and _prune_name_ghosts so
-    the teardown lives in exactly one place. Returns (released_task_ids,
-    released_lock_names); the caller posts its own system line and commits.
+    row, and revoke its global sessions only when no channel presence remains.
+    Shared by nth_cull and _prune_name_ghosts so the teardown lives in exactly
+    one place. Returns (released_task_ids, released_lock_names); the caller
+    posts its own system line and commits.
     """
     released_tasks = db.execute(
         "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
@@ -772,11 +875,18 @@ def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
     ).fetchall()
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, member_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (member_id, channel))
-    db.execute(
-        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-        "AND revoked_at IS NULL",
-        (now, channel, member_id),
-    )
+    remaining_presence = db.execute(
+        "SELECT 1 FROM members WHERE id = ? LIMIT 1", (member_id,)
+    ).fetchone()
+    if not remaining_presence:
+        # Sessions are agent-global. Revoke only after the final channel
+        # presence disappears; membership checks keep a still-joined agent's
+        # token unusable in the culled channel without killing other channels.
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, member_id),
+        )
     return [t["id"] for t in released_tasks], [lk["resource"] for lk in released_locks]
 
 
@@ -819,6 +929,30 @@ def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
             continue  # process still alive (active, idle, or stalled) — not a ghost
         gid = r["id"]
         _purge_member(db, channel, gid, now)
+        # A stale duplicate can retain the hidden global inbox presence that
+        # every agent receives on connect. If this was its last topic
+        # presence, finish the teardown so its stale bearer session cannot
+        # survive forever as an invisible ghost. When another topic presence
+        # remains, preserve the inbox and global session: this was only a
+        # channel-local ghost cleanup, not a full-agent teardown.
+        remaining_topic = db.execute(
+            "SELECT 1 FROM members WHERE id = ? AND channel != ? LIMIT 1",
+            (gid, AGENT_INBOX_CHANNEL),
+        ).fetchone()
+        if not remaining_topic:
+            db.execute(
+                "DELETE FROM members WHERE id = ? AND channel = ?",
+                (gid, AGENT_INBOX_CHANNEL),
+            )
+            db.execute(
+                "DELETE FROM agent_channels WHERE agent_id = ? AND channel = ?",
+                (gid, AGENT_INBOX_CHANNEL),
+            )
+            db.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+                "AND revoked_at IS NULL",
+                (now, gid),
+            )
         db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -831,14 +965,40 @@ def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
 
 def _mint_session_token(db, member_id: str, channel: str,
                         role: str = "primary", fingerprint: str = "",
-                        pid: int | None = None) -> str:
-    """Mint a new session token for (member_id, channel). Role is 'primary'
-    (full capability) or 'read_only' (poll/history only — rejects send/ack/retract).
+                        pid: int | None = None,
+                        reuse_existing: bool = False) -> str:
+    """Mint or refresh a session token for an agent.
 
-    The token is a bearer capability: whoever holds it can act as (member_id,
-    channel) with the given role. Never log the token value — this function
-    returns it to the caller and nowhere else.
+    ``channel`` remains part of the legacy row shape for observability and old
+    databases, but the token is now resolved globally by ``member_id``. When
+    ``reuse_existing`` is true (the connect path), an active session for this
+    agent is refreshed and returned instead of minting a second bearer token.
+    Role is 'primary' (full capability) or 'read_only' (poll/history only —
+    rejects send/ack/retract).
+
+    The token is a bearer capability: whoever holds it can act as the agent
+    identified by ``member_id`` in any channel where that agent is a member,
+    with the given role. Never log the token value — this function returns it
+    to the caller and nowhere else.
     """
+    if reuse_existing:
+        existing = db.execute(
+            "SELECT session_token FROM sessions "
+            "WHERE member_id = ? AND revoked_at IS NULL "
+            "ORDER BY last_seen DESC, connected_at DESC LIMIT 1",
+            (member_id,),
+        ).fetchone()
+        if existing:
+            # A connect is a primary agent session. Refresh process metadata so
+            # the one global session continues to describe the live process;
+            # retain the original channel for compatibility with old rows.
+            db.execute(
+                "UPDATE sessions SET role = ?, pid = ?, fingerprint = ?, "
+                "last_seen = ? WHERE session_token = ?",
+                (role, pid, fingerprint, now_iso(), existing["session_token"]),
+            )
+            return existing["session_token"]
+
     # Use secrets (CSPRNG) not random.choices — the local boundary is
     # trusted today but SSE remote exposure would leak predictable tokens.
     token = "s_" + secrets.token_hex(16)
@@ -853,13 +1013,17 @@ def _mint_session_token(db, member_id: str, channel: str,
 
 
 def _get_session(db, channel: str, session_token: str):
-    """Look up a session. Returns row or None. Rejects revoked tokens."""
+    """Look up a session globally. Returns row or None. Rejects revoked tokens.
+
+    ``channel`` remains in the signature for callers and legacy compatibility,
+    but is deliberately not an authentication constraint: a global agent
+    session must work in every channel where that agent has membership.
+    """
     if not session_token:
         return None
     row = db.execute(
-        "SELECT * FROM sessions WHERE session_token = ? AND channel = ? "
-        "AND revoked_at IS NULL",
-        (session_token, channel),
+        "SELECT * FROM sessions WHERE session_token = ? AND revoked_at IS NULL",
+        (session_token,),
     ).fetchone()
     return row
 
@@ -913,6 +1077,8 @@ def nth_connect(
     Returns a JSON object with:
       - "channel": the channel code (remember this for all subsequent calls)
       - "member_id": your unique ID (remember this too)
+      - "reclaim_secret": the private secret to reuse this identity on
+        subsequent channel connects (returned for registered agents)
       - "action": "created" or "joined"
       - "members": list of current members (names, skills, summaries)
       - "recent_messages": last few messages for context
@@ -959,9 +1125,45 @@ def nth_connect(
     # caller), behaviour is unchanged.
     reclaiming = bool(resume_member_id and resume_member_id.strip())
     reclaimed_existing = False
-    member_id = resume_member_id.strip() if reclaiming else generate_member_id()
     now = now_iso()
     db = get_db()
+    if reclaiming:
+        member_id = resume_member_id.strip()
+
+    # A registered agent is globally reclaimable, so authenticate it before
+    # looking at the channel-local member row. Otherwise the first connect to
+    # a new channel could claim a known canonical id without its secret.
+    registered_agent = None
+    if reclaiming:
+        registered_agent = db.execute(
+            "SELECT reclaim_secret FROM agents WHERE id = ?", (member_id,)
+        ).fetchone()
+        if registered_agent:
+            stored_secret = ((registered_agent["reclaim_secret"]
+                              if "reclaim_secret" in registered_agent.keys()
+                              else "") or "")
+            supplied_secret = (reclaim_secret or "").strip()
+            if not stored_secret or not supplied_secret or not \
+                    secrets.compare_digest(stored_secret, supplied_secret):
+                return json.dumps({
+                    "error": "Cannot reclaim this identity: invalid or "
+                             "missing reclaim_secret."})
+        else:
+            # An unknown requested id is never honored: otherwise a caller
+            # could claim an arbitrary canonical identity on first join. Keep
+            # the explicit human-row rejection, then fall through to a fresh
+            # self-registration with a new globally unique id.
+            requested_row = db.execute(
+                "SELECT kind FROM members WHERE id = ? AND channel = ?",
+                (member_id, channel),
+            ).fetchone()
+            if requested_row and (
+                    (requested_row["kind"] if "kind" in requested_row.keys()
+                     else "agent") or "agent") != "agent":
+                return json.dumps({"error": "Cannot reclaim this identity."})
+            reclaiming = False
+
+    response_reclaim_secret = ""
 
     try:
         existing = _get_channel(db, channel)
@@ -989,23 +1191,6 @@ def nth_connect(
                         (existing_row["kind"] if "kind" in existing_row.keys()
                          else "agent") or "agent") != "agent":
                     return json.dumps({"error": "Cannot reclaim this identity."})
-                # Reclaim also requires the supervisor-issued per-spawn secret
-                # (never exposed via the public roster or any API response) —
-                # knowing a public member_id alone must not be enough to mint a
-                # second primary session as that agent.
-                if reclaimed_existing:
-                    agent_row = db.execute(
-                        "SELECT reclaim_secret FROM agents WHERE id = ?",
-                        (member_id,)).fetchone()
-                    stored_secret = ((agent_row["reclaim_secret"]
-                                      if agent_row and "reclaim_secret" in agent_row.keys()
-                                      else "") or "")
-                    supplied_secret = (reclaim_secret or "").strip()
-                    if not stored_secret or not supplied_secret or not \
-                            secrets.compare_digest(stored_secret, supplied_secret):
-                        return json.dumps({
-                            "error": "Cannot reclaim this identity: invalid or "
-                                     "missing reclaim_secret."})
 
             # Check member count (all members who ever joined). Skip for a
             # reclaim of an already-counted own row — otherwise a placed agent
@@ -1032,7 +1217,11 @@ def nth_connect(
                         "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
                         (now, member_id, channel))
             else:
-                # Join existing channel (retry once on member_id collision)
+                # Reserve the global identity before creating its channel
+                # presence. The INSERT-authoritative helper retries any
+                # concurrent agents-PK race without exposing another secret.
+                member_id, response_reclaim_secret = _register_agent_identity(
+                    db, name, model, now)
                 try:
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
@@ -1040,7 +1229,13 @@ def nth_connect(
                         (member_id, channel, name, summary, skills, now, now),
                     )
                 except sqlite3.IntegrityError:
-                    member_id = generate_member_id()
+                    db.execute(
+                        "DELETE FROM agents WHERE id = ? AND managed = 0 "
+                        "AND reclaim_secret = ?",
+                        (member_id, response_reclaim_secret),
+                    )
+                    member_id, response_reclaim_secret = _register_agent_identity(
+                        db, name, model, now)
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1057,6 +1252,7 @@ def nth_connect(
                     "VALUES (?, ?, ?, ?, ?)",
                     (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
                 )
+            _ensure_agent_inbox_membership(db, member_id, now)
             db.commit()
             action = "reclaimed" if (reclaiming and reclaimed_existing) else "joined"
         else:
@@ -1075,6 +1271,8 @@ def nth_connect(
                     (member_id, channel, name, summary, skills, now, now),
                 )
             else:
+                member_id, response_reclaim_secret = _register_agent_identity(
+                    db, name, model, now)
                 try:
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
@@ -1082,7 +1280,13 @@ def nth_connect(
                         (member_id, channel, name, summary, skills, now, now),
                     )
                 except sqlite3.IntegrityError:
-                    member_id = generate_member_id()
+                    db.execute(
+                        "DELETE FROM agents WHERE id = ? AND managed = 0 "
+                        "AND reclaim_secret = ?",
+                        (member_id, response_reclaim_secret),
+                    )
+                    member_id, response_reclaim_secret = _register_agent_identity(
+                        db, name, model, now)
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1104,6 +1308,7 @@ def nth_connect(
                     "UPDATE channels SET pinned_message_id = ? WHERE code = ?",
                     (pin_cur.lastrowid, channel),
                 )
+            _ensure_agent_inbox_membership(db, member_id, now)
             db.commit()
             action = "created"
 
@@ -1124,7 +1329,15 @@ def nth_connect(
                 "UPDATE members SET model = ? WHERE id = ? AND channel = ?",
                 (model, member_id, channel),
             )
-            db.commit()
+        if reclaiming and registered_agent:
+            response_reclaim_secret = ((registered_agent["reclaim_secret"]
+                                        if "reclaim_secret" in registered_agent.keys()
+                                        else "") or "")
+            db.execute(
+                "UPDATE agents SET last_active_at = ? WHERE id = ?",
+                (now, member_id),
+            )
+        db.commit()
 
         # Gather current state for the joiner
         members = db.execute(
@@ -1155,19 +1368,20 @@ def nth_connect(
                        allow_all_seeing=False)
         ][:10]
 
-        # Set watermark to current latest message. Use the true latest id
-        # (including any hidden DMs) so the joiner's cursor starts past them —
-        # a DM sent before they joined must never surface on their first poll.
+        # Initialize only a newly-created channel presence to the current
+        # latest message. A reclaimed presence already has the authoritative
+        # per-channel cursor in members.last_read; resetting it on reconnect
+        # would discard unread work (and the old session cursor is global).
         latest_id = recent_raw[0]["id"] if recent_raw else 0
-        db.execute(
-            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-            (latest_id, member_id, channel),
-        )
+        if not (reclaiming and reclaimed_existing):
+            db.execute(
+                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+                (latest_id, member_id, channel),
+            )
 
-        # v6: mint a primary session token for this connect. Clients that
-        # pass it to subsequent RPCs get per-session watermarks and author
-        # provenance. Clients that ignore it see legacy (member_id-only)
-        # behavior — backward-compatible.
+        # Mint or refresh the agent-global primary session for this connect.
+        # The channel-local read cursor lives in members.last_read; the
+        # session carries capability, provenance, and liveness only.
         session_pid = None
         try:
             session_pid = int(os.environ.get("CLAUDE_PID") or os.getpid())
@@ -1184,14 +1398,22 @@ def nth_connect(
             or os.environ.get("CLAUDE_SESSION_ID")
             or ""
         )[:64]
+        existing_global_session = db.execute(
+            "SELECT 1 FROM sessions WHERE member_id = ? AND revoked_at IS NULL "
+            "LIMIT 1", (member_id,)
+        ).fetchone()
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
+            reuse_existing=True,
         )
-        db.execute(
-            "UPDATE sessions SET last_read = ? WHERE session_token = ?",
-            (latest_id, session_token),
-        )
+        # Keep the legacy sessions.last_read column initialized for old
+        # observers, but it is no longer a read source of truth.
+        if not existing_global_session:
+            db.execute(
+                "UPDATE sessions SET last_read = ? WHERE session_token = ?",
+                (latest_id, session_token),
+            )
         db.commit()
 
         # Fetch objective (pinned message) if any
@@ -1237,6 +1459,8 @@ def nth_connect(
                 f"(3) Never call {TOOL_PREFIX}_end or {TOOL_PREFIX}_cull without explicit user permission."
             ),
         }
+        if response_reclaim_secret:
+            resp["reclaim_secret"] = response_reclaim_secret
         if objective:
             resp["objective"] = objective
         if action == "created":
@@ -1361,6 +1585,13 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
             "SELECT id, name FROM members WHERE channel = ?",
             (channel,),
         ).fetchall()
+        try:
+            global_names = {
+                row["id"]: (row["name"] or "").strip()
+                for row in db.execute("SELECT id, name FROM agents").fetchall()
+            }
+        except sqlite3.Error:
+            global_names = {}
         content_lower = content.lower()
         all_ids = [m["id"] for m in all_members]
         # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
@@ -1396,29 +1627,30 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
                     if mid not in hit_bang:
                         bang_ids.append(mid)
                         hit_bang.add(mid)
-            # Skip a member named literally "all" — the @all/!all shortcuts
-            # already handle that keyword; matching it as a regular name
-            # would double-count. "all" is also a reserved display name
-            # we refuse during identity registration on the web side.
-            if name_stripped.lower() == "all" or not name_stripped:
-                continue
-            literal_names_lower.add(name_stripped.lower())
-            name_esc = re.escape(name_stripped)
-            if not at_all and mid not in hit_at:
-                at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if at_pat.search(content):
-                    mention_ids.append(mid)
-                    hit_at.add(mid)
-            if mid not in hit_ref:
-                hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if hash_pat.search(content):
-                    ref_ids.append(mid)
-                    hit_ref.add(mid)
-            if not bang_all and mid not in hit_bang:
-                bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if bang_pat.search(content):
-                    bang_ids.append(mid)
-                    hit_bang.add(mid)
+            # Match both the channel-local presence name and the global agent
+            # display name. The roster query above keeps this strictly scoped
+            # to members of the current channel.
+            candidate_names = {name_stripped, global_names.get(mid, "")}
+            for candidate in candidate_names:
+                if candidate.lower() == "all" or not candidate:
+                    continue
+                literal_names_lower.add(candidate.lower())
+                name_esc = re.escape(candidate)
+                if not at_all and mid not in hit_at:
+                    at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if at_pat.search(content):
+                        mention_ids.append(mid)
+                        hit_at.add(mid)
+                if mid not in hit_ref:
+                    hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if hash_pat.search(content):
+                        ref_ids.append(mid)
+                        hit_ref.add(mid)
+                if not bang_all and mid not in hit_bang:
+                    bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if bang_pat.search(content):
+                        bang_ids.append(mid)
+                        hit_bang.add(mid)
 
         # Guest-stem fallback: if the roster has `gabe-guest` (or the
         # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
@@ -1529,6 +1761,26 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
     db = get_db()
     try:
+        requested_channel = channel
+        ch = _get_channel(db, requested_channel)
+        if not ch:
+            return json.dumps({"error": f'Channel "{channel}" not found.'})
+        if ch["status"] == "ended":
+            return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+        # A reply to a recipient-scoped message in the global inbox is itself
+        # a global DM. Message ids are database-global, so check the inbox
+        # before validating the caller's topic-local target; this is the
+        # explicit leak-prevention boundary for replies from topic Y.
+        dm_reply_target = None
+        if reply_to is not None:
+            dm_reply_target = db.execute(
+                "SELECT id, recipients FROM messages WHERE id = ? AND channel = ?",
+                (reply_to, AGENT_INBOX_CHANNEL),
+            ).fetchone()
+            if dm_reply_target and parse_recipients(dm_reply_target["recipients"]):
+                channel = AGENT_INBOX_CHANNEL
+
         ch = _get_channel(db, channel)
         if not ch:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
@@ -1767,21 +2019,35 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         db.close()
 
 
-def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
-    """Resolve a comma-separated `to` string of names and/or member_ids to a
-    de-duplicated list of recipient member_ids. Returns (recipient_ids,
-    unresolved_tokens). Matching is by exact member_id first, then
-    case-insensitive display name; a leading '@' the caller may have typed is
-    tolerated. Names that collide keep the first roster match."""
-    roster = db.execute(
-        "SELECT id, name FROM members WHERE channel = ?", (channel,)
-    ).fetchall()
+def _resolve_recipients(db, channel: str, to: str,
+                        global_scope: bool = False) -> tuple[list, list]:
+    """Resolve recipient names/ids, optionally against the global registry.
+
+    Topic sends retain channel-local name resolution. Global DMs resolve over
+    ``agents`` plus all active member presences, with canonical agent rows
+    taking precedence for duplicate ids/names. Every connected agent is also
+    placed in ``AGENT_INBOX_CHANNEL`` by the connect path, so a resolved agent
+    has the inbox capability required to receive the message.
+    """
+    if global_scope:
+        roster = db.execute(
+            "SELECT id, name FROM agents WHERE archived_at IS NULL"
+        ).fetchall()
+        roster += db.execute(
+            "SELECT id, name FROM members WHERE active = 1"
+        ).fetchall()
+    else:
+        roster = db.execute(
+            "SELECT id, name FROM members WHERE channel = ?", (channel,)
+        ).fetchall()
     by_id = {r["id"] for r in roster}
     by_name: dict = {}
     for r in roster:
         nm = (r["name"] or "").strip().lower()
         if nm:
-            by_name.setdefault(nm, r["id"])
+            ids = by_name.setdefault(nm, [])
+            if r["id"] not in ids:
+                ids.append(r["id"])
     recipient_ids: list = []
     unresolved: list = []
     for tok in (to or "").split(","):
@@ -1792,8 +2058,21 @@ def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
         rid = None
         if cand in by_id:
             rid = cand
-        elif cand.lower() in by_name:
-            rid = by_name[cand.lower()]
+        else:
+            ids = by_name.get(cand.lower(), [])
+            if len(ids) == 1:
+                rid = ids[0]
+            elif len(ids) > 1 and not global_scope:
+                # Channel-local resolution keeps its legacy first-match — the
+                # roster is small and co-located, so collisions are visible.
+                rid = ids[0]
+            # GLOBAL scope + a name matching >1 distinct id → AMBIGUOUS: leave
+            # rid None so it is REJECTED (falls into `unresolved`). Silently
+            # picking one identity enabled DM misdirection via global display-
+            # name squatting — an attacker pre-registering a victim's name in
+            # any throwaway channel could intercept DMs addressed by name
+            # (LOTC/Aragorn, critical). The sender must disambiguate by
+            # member_id.
         if rid is None:
             unresolved.append(t)
         elif rid not in recipient_ids:
@@ -1867,15 +2146,17 @@ def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_dm")
-def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: str = "", reply_to: int | None = None) -> str:
+def nth_dm(channel: str = "", member_id: str = "", message: str = "",
+           to: str = "", session_token: str = "",
+           reply_to: int | None = None) -> str:
     """Send a PRIVATE direct message to specific member(s) — a REAL DM.
 
     Unlike trio_send (which broadcasts to the whole channel), trio_dm is
-    addressed: the server stores the recipient list and WITHHOLDS the message
-    from every non-recipient at delivery time. Only the sender, the named
-    recipients, and the human operator (all-seeing, for audit) will ever see
-    it via trio_poll / trio_history / trio_pounds / the dashboard / the
-    monitor. Other agents' polls never return it.
+    addressed: the server stores the recipient list in the global
+    ``AGENT_INBOX_CHANNEL`` transport and WITHHOLDS the message from every
+    non-recipient at delivery time. Only the sender, the named recipients,
+    and the human operator (all-seeing, for audit) will ever see it via
+    inbox-scoped reads. Other agents' polls never return it.
 
     Boundary strength depends on deployment (see FUTURE_IMPROVEMENTS #9):
     against a well-behaved agent — which only ever touches the channel through
@@ -1892,18 +2173,16 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         are woken by nothing they can see, so their monitor stays quiet.
 
     Args:
-        channel: Channel code
+        channel: Legacy topic-channel parameter. Optional and ignored for
+            storage/auth; retained so old callers continue to work.
         member_id: Your member ID (from trio_connect)
         message: The private message (max 4000 chars). @/#/! sigils still parse.
         to: Comma-separated recipient names and/or member_ids
             (e.g. "Reviewer, x1y2z3"). Names match case-insensitively.
         session_token: Your session token (same capability check as trio_send).
-        reply_to: Optional id of a message this replies to (must be in-channel).
+        reply_to: Optional id of a message this replies to (must be in the
+            global inbox transport).
     """
-    err = validate_channel_code(channel)
-    if err:
-        return json.dumps({"error": err})
-
     if not message or not message.strip():
         return json.dumps({"error": "Message cannot be empty."})
     if len(message) > MAX_MESSAGE_LENGTH:
@@ -1913,6 +2192,7 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
 
     db = get_db()
     try:
+        channel = AGENT_INBOX_CHANNEL
         ch = _get_channel(db, channel)
         if not ch:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
@@ -1939,14 +2219,19 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         # Resolve recipients against the roster BEFORE inserting. A DM with no
         # resolvable recipient must be rejected — storing '[]' would silently
         # turn it into a broadcast (a privacy inversion / leak).
-        recipient_ids, unresolved = _resolve_recipients(db, channel, to)
+        recipient_ids, unresolved = _resolve_recipients(
+            db, channel, to, global_scope=True)
         if unresolved:
-            return json.dumps({"error": f"Unknown recipient(s): {', '.join(unresolved)}. "
-                                        "Use names or member_ids from the roster (trio_roster)."})
+            return json.dumps({"error": f"Unknown or ambiguous recipient(s): {', '.join(unresolved)}. "
+                                        "A display name that matches more than one global identity "
+                                        "is rejected (never guessed) — address it by exact member_id "
+                                        "from trio_roster. The response's `recipients` field shows the "
+                                        "resolved member_ids so you can confirm who received the DM."})
         if not recipient_ids:
             return json.dumps({"error": "trio_dm requires at least one recipient in `to`."})
 
-        # Validate reply_to (must reference an existing in-channel message).
+        # Validate reply_to against the global transport, never the caller's
+        # legacy topic-channel argument.
         if reply_to is not None:
             target = db.execute(
                 "SELECT id FROM messages WHERE id = ? AND channel = ?",
@@ -2013,6 +2298,10 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         recipient_names = []
         for rid in recipient_ids:
             rm = _get_member(db, channel, rid)
+            if not rm:
+                rm = db.execute(
+                    "SELECT name FROM agents WHERE id = ?", (rid,)
+                ).fetchone()
             recipient_names.append(rm["name"] if rm and rm["name"] else rid)
         _console("🔒", channel, f"{member['name']} → {', '.join(recipient_names)} (DM): {content}", 35)
 
@@ -2359,9 +2648,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     from_name_lower = from_name.strip().lower() if from_name else ""
     db = get_db()
 
-    # v6: resolve session_token up front. If provided, watermark lives in
-    # sessions.last_read (per-session) and auto_ack defaults to False.
-    # If not provided, watermark lives in members.last_read (legacy).
+    # Resolve session_token up front. The token is a global capability; the
+    # read cursor is always the target channel's members.last_read.
     sess_row = None
     if session_token:
         sess_row = _get_session(db, channel, session_token)
@@ -2383,13 +2671,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
 
-            # Current watermark depends on whether the caller uses a session token
-            if sess_row is not None:
-                # Re-read sessions row in case an ack bumped it between iterations
-                fresh = _get_session(db, channel, session_token)
-                current_watermark = fresh["last_read"] if fresh else sess_row["last_read"]
-            else:
-                current_watermark = member["last_read"]
+            # Read state is per agent/channel, even though the capability
+            # session is global to the agent.
+            current_watermark = member["last_read"]
 
             ch = _get_channel(db, channel)
             if not ch:
@@ -2514,8 +2798,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
                 # Advance watermark behavior depends on session mode:
                 #   - session_token present: NEVER auto-advance. Caller must
-                #     call nth_ack explicitly. This is the split-ack path
-                #     that prevents rogue-holder watermark desync.
+                #     call nth_ack explicitly, but that ack updates this
+                #     channel's members.last_read row.
                 #   - no session_token, auto_ack=True: legacy behavior —
                 #     advance members.last_read to the batch max.
                 #   - no session_token, auto_ack=False: don't advance.
@@ -2686,7 +2970,8 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
 
-        # v6: session_token resolves which watermark to advance
+        # A session token authenticates the agent globally; the target
+        # channel's members.last_read remains the sole read watermark.
         sess = None
         if session_token:
             sess = _get_session(db, channel, session_token)
@@ -2694,9 +2979,7 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
                 return json.dumps({"error": "Invalid or revoked session_token."})
             if sess["member_id"] != member_id:
                 return json.dumps({"error": "session_token does not match member_id."})
-            current = sess["last_read"]
-        else:
-            current = member["last_read"]
+        current = member["last_read"]
 
         # force=True allows walking back the watermark (e.g., to recover from
         # a rogue sub-agent that advanced past unread messages). Without force,
@@ -2720,15 +3003,14 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if through_id < 0:
             return json.dumps({"error": f"through_id cannot be negative."})
 
+        db.execute(
+            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+            (through_id, member_id, channel),
+        )
         if sess is not None:
             db.execute(
-                "UPDATE sessions SET last_read = ?, last_seen = ? WHERE session_token = ?",
-                (through_id, now_iso(), session_token),
-            )
-        else:
-            db.execute(
-                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-                (through_id, member_id, channel),
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now_iso(), session_token),
             )
         db.commit()
         return json.dumps({"ok": True, "watermark": through_id, "force": force if force else None})
@@ -2785,10 +3067,15 @@ def nth_retract(channel: str, member_id: str, message_id: int, reason: str = "",
             if not session_token:
                 return json.dumps({"error": "This message has a session-bound authorship. "
                                   "Provide the session_token that originally posted it to retract."})
+            # Revalidate the supplied token even when it equals author_session —
+            # a REVOKED authoring token must not still be able to retract (a
+            # revoked session should never act; this matters more post-P2 with
+            # one global session per agent). _get_session rejects revoked/unknown
+            # tokens. Then confirm it is the authoring session.
+            sess = _get_session(db, channel, session_token)
+            if not sess or sess["member_id"] != member_id:
+                return json.dumps({"error": "Invalid or mismatched session_token."})
             if session_token != msg["author_session"]:
-                sess = _get_session(db, channel, session_token)
-                if not sess or sess["member_id"] != member_id:
-                    return json.dumps({"error": "Invalid or mismatched session_token."})
                 return json.dumps({"error": "session_token did not author this message. "
                                   "Only the authoring session can retract."})
         else:
@@ -3720,6 +4007,13 @@ def nth_rename(channel: str, member_id: str, new_name: str, session_token: str =
             return json.dumps({"error": "Invalid or revoked session_token."})
         if sess["member_id"] != member_id:
             return json.dumps({"error": "session_token does not match member_id."})
+        # rename mutates the member's display name — a read_only sub-agent
+        # token must not be able to do it (it can't send/claim either). Mirrors
+        # the primary-role gate on send/dm/ask/claim. Closes a read_only-role
+        # gap that is doubly relevant post-P1: a rename toward a squatted name
+        # feeds the global-name DM-misdirection surface.
+        if sess["role"] != "primary":
+            return json.dumps({"error": f"session_token role '{sess['role']}' cannot rename. Use a primary token."})
 
         old_name = member["name"] or member_id
         if old_name == new_name:
@@ -4040,6 +4334,12 @@ def nth_end(channel: str, member_id: str) -> str:
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
+    # P3: the inbox is the single global DM transport every agent shares —
+    # ending it would take down direct messages for EVERYONE with no un-end
+    # path (LOTC/Sauron). It is not an ordinary channel; refuse.
+    if channel == AGENT_INBOX_CHANNEL:
+        return json.dumps({"error": "The global DM inbox cannot be ended — it is the "
+                                    "shared direct-message transport for every agent."})
 
     db = get_db()
     try:
@@ -4085,10 +4385,13 @@ def nth_list() -> str:
     """List all channels on this machine."""
     db = get_db()
     try:
+        # Hide the global DM inbox transport — it is not a workspace channel
+        # and must not be listed as one (nor accidentally ended). P3/LOTC.
         channels = db.execute(
             "SELECT c.code, c.status, c.created_at, c.updated_at, "
             "(SELECT COUNT(*) FROM messages m WHERE m.channel = c.code) as message_count "
-            "FROM channels c ORDER BY c.updated_at DESC",
+            "FROM channels c WHERE c.code != ? ORDER BY c.updated_at DESC",
+            (AGENT_INBOX_CHANNEL,),
         ).fetchall()
 
         # Compute active member counts in Python to avoid SQLite ISO 8601 parsing issues

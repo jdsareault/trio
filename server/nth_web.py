@@ -487,6 +487,10 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
     row's own freshness keeps the tuple coherent: working ⇒ fresh (never a
     live:false, busy:true payload downstream).
     """
+    # SQL intentionally emits one row per channel presence/session so each
+    # row's activity vs. turn-end pair stays coherent. This dict is the
+    # explicit dedup boundary: callers receive one tuple per global agent even
+    # during a legacy multi-session migration window.
     out: Dict[str, Tuple[bool, bool]] = {}
     try:
         rows = db.execute(
@@ -496,7 +500,7 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
             "  s.blocked_since AS blocked_since "
             "FROM members m "
             "LEFT JOIN sessions s "
-            "  ON s.member_id = m.id AND s.channel = m.channel AND s.revoked_at IS NULL"
+            "  ON s.member_id = m.id AND s.revoked_at IS NULL"
         ).fetchall()
     except sqlite3.Error:
         return out
@@ -589,6 +593,13 @@ def _parse_sigils_against_roster(
         "SELECT id, name FROM members WHERE channel = ?",
         (channel,),
     ).fetchall()
+    try:
+        global_names = {
+            row["id"]: (row["name"] or "").strip()
+            for row in db.execute("SELECT id, name FROM agents").fetchall()
+        }
+    except sqlite3.Error:
+        global_names = {}
     lowered = content.lower()
     all_ids = [m["id"] for m in members]
     at_all   = re.search(r"@all(?:\b|$)", lowered) is not None
@@ -622,22 +633,26 @@ def _parse_sigils_against_roster(
                 if mid not in hit_bang:
                     bang_ids.append(mid)
                     hit_bang.add(mid)
-        if name.lower() == "all" or not name:
-            continue
-        literal_names_lower.add(name.lower())
-        name_esc = re.escape(name)
-        if not at_all and mid not in hit_at:
-            if re.search(r"@" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                mention_ids.append(mid)
-                hit_at.add(mid)
-        if mid not in hit_ref:
-            if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                ref_ids.append(mid)
-                hit_ref.add(mid)
-        if not bang_all and mid not in hit_bang:
-            if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                bang_ids.append(mid)
-                hit_bang.add(mid)
+        # Match both the channel-local presence name and the global agent
+        # display name, while keeping the candidate set channel-scoped.
+        candidate_names = {name, global_names.get(mid, "")}
+        for candidate in candidate_names:
+            if candidate.lower() == "all" or not candidate:
+                continue
+            literal_names_lower.add(candidate.lower())
+            name_esc = re.escape(candidate)
+            if not at_all and mid not in hit_at:
+                if re.search(r"@" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    mention_ids.append(mid)
+                    hit_at.add(mid)
+            if mid not in hit_ref:
+                if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    ref_ids.append(mid)
+                    hit_ref.add(mid)
+            if not bang_all and mid not in hit_bang:
+                if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    bang_ids.append(mid)
+                    hit_bang.add(mid)
 
     # Guest-stem fallback. Group guest members by stem so we can detect
     # ambiguity (two guests named "Gabe (Guest)" / "gabe-guest" would both
@@ -735,13 +750,17 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
     )
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
-    # Revoke their sessions so a lingering token can't be reused if the same
-    # member_id ever re-joins (defence-in-depth; also stops row build-up).
-    db.execute(
-        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-        "AND revoked_at IS NULL",
-        (now, channel, target_id),
-    )
+    # Sessions are agent-global: revoke only when this was the final channel
+    # presence, matching nth_server._purge_member.
+    remaining_presence = db.execute(
+        "SELECT 1 FROM members WHERE id = ? LIMIT 1", (target_id,)
+    ).fetchone()
+    if not remaining_presence:
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, target_id),
+        )
 
     released_ids = [r["id"] for r in released]
     msg = f"[culled] {target_name} ({target_id}) removed from channel"
@@ -880,7 +899,60 @@ def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[st
             for r in rows]
 
 
-def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+def resolve_display_name(db: sqlite3.Connection, member_id: str,
+                         cache: Optional[Dict[str, str]] = None) -> str:
+    """Resolve a global agent/member id for web display surfaces.
+
+    Global agent names win over channel-local presence names. For legacy ids
+    without an ``agents`` row, use the lexicographically greatest non-empty
+    member name across channels, then fall back to the id itself. This is
+    presentation-only; callers still use the id for auth and visibility.
+    """
+    ident = str(member_id or "")
+    if not ident:
+        return ident
+    if cache is not None and ident in cache:
+        return cache[ident]
+
+    def row_name(row):
+        if row is None:
+            return ""
+        try:
+            return (row["name"] or "").strip()
+        except (IndexError, KeyError, TypeError):
+            return (row[0] or "").strip()
+
+    try:
+        agent = db.execute(
+            "SELECT name FROM agents WHERE id = ?", (ident,)
+        ).fetchone()
+        name = row_name(agent)
+        if name:
+            if cache is not None:
+                cache[ident] = name
+            return name
+    except sqlite3.Error:
+        pass
+
+    try:
+        member = db.execute(
+            "SELECT MAX(name) AS name FROM members "
+            "WHERE id = ? AND COALESCE(name, '') <> ''", (ident,)
+        ).fetchone()
+        name = row_name(member)
+        if name:
+            if cache is not None:
+                cache[ident] = name
+            return name
+    except sqlite3.Error:
+        pass
+    if cache is not None:
+        cache[ident] = ident
+    return ident
+
+
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row,
+                   name_cache: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Build the SSE 'message' payload from a messages row. Shared by the
     history prime and the live tick so both ship identical shapes, including
     the selectable-answers fields (choices/selection/reply_to). Tolerant of
@@ -890,7 +962,7 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "type": "message",
         "id": r["id"],
         "member_id": r["member_id"],
-        "member_name": r["member_name"] or r["member_id"],
+        "member_name": resolve_display_name(db, r["member_id"], name_cache),
         "content": r["content"] or "",
         "mentions": parse_mentions_json(r["mentions"]),
         "refs": parse_mentions_json(r["refs"] if "refs" in keys else ""),
@@ -1000,7 +1072,8 @@ class EventHub:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
-            members = self._fetch_roster(db)
+            name_cache: Dict[str, str] = {}
+            members = self._fetch_roster(db, name_cache)
             # Stamped for the same reason as message events (see the comment
             # a few lines below on _message_event's channel field): the
             # cross-channel workspace stream multiplexes every hub's roster
@@ -1018,7 +1091,7 @@ class EventHub:
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                ev = _message_event(db, r)
+                ev = _message_event(db, r, name_cache)
                 # Stamp the channel this hub is scoped to. Needed so the
                 # cross-channel workspace SSE stream (_serve_workspace_sse,
                 # which multiplexes every channel's hub into one connection)
@@ -1062,10 +1135,11 @@ class EventHub:
                     self._subs.remove(d)
 
     # ── DB poll ──
-    def _fetch_roster(self, db: sqlite3.Connection) -> List[Dict[str, Any]]:
-        # v6.2+ session-mode clients write sessions.last_read / last_seen
-        # and never touch members.*. Reconcile like nth_monitor.py:171-183
-        # so the web console sees real watermark + liveness movement.
+    def _fetch_roster(self, db: sqlite3.Connection,
+                      name_cache: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        # Read state is per (agent, channel), so members.last_read is the
+        # web console's sole watermark. Session rows still provide live
+        # heartbeat/observability fields; their legacy last_read is global.
         # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
         try:
             rows = db.execute(
@@ -1074,7 +1148,6 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, m.model AS model, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen, "
                 "MAX(s.last_turn_end) AS session_last_turn_end, "
                 "MAX(s.last_tool_name) AS last_tool_name, "
@@ -1083,7 +1156,7 @@ class EventHub:
                 "MAX(s.blocked_since) AS blocked_since "
                 "FROM members m "
                 "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  ON s.member_id = m.id "
                 "  AND s.revoked_at IS NULL "
                 "WHERE m.channel = ? "
                 "GROUP BY m.id, m.channel "
@@ -1096,11 +1169,10 @@ class EventHub:
                 "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen "
                 "FROM members m "
                 "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  ON s.member_id = m.id "
                 "  AND s.revoked_at IS NULL "
                 "WHERE m.channel = ? "
                 "GROUP BY m.id, m.channel "
@@ -1135,10 +1207,7 @@ class EventHub:
             pass
         out = []
         for r in rows:
-            effective_last_read = max(
-                r["member_last_read"] or 0,
-                r["session_last_read"] or 0,
-            )
+            effective_last_read = r["member_last_read"] or 0
             m_ls = r["member_last_seen"] or ""
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
@@ -1157,7 +1226,7 @@ class EventHub:
             context_pct, context_tokens = context_by_id.get(r["id"], (None, None))
             out.append({
                 "id": r["id"],
-                "name": r["name"] or r["id"],
+                "name": resolve_display_name(db, r["id"], name_cache),
                 "avatar_url": character_avatars.get(r["id"], ""),
                 "status_text": r["status_text"] or "",
                 "last_seen": effective_last_seen,
@@ -1223,6 +1292,7 @@ class EventHub:
 
             while not self._stop.is_set():
                 try:
+                    name_cache: Dict[str, str] = {}
                     prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
@@ -1231,7 +1301,7 @@ class EventHub:
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        ev = _message_event(db, r)
+                        ev = _message_event(db, r, name_cache)
                         ev["channel"] = self.channel  # see prime-payload comment above
                         self._broadcast(ev)
                         self.last_msg_id = r["id"]
@@ -1249,13 +1319,13 @@ class EventHub:
                         (self.channel, prev_last, self._change_scan, self._change_scan),
                     ).fetchall()
                     for r in changed:
-                        ev = _message_event(db, r)
+                        ev = _message_event(db, r, name_cache)
                         ev["type"] = "message_update"
                         ev["channel"] = self.channel
                         self._broadcast(ev)
                     self._change_scan = scan_now
 
-                    members = self._fetch_roster(db)
+                    members = self._fetch_roster(db, name_cache)
                     snapshot = json.dumps(members, sort_keys=True)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
@@ -1426,12 +1496,16 @@ class StallWatchdog:
         # 1. Map the Claude session_id back to a trio member via the fingerprint
         #    captured at connect. Newest live session wins.
         sess = db.execute(
-            "SELECT s.member_id AS member_id, s.channel AS channel, "
+            "SELECT s.member_id AS member_id, m.channel AS channel, "
             "       COALESCE(m.kind, 'agent') AS kind "
             "FROM sessions s "
-            "JOIN members m ON m.id = s.member_id AND m.channel = s.channel "
+            "JOIN members m ON m.id = s.member_id "
             "WHERE s.fingerprint = ? AND s.revoked_at IS NULL "
-            "ORDER BY s.connected_at DESC LIMIT 1",
+            # Prefer the session's legacy channel as the single watchdog
+            # owner when that presence still exists; otherwise hand ownership
+            # to any surviving channel presence of the global agent.
+            "ORDER BY CASE WHEN m.channel = s.channel THEN 0 ELSE 1 END, "
+            "s.connected_at DESC LIMIT 1",
             (ev["session_id"],),
         ).fetchone()
 
@@ -1911,8 +1985,9 @@ def dm_audit_thread_key(message) -> str:
 def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
     """Create the private DM transport and place every managed agent in it.
 
-    This is an idempotent migration.  Existing agents become directly
-    messageable on the next hub start without acquiring a visible channel.
+    This is an idempotent migration. Existing canonical agents — whether
+    supervisor-managed or externally launched — become directly messageable
+    on the next hub start without acquiring a visible channel.
     """
     now = now_iso()
     conn.execute(
@@ -1920,7 +1995,7 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
         "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
     rows = conn.execute(
         "SELECT id, name, model, base_prompt FROM agents "
-        "WHERE managed = 1 AND archived_at IS NULL"
+        "WHERE archived_at IS NULL"
     ).fetchall()
     for row in rows:
         agent_id, name, model, base_prompt = row
@@ -2492,8 +2567,9 @@ def build_agent_preamble(name: str, channels: List[str], member_id: str = "",
         f"You are {name}, an agent in the Trio multi-agent workspace. You are "
         f"placed in these public channels: {chans}."
         + (f" Your private DM transport is #{AGENT_INBOX_CHANNEL}; it is hidden "
-           "from the workspace channel list. Reply to direct messages there "
-           "with trio_dm so only the human recipient can see them." if has_inbox else "")
+           "from the workspace channel list. Keep a monitor/poll on that inbox "
+           "while working in public channels; reply to direct messages with "
+           "trio_dm so only the intended recipients can see them." if has_inbox else "")
         + f"{connect_lines} Talk to a channel "
         "through the Trio MCP tools (trio_connect / trio_send / trio_poll), "
         "naming the target channel explicitly on each reply. These are MCP tools "
@@ -2677,6 +2753,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
         _token, ident, _is_new = self._resolve_identity()
         if is_all_seeing(ident.member_id):
             return True
+        if ch == AGENT_INBOX_CHANNEL:
+            # The hidden inbox is the global DM capability. A scoped web
+            # identity may access it only when it has an explicit inbox
+            # presence; topic placement alone is not sufficient.
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                inbox_member = db.execute(
+                    "SELECT 1 FROM members WHERE channel=? AND id=? AND active=1",
+                    (AGENT_INBOX_CHANNEL, ident.member_id),
+                ).fetchone()
+            finally:
+                db.close()
+            if inbox_member:
+                return True
         if self._default_channel and ch == self._default_channel:
             return True
         self._error(403, "not authorized for this channel")
@@ -3117,6 +3207,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 if rid not in recipient_ids:
                     recipient_ids.append(rid)
 
+        # Any addressed web send is a global DM, regardless of the topic
+        # channel in the request URL. A reply to an inbox DM follows the same
+        # rule even when the composer is still open on a topic view; the
+        # participant set is inherited below once the operator row exists.
+        storage_channel = AGENT_INBOX_CHANNEL if recipient_ids else self.channel
+        # Uploads are staged under the composer’s topic channel. If the send
+        # is later promoted to a global DM, retain that attachment storage
+        # channel while linking it to the inbox message; the attachment read
+        # path below validates the owning message’s global channel separately.
+        attachment_channel = self.channel
+
         raw_sel = body.get("selection")
         selection_json = None
         has_selection = raw_sel is not None
@@ -3180,14 +3281,37 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                # DM replies are global too. Do this lookup before choosing the
+                # operator presence so a reply from topic Y cannot leak back
+                # into Y. Explicit recipients win when the UI supplied them.
+                global_dm_target = None
+                if reply_to is not None and not recipient_ids:
+                    global_dm_target = db.execute(
+                        "SELECT member_id, recipients FROM messages "
+                        "WHERE id = ? AND channel = ?",
+                        (reply_to, AGENT_INBOX_CHANNEL),
+                    ).fetchone()
+                    if (global_dm_target and
+                            parse_recipients(global_dm_target["recipients"])):
+                        storage_channel = AGENT_INBOX_CHANNEL
+
+                op_id, op_name = ensure_operator_row(db, storage_channel, ident)
+                if global_dm_target and not recipient_ids:
+                    participants = list(dict.fromkeys([
+                        global_dm_target["member_id"],
+                        *parse_recipients(global_dm_target["recipients"]),
+                    ]))
+                    recipient_ids = [pid for pid in participants if pid != op_id]
+                    if not recipient_ids:
+                        recipient_ids = participants
                 now = now_iso()
 
-                # Validate reply_to references a real message in this channel.
+                # Validate reply_to references a real message in the chosen
+                # storage channel.
                 if reply_to is not None:
                     tgt = db.execute(
                         "SELECT id, choices FROM messages WHERE id = ? AND channel = ?",
-                        (reply_to, self.channel),
+                        (reply_to, storage_channel),
                     ).fetchone()
                     if not tgt:
                         db.execute("ROLLBACK")
@@ -3248,7 +3372,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         already = db.execute(
                             "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
                             "AND selection IS NOT NULL AND selection != '' LIMIT 1",
-                            (self.channel, reply_to),
+                            (storage_channel, reply_to),
                         ).fetchone()
                         if already:
                             db.execute("ROLLBACK")
@@ -3266,7 +3390,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     owned = db.execute(
                         f"SELECT id FROM attachments WHERE id IN ({placeholders}) "
                         "AND channel = ? AND member_id = ? AND message_id IS NULL",
-                        (*attachment_ids, self.channel, op_id),
+                        (*attachment_ids, attachment_channel, op_id),
                     ).fetchall()
                     if {r["id"] for r in owned} != set(attachment_ids):
                         db.execute("ROLLBACK")
@@ -3295,7 +3419,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "INSERT INTO tasks (channel, posted_by, status, description, "
                         " blocked_by, created_at, updated_at) "
                         "VALUES (?, ?, 'open', ?, '[]', ?, ?)",
-                        (self.channel, op_id, task_body, now, now),
+                        (storage_channel, op_id, task_body, now, now),
                     )
                     task_id = tcur.lastrowid
                     posted_content = f"[task #{task_id}] {task_body}"
@@ -3304,7 +3428,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # matching nth_send's behavior so web-operator posts carry the
                 # same wake semantics as MCP-agent posts.
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
-                    db, self.channel, posted_content
+                    db, storage_channel, posted_content
                 )
                 # A DM's recipients are auto-added to the ping set so they wake
                 # (they can see it); visibility stays governed by recipients.
@@ -3326,7 +3450,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "(channel, member_id, member_name, content, created_at, "
                     " mentions, refs, bangs, reply_to, selection, recipients) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.channel, op_id, op_name, posted_content, now,
+                    (storage_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
@@ -3341,11 +3465,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "UPDATE attachments SET message_id = ? "
                         "WHERE id = ? AND channel = ? AND member_id = ? "
                         "AND message_id IS NULL",
-                        [(msg_id, aid, self.channel, op_id) for aid in attachment_ids],
+                        [(msg_id, aid, attachment_channel, op_id) for aid in attachment_ids],
                     )
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                    (now, self.channel, op_id),
+                    (now, storage_channel, op_id),
                 )
                 db.execute("COMMIT")
             except sqlite3.Error:
@@ -3535,8 +3659,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "ORDER BY id DESC LIMIT 200",
                     (self.channel, like),
                 ).fetchall()
+            name_cache: Dict[str, str] = {}
             results = [{"id": r["id"], "member_id": r["member_id"],
-                        "member_name": r["member_name"] or r["member_id"],
+                        "member_name": resolve_display_name(db, r["member_id"], name_cache),
                         "content": r["content"] or "", "created_at": r["created_at"]}
                        for r in rows
                        if viewer_all_seeing or can_see(
@@ -3728,10 +3853,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _handle_dms(self, parsed) -> None:
         """Return the operator's unified, cross-channel DM surface.
 
-        Messages remain channel-backed for protocol compatibility.  This view
-        groups those rows above the channel dimension, yielding one operator
-        thread per agent plus a separate agent-to-agent audit section.  Passing
-        ``?with=<member_id>`` also returns the merged history for that thread.
+        New messages live in the global agent inbox; legacy topic-scattered DM
+        rows remain readable. This view groups both kinds above the channel
+        dimension, yielding one operator thread per agent plus a separate
+        agent-to-agent audit section. Passing ``?with=<member_id>`` also
+        returns the merged history for that thread.
         """
         ident = self._require_operator()
         if ident is None:
@@ -3752,13 +3878,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "ORDER BY m.id DESC LIMIT 2000",
                 (operator_id,),
             ).fetchall()
-            names: Dict[str, str] = {}
-            for r in db.execute("SELECT id, name FROM agents").fetchall():
-                names[r["id"]] = r["name"]
-            for r in db.execute(
-                    "SELECT id, MAX(name) AS name FROM members GROUP BY id").fetchall():
-                names.setdefault(r["id"], r["name"] or r["id"])
-            names[operator_id] = ident.display_name
+            name_cache: Dict[str, str] = {operator_id: ident.display_name}
+
+            def display_name(member_id: str) -> str:
+                if member_id not in name_cache:
+                    resolve_display_name(db, member_id, name_cache)
+                return name_cache[member_id]
+
             archive_rows = db.execute(
                 "SELECT thread_key, archived_through_id, archived_at "
                 "FROM dm_archives WHERE owner_id=?", (operator_id,)).fetchall()
@@ -3777,10 +3903,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if key not in yours:
                         yours[key] = {
                             "key": key, "member_ids": others,
-                            "name": ", ".join(names.get(i, i) for i in others),
+                            "name": ", ".join(display_name(i) for i in others),
                             "channel": r["channel"], "last_id": r["id"],
                             "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
-                            "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                            "from": display_name(r["member_id"]),
                             "unread": 0,
                         }
                     if r["member_id"] != operator_id and not r["is_read"]:
@@ -3791,10 +3917,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if key and key not in agent_threads:
                         agent_threads[key] = {
                             "key": key, "member_ids": ids,
-                            "name": " ↔ ".join(names.get(i, i) for i in ids),
+                            "name": " ↔ ".join(display_name(i) for i in ids),
                             "channel": r["channel"], "last_id": r["id"],
                             "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
-                            "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                            "from": display_name(r["member_id"]),
                             "unread": 0,
                         }
 
@@ -3828,18 +3954,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     marker and latest and latest <= marker["archived_through_id"])
                 if thread_is_archived == archived:
                     for r in reversed(matched):
-                        evt = _message_event(db, r)
+                        evt = _message_event(db, r, name_cache)
                         evt["channel"] = r["channel"]
                         merged.append(evt)
 
             targets = []
             agent_rows = db.execute(
                 "SELECT id, name, state, model FROM agents "
-                "WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE"
+                "WHERE managed = 1 AND archived_at IS NULL ORDER BY name COLLATE NOCASE"
             ).fetchall()
             for a in agent_rows:
                 channels = public_agent_channels(db, a["id"])
-                targets.append({"id": a["id"], "name": a["name"],
+                targets.append({"id": a["id"], "name": resolve_display_name(db, a["id"]),
                                 "state": a["state"], "model": a["model"],
                                 "channels": channels,
                                 "dm_channel": AGENT_INBOX_CHANNEL})
@@ -3976,7 +4102,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
                 "wake_mode, avatar_name, created_at, last_active_at, archived_at, "
                 "context_pct, context_tokens "
-                "FROM agents WHERE archived_at IS "
+                "FROM agents WHERE managed = 1 AND archived_at IS "
                 + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
             alive_map = _agent_liveness(db)
@@ -3990,7 +4116,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 _agent_live = _agent_is_live(
                     sup.is_running(r["id"]), _hb_fresh, _agent_working, r["state"] or "")
                 agents.append({
-                    "id": r["id"], "name": r["name"], "model": r["model"],
+                    "id": r["id"], "name": resolve_display_name(db, r["id"]), "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
                     "effort": (r["effort"] if "effort" in r.keys() else "") or "",
                     "provider": r["runtime_provider"] or "claude",
@@ -4126,6 +4252,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "ORDER BY id DESC LIMIT 2000",
                 (operator_id,)).fetchall()
             questions = []
+            name_cache: Dict[str, str] = {}
             for r in rows:
                 choices = parse_obj_json(r["choices"])
                 if not isinstance(choices, dict) or choices.get("target") != operator_id:
@@ -4141,7 +4268,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "id": r["id"],
                     "channel": r["channel"],
                     "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
+                    "member_name": resolve_display_name(db, r["member_id"], name_cache),
                     "created_at": r["created_at"],
                     "question": qs[0].get("question", "") or "Question",
                     "questions": qs,
@@ -4173,6 +4300,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "ORDER BY m.id DESC LIMIT 2000",
                 (operator_id, f"%{operator_id}%", operator_id)).fetchall()
             mentions = []
+            name_cache: Dict[str, str] = {}
             unread_count = 0
             for r in rows:
                 m_ids = parse_mentions_json(r["mentions"])
@@ -4185,7 +4313,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "id": r["id"],
                     "channel": r["channel"],
                     "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
+                    "member_name": resolve_display_name(db, r["member_id"], name_cache),
                     "created_at": r["created_at"],
                     "content": r["content"] or "",
                     "read": is_read,
@@ -4644,9 +4772,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif action == "archive":
             # Soft-delete: stamp archived_at FIRST (so the agent is hidden from
             # the roster even if the runtime stop fails), then stop the runtime,
-            # revoke sessions, and deactivate presence. Keep the agents row and
-            # agent_channels so the agent can be unarchived later. Mirrors the
-            # channel archive pattern (archived_at/archived_by columns).
+            # revoke sessions, and deactivate presence. The private inbox is a
+            # full-agent capability, not a placement: remove its member and
+            # agent_channels rows so this archive is a true teardown. Keep the
+            # agents row and public agent_channels so unarchive can restore the
+            # public placements.
             now = now_iso()
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
@@ -4659,6 +4789,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         self._error(404, "agent not found")
                         return
                     db.execute("UPDATE members SET active = 0 WHERE id = ?", (agent_id,))
+                    db.execute(
+                        "DELETE FROM members WHERE id=? AND channel=?",
+                        (agent_id, AGENT_INBOX_CHANNEL))
+                    db.execute(
+                        "DELETE FROM agent_channels WHERE agent_id=? AND channel=?",
+                        (agent_id, AGENT_INBOX_CHANNEL))
                     db.execute(
                         "UPDATE sessions SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL",
                         (now, agent_id))
@@ -4683,6 +4819,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     self._error(404, "agent not found")
                     return
                 with db:
+                    agent = db.execute(
+                        "SELECT name, model, base_prompt FROM agents WHERE id=?",
+                        (agent_id,)).fetchone()
                     cur = db.execute(
                         "UPDATE agents SET archived_at=NULL, archived_by=NULL, "
                         "state=?, pid=NULL WHERE id=?",
@@ -4690,14 +4829,36 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if cur.rowcount == 0:
                         self._error(404, "agent not found")
                         return
-                    # Restore presence only in channels where the agent still
-                    # has an agent_channels row (i.e. was NOT removed before
-                    # archiving) + the private inbox.
+                    # Restore public presence only in channels where the agent
+                    # still has an agent_channels row (i.e. was NOT removed
+                    # before archiving), then recreate the permanent inbox
+                    # capability explicitly.
                     db.execute(
                         "UPDATE members SET active = 1 WHERE id=? AND channel IN ("
-                        "SELECT channel FROM agent_channels WHERE agent_id=?"
-                        " UNION SELECT ?)",
-                        (agent_id, agent_id, AGENT_INBOX_CHANNEL))
+                        "SELECT channel FROM agent_channels WHERE agent_id=?)",
+                        (agent_id, agent_id))
+                    now = now_iso()
+                    if agent is not None:
+                        db.execute(
+                            "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+                            "VALUES (?, 'active', ?, ?)",
+                            (AGENT_INBOX_CHANNEL, now, now))
+                        db.execute(
+                            "INSERT OR IGNORE INTO members "
+                            "(id, channel, name, summary, skills, last_seen, last_read, joined_at, "
+                            "active, kind, model) VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+                            (agent_id, AGENT_INBOX_CHANNEL, agent["name"],
+                             (agent["base_prompt"] or "")[:200], "", now, now,
+                             agent["model"] or ""))
+                        db.execute(
+                            "UPDATE members SET active=1, name=?, summary=?, model=? "
+                            "WHERE id=? AND channel=?",
+                            (agent["name"], (agent["base_prompt"] or "")[:200],
+                             agent["model"] or "", agent_id, AGENT_INBOX_CHANNEL))
+                        db.execute(
+                            "INSERT OR IGNORE INTO agent_channels "
+                            "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+                            (agent_id, AGENT_INBOX_CHANNEL, agent_id, now))
             finally:
                 db.close()
             ok = True
@@ -4861,16 +5022,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            # Join the event ring to this channel's live sessions for the member.
-            # The ring is already capped per session; LIMIT bounds the response.
+            # Join the event ring to the agent-global live session. Tool events
+            # have no channel column; channel membership is the access boundary
+            # for this handler, while the session itself is global.
             rows = db.execute(
                 "SELECT te.tool_name AS tool_name, te.target AS target, "
                 "te.created_at AS created_at "
                 "FROM tool_events te "
                 "JOIN sessions s ON s.fingerprint = te.session_id "
-                "WHERE s.channel = ? AND s.member_id = ? AND s.revoked_at IS NULL "
+                "WHERE s.member_id = ? AND s.revoked_at IS NULL "
                 "ORDER BY te.id DESC LIMIT 40",
-                (self.channel, member),
+                (member,),
             ).fetchall()
             events = [{
                 "tool_name": r["tool_name"] or "",
@@ -5375,10 +5537,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             row = db.execute(
-                "SELECT mime, path, message_id, member_id FROM attachments "
-                "WHERE id = ? AND channel = ?",
-                (att_id, self.channel),
+                "SELECT mime, path, message_id, member_id, channel FROM attachments "
+                "WHERE id = ?",
+                (att_id,),
             ).fetchone()
+            # A freshly uploaded, unlinked attachment is still scoped to the
+            # composer channel. Once linked, its owning message determines the
+            # visibility/channel boundary; this permits a topic-staged upload
+            # to be linked to a global inbox DM without copying bytes.
+            if row is not None and row["message_id"] is None \
+                    and row["channel"] != self.channel:
+                row = None
             # Load the OWNING message so its sender + recipients drive can_see.
             # Only needed for non-operators (the operator is all-seeing) and only
             # when the attachment is linked to a message. Defensive: fall back to
@@ -5438,7 +5607,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, "not found")
                 return
         try:
-            chan_root = channel_attach_dir(self.channel, base=ATTACH_DIR).resolve()
+            chan_root = channel_attach_dir(row["channel"], base=ATTACH_DIR).resolve()
             resolved = Path(row["path"]).resolve()
             # Defense in depth: only serve files under THIS channel's dir.
             if not resolved.is_relative_to(chan_root):

@@ -296,17 +296,17 @@ class Dashboard:
 
     def _fetch_members(self) -> None:
         assert self.db
-        # v6.2+ session-mode clients update sessions.last_read / last_seen
-        # without touching members.* — reconcile both tables so the dashboard
-        # credits reads and shows live heartbeats for them.
+        # Read state is per (agent, channel), so members.last_read is the
+        # dashboard's sole watermark. Session rows remain useful for live
+        # heartbeat/observability fields, but their legacy last_read column is
+        # agent-global and must not credit this channel.
         rows = self.db.execute(
             "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
             "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-            "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
             "MAX(s.last_seen) AS session_last_seen "
             "FROM members m "
             "LEFT JOIN sessions s "
-            "  ON s.channel = m.channel AND s.member_id = m.id "
+            "  ON s.member_id = m.id "
             "  AND s.revoked_at IS NULL "
             "WHERE m.channel = ? "
             "GROUP BY m.id, m.channel",
@@ -322,7 +322,7 @@ class Dashboard:
                 agent.last_seen_iso = effective_last_seen
                 agent.last_seen = parse_ts(effective_last_seen)
 
-            new_wm = max(r["member_last_read"] or 0, r["session_last_read"] or 0)
+            new_wm = r["member_last_read"] or 0
             if new_wm > agent.last_read:
                 self._credit_read(agent, agent.last_read, new_wm)
                 agent.last_read = new_wm
