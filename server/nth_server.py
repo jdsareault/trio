@@ -4002,6 +4002,13 @@ def nth_rename(channel: str, member_id: str, new_name: str, session_token: str =
             return json.dumps({"error": "Invalid or revoked session_token."})
         if sess["member_id"] != member_id:
             return json.dumps({"error": "session_token does not match member_id."})
+        # rename mutates the member's display name — a read_only sub-agent
+        # token must not be able to do it (it can't send/claim either). Mirrors
+        # the primary-role gate on send/dm/ask/claim. Closes a read_only-role
+        # gap that is doubly relevant post-P1: a rename toward a squatted name
+        # feeds the global-name DM-misdirection surface.
+        if sess["role"] != "primary":
+            return json.dumps({"error": f"session_token role '{sess['role']}' cannot rename. Use a primary token."})
 
         old_name = member["name"] or member_id
         if old_name == new_name:
