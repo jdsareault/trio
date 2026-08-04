@@ -487,6 +487,10 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
     row's own freshness keeps the tuple coherent: working ⇒ fresh (never a
     live:false, busy:true payload downstream).
     """
+    # SQL intentionally emits one row per channel presence/session so each
+    # row's activity vs. turn-end pair stays coherent. This dict is the
+    # explicit dedup boundary: callers receive one tuple per global agent even
+    # during a legacy multi-session migration window.
     out: Dict[str, Tuple[bool, bool]] = {}
     try:
         rows = db.execute(

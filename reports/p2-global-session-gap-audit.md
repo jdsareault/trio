@@ -35,6 +35,9 @@ The phase-end audit also removed channel-scoped joins from the dashboard, web
 roster, web liveness, and stall-watchdog session lookups. A global session may
 retain its legacy first-connected `sessions.channel` for compatibility, but it
 now supplies observability to every surviving channel presence.
+`_agent_liveness` keeps each SQL row's activity pair coherent, then merges rows
+at the `out[agent_id]` boundary so legacy multi-session rows still produce one
+global-agent result.
 
 The remaining session-channel references are intentional: the composite legacy
 index is retained and a watchdog prefers the legacy channel as its single
