@@ -2045,7 +2045,9 @@ def _resolve_recipients(db, channel: str, to: str,
     for r in roster:
         nm = (r["name"] or "").strip().lower()
         if nm:
-            by_name.setdefault(nm, r["id"])
+            ids = by_name.setdefault(nm, [])
+            if r["id"] not in ids:
+                ids.append(r["id"])
     recipient_ids: list = []
     unresolved: list = []
     for tok in (to or "").split(","):
@@ -2056,8 +2058,21 @@ def _resolve_recipients(db, channel: str, to: str,
         rid = None
         if cand in by_id:
             rid = cand
-        elif cand.lower() in by_name:
-            rid = by_name[cand.lower()]
+        else:
+            ids = by_name.get(cand.lower(), [])
+            if len(ids) == 1:
+                rid = ids[0]
+            elif len(ids) > 1 and not global_scope:
+                # Channel-local resolution keeps its legacy first-match — the
+                # roster is small and co-located, so collisions are visible.
+                rid = ids[0]
+            # GLOBAL scope + a name matching >1 distinct id → AMBIGUOUS: leave
+            # rid None so it is REJECTED (falls into `unresolved`). Silently
+            # picking one identity enabled DM misdirection via global display-
+            # name squatting — an attacker pre-registering a victim's name in
+            # any throwaway channel could intercept DMs addressed by name
+            # (LOTC/Aragorn, critical). The sender must disambiguate by
+            # member_id.
         if rid is None:
             unresolved.append(t)
         elif rid not in recipient_ids:
@@ -2207,8 +2222,11 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         recipient_ids, unresolved = _resolve_recipients(
             db, channel, to, global_scope=True)
         if unresolved:
-            return json.dumps({"error": f"Unknown recipient(s): {', '.join(unresolved)}. "
-                                        "Use names or member_ids from the roster (trio_roster)."})
+            return json.dumps({"error": f"Unknown or ambiguous recipient(s): {', '.join(unresolved)}. "
+                                        "A display name that matches more than one global identity "
+                                        "is rejected (never guessed) — address it by exact member_id "
+                                        "from trio_roster. The response's `recipients` field shows the "
+                                        "resolved member_ids so you can confirm who received the DM."})
         if not recipient_ids:
             return json.dumps({"error": "trio_dm requires at least one recipient in `to`."})
 
@@ -4304,6 +4322,12 @@ def nth_end(channel: str, member_id: str) -> str:
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
+    # P3: the inbox is the single global DM transport every agent shares —
+    # ending it would take down direct messages for EVERYONE with no un-end
+    # path (LOTC/Sauron). It is not an ordinary channel; refuse.
+    if channel == AGENT_INBOX_CHANNEL:
+        return json.dumps({"error": "The global DM inbox cannot be ended — it is the "
+                                    "shared direct-message transport for every agent."})
 
     db = get_db()
     try:
@@ -4349,10 +4373,13 @@ def nth_list() -> str:
     """List all channels on this machine."""
     db = get_db()
     try:
+        # Hide the global DM inbox transport — it is not a workspace channel
+        # and must not be listed as one (nor accidentally ended). P3/LOTC.
         channels = db.execute(
             "SELECT c.code, c.status, c.created_at, c.updated_at, "
             "(SELECT COUNT(*) FROM messages m WHERE m.channel = c.code) as message_count "
-            "FROM channels c ORDER BY c.updated_at DESC",
+            "FROM channels c WHERE c.code != ? ORDER BY c.updated_at DESC",
+            (AGENT_INBOX_CHANNEL,),
         ).fetchall()
 
         # Compute active member counts in Python to avoid SQLite ISO 8601 parsing issues
