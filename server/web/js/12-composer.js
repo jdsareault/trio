@@ -6,6 +6,16 @@
   state.selectedTargets = state.selectedTargets instanceof Set ? state.selectedTargets : new Set();
   state.pendingAttachments = Array.isArray(state.pendingAttachments) ? state.pendingAttachments : [];
   state.drafts = state.drafts || {};
+  // Bug C: composer artifacts must belong to the conversation they were made
+  // in, never ride along when you switch threads. Text drafts were already
+  // keyed per-conversation; do the same for @-target chips and pasted images.
+  // attachmentStore[cid] is the SOURCE OF TRUTH for a conversation's pending
+  // images — state.pendingAttachments is an alias to the CURRENT one (by
+  // reference), so an in-flight upload started in conversation X keeps writing
+  // to X's array even after you navigate to Y. targetDrafts[cid] holds the
+  // @-target ids (rebuilt into the selectedTargets Set on load).
+  state.targetDrafts = state.targetDrafts || {};
+  state.attachmentStore = state.attachmentStore || {};
   let recognition = null, recorder = null, stream = null, chunks = [];
   // Metering is a SEPARATE stream from the one MediaRecorder/SpeechRecognition
   // consumes — SpeechRecognition never exposes its underlying audio, so a
@@ -37,6 +47,19 @@
     el.value = state.drafts[key] || '';
     resize(); updateSendState();
   }
+  // The pending-image array that belongs to conversation `cid` (created on
+  // demand). state.pendingAttachments always aliases the CURRENT conversation's
+  // array (set by loadComposerAux), so an upload started here writes to this
+  // thread even after the operator navigates away (Bug C).
+  function attStore(cid) { return (state.attachmentStore[cid] || (state.attachmentStore[cid] = [])); }
+  // Swap the composer's @-targets + pending images to the conversation now in
+  // view. Called on every route change (mirrors loadDraft for text).
+  function loadComposerAux() {
+    const cid = conversationId();
+    state.selectedTargets = new Set(state.targetDrafts[cid] || []);
+    state.pendingAttachments = attStore(cid);
+    renderTargets(); renderAttachments(); updateSendState();
+  }
   function apiUrl(path) {
     if (typeof api.url === 'function') return api.url(path);
     const channel = state.channel || '';
@@ -57,9 +80,28 @@
     state.selectedTargets.forEach(id => {
       const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'target-chip';
       chip.textContent = '@' + targetName(id) + ' ×'; chip.title = 'Remove target';
-      chip.onclick = () => { state.selectedTargets.delete(id); renderTargets(); };
+      chip.onclick = () => { state.selectedTargets.delete(id); renderTargets(); saveDraft(); };
       bar.append(chip);
     });
+    renderTargetHint(bar);
+    // Persist this conversation's @-target chips (Bug C) so they never leak
+    // into the next thread you open.
+    state.targetDrafts[conversationId()] = [...state.selectedTargets];
+  }
+  // In a DM, an @-target who isn't a participant is inert on the server
+  // (narrow_wake): it neither wakes nor reaches them. Surface that inline so
+  // the operator isn't surprised — but never block the send (jds: Slack
+  // behavior — mentioning a non-member is just their name as text).
+  function renderTargetHint(bar) {
+    if (!state.dmKey) return;
+    const peers = Array.isArray(state.dmMemberIds) ? state.dmMemberIds : [];
+    const outsiders = [...state.selectedTargets].filter(id => !peers.includes(id));
+    if (!outsiders.length) return;
+    const hint = document.createElement('span');
+    hint.className = 'composer-hint';
+    const names = outsiders.map(targetName).join(', ');
+    hint.textContent = `${names} won't be notified — this is a private DM. Message them directly to reach them.`;
+    bar.append(hint);
   }
   function setTargets(ids) { state.selectedTargets = new Set(ids || []); renderTargets(); }
   function insertTarget(id) { if (id) { state.selectedTargets.add(id); renderTargets(); input()?.focus(); } }
@@ -98,9 +140,17 @@
     if (!file) return;
     if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type || '')) throw new Error('Choose a PNG, JPEG, GIF, or WebP image');
     if (file.size > 10 * 1024 * 1024) throw new Error('Image must be 10 MB or smaller');
+    // Bind this upload to the conversation it started in. `arr` is that
+    // thread's source-of-truth array; we render only while it's still the one
+    // on screen, so navigating away mid-upload never spills the image (or a
+    // stuck loading placeholder) into the conversation you land on (Bug C).
+    const cid = conversationId();
+    const arr = attStore(cid);
     const preview = URL.createObjectURL(file);
     const placeholder = { id: 0, filename: file.name || 'image', loading: true, url: preview };
-    state.pendingAttachments.push(placeholder); renderAttachments(); updateSendState();
+    arr.push(placeholder);
+    if (cid === conversationId()) renderAttachments();
+    updateSendState();
     try {
       const response = await fetch(apiUrl('/api/upload'), {
         method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
@@ -112,15 +162,16 @@
       Object.assign(placeholder, attachment, { name: attachment.filename, loading: false, url: apiUrl(attachment.url) });
     } catch (error) {
       revokePreview(placeholder);
-      const index = state.pendingAttachments.indexOf(placeholder);
-      if (index >= 0) { state.pendingAttachments.splice(index, 1); }
+      const index = arr.indexOf(placeholder);
+      if (index >= 0) { arr.splice(index, 1); }
       throw error;
     } finally {
       // Must run on the error path too — otherwise a failed upload leaves
       // validate()'s loading-guard with nothing left to clear and the send
       // button stays stuck disabled (every caller re-throws past this point
       // to a bare .catch(toast), never re-calling updateSendState itself).
-      renderAttachments(); updateSendState();
+      if (cid === conversationId()) renderAttachments();
+      updateSendState();
     }
   }
   function renderAttachments() {
@@ -164,8 +215,17 @@
     const body = buildSendPayload();
     try {
       const result = await api.post(apiUrl('/api/send'), body);
-      delete state.drafts[conversationId()];
-      inputValue(''); state.pendingAttachments = []; state.composerReply = null; renderAttachments(); updateSendState();
+      // Clear THIS conversation's composer state (text + @-targets + images);
+      // other threads' drafts are untouched (Bug C).
+      const cid = conversationId();
+      delete state.drafts[cid];
+      state.targetDrafts[cid] = [];
+      attStore(cid).forEach(revokePreview);
+      state.attachmentStore[cid] = [];
+      state.selectedTargets = new Set();
+      state.pendingAttachments = attStore(cid);
+      inputValue(''); state.composerReply = null;
+      renderTargets(); renderAttachments(); updateSendState();
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
@@ -424,7 +484,9 @@
     const text = input(), sendButton = byId('send'), attach = byId('attach-btn');
     if (!text) return;
     setInputState(text);
-    renderTargets(); renderAttachments();
+    // Rendering happens via loadComposerAux() at the end of init (and on every
+    // route change) so it always reflects THIS conversation's stored artifacts,
+    // never leftover state from a prior mount (Bug C).
     const onInput = () => { updateSendState(); saveDraft(); updateAutocomplete(); resize(); };
     const onCompositionStart = () => { isComposing = true; };
     const onCompositionEnd = () => { isComposing = false; updateAutocomplete(); resize(); };
@@ -474,8 +536,11 @@
     }
     const onDictate = () => toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed'));
     if (dictation && dictationAvailable && dictateBtn) { dictateBtn.addEventListener('click', onDictate); domListeners.push([dictateBtn, 'click', onDictate]); }
+    // Aux (targets/images) loading is driven by loadConversation → refresh(),
+    // which runs after channel/dmKey are final; the router hook only needs the
+    // text draft + input state (kept as-is to avoid touching existing flows).
     unroute = Trio.router?.on?.(() => { loadDraft(); setInputState(text); });
-    renderTargets(); renderAttachments(); loadDraft();
+    loadDraft(); loadComposerAux();
   }
   function unmount() {
     domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0;
@@ -487,6 +552,11 @@
     if (recognition || (recorder && recorder.state !== 'inactive')) stopDictation();
   }
   function mount() { init(); }
+  // Reload the composer for the conversation now in view (text + @-targets +
+  // pending images). Called from loadConversation AFTER it has set the final
+  // channel/dmKey, because openChannel fires the router BEFORE that state
+  // update — so the router hook alone would read stale state (Bug C).
+  function refresh() { loadDraft(); loadComposerAux(); setInputState(input()); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, mount, unmount, render: renderTargets, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
 })();

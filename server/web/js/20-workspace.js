@@ -94,6 +94,10 @@
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
     Trio.conversation?.render?.();
     Trio.composer?.syncReadOnly?.();
+    // Swap the composer to THIS conversation's own draft/targets/images now that
+    // channel + dmKey are final. openChannel fires the router before this point,
+    // so the router hook alone would load stale state (Bug C).
+    Trio.composer?.refresh?.();
     Trio.startEvents?.(state.channel);
   }
   function openDm(dm, readOnly = false, audit = false) {
