@@ -57,7 +57,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, ATTACH_DIR,
                            animal_for, animal_for_channel, can_see, channel_attach_dir,
-                           is_all_seeing, parse_recipients)
+                           is_all_seeing, narrow_wake, parse_recipients)
 import nth_supervisor as nsup
 import nth_agent_manager as nam
 
@@ -3313,6 +3313,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     for rid in recipient_ids:
                         if rid not in mention_ids:
                             mention_ids.append(rid)
+                    # Wake-vs-visibility invariant: a scoped (DM) message must
+                    # never wake a non-recipient. Drop @/#/! targets outside
+                    # recipients — a stale "@Tempest" chip while DMing Cedar is
+                    # inert, not a phantom ping. Mirrors trio_dm; see
+                    # narrow_wake / atrium-north-star ("Slack for Humans+Agents").
+                    mention_ids = narrow_wake(mention_ids, recipient_ids, op_id)
+                    ref_ids = narrow_wake(ref_ids, recipient_ids, op_id)
+                    bang_ids = narrow_wake(bang_ids, recipient_ids, op_id)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
