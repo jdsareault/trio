@@ -46,6 +46,15 @@ try:
         channel="cap-b", member_id=agent, session_token=token,
         message="global DM is allowed", to="CapabilityPeer"))
     check("dm uses the global inbox capability", dm.get("ok") is True)
+    db = srv.get_db()
+    try:
+        dm_channel = db.execute(
+            "SELECT channel FROM messages WHERE id=?", (dm.get("message_id"),)
+        ).fetchone()
+    finally:
+        db.close()
+    check("dm is stored outside the topic channel", dm_channel and
+          dm_channel["channel"] == srv.AGENT_INBOX_CHANNEL)
     checks = {
         "send": srv.nth_send(
             channel="cap-b", member_id=agent, session_token=token,

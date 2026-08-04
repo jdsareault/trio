@@ -69,6 +69,15 @@ def row_recipients(msg_id):
         db.close()
 
 
+def row_channel(msg_id):
+    db = srv.get_db()
+    try:
+        row = db.execute("SELECT channel FROM messages WHERE id=?", (msg_id,)).fetchone()
+        return row["channel"] if row else None
+    finally:
+        db.close()
+
+
 def row_mentions(msg_id):
     db = srv.get_db()
     try:
@@ -97,6 +106,8 @@ for mid in (alice, bob, carol, dave):
 dm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="secret", to="Bob"))
 DM_ID = dm["message_id"]
 check("setup: DM to Bob scoped to [bob]", row_recipients(DM_ID) == [bob])
+check("setup: DM row is in global inbox, not topic CH",
+      row_channel(DM_ID) == AGENT_INBOX_CHANNEL and row_channel(DM_ID) != CH)
 
 # (R1/R2) Bob replies to the DM via trio_send (no explicit recipients).
 rep = json.loads(srv.nth_send(channel=CH, member_id=bob, message="got it", reply_to=DM_ID))

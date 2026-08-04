@@ -76,8 +76,18 @@ def dm_row(msg_id):
     db = srv.get_db()
     try:
         return db.execute(
-            "SELECT member_id, recipients, mentions FROM messages WHERE id=?",
+            "SELECT channel, member_id, recipients, mentions FROM messages WHERE id=?",
             (msg_id,)).fetchone()
+    finally:
+        db.close()
+
+
+def message_exists_in_channel(msg_id, channel):
+    db = srv.get_db()
+    try:
+        return db.execute(
+            "SELECT 1 FROM messages WHERE id=? AND channel=?",
+            (msg_id, channel)).fetchone() is not None
     finally:
         db.close()
 
@@ -95,9 +105,13 @@ srv.nth_poll(channel=CH, member_id=carol, wait_seconds=0)
 
 # ── Alice DMs Bob ──
 dm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="secret-for-bob", to="Bob"))
-check("trio_dm: ok", dm.get("ok") is True)
-check("trio_dm: recipients resolved to Bob", dm.get("recipients") == [bob])
 DM_ID = dm["message_id"]
+check("trio_dm: ok", dm.get("ok") is True)
+check("trio_dm: new DM row is in the global inbox",
+      dm_row(DM_ID)["channel"] == AGENT_INBOX_CHANNEL)
+check("trio_dm: new DM is absent from the topic channel",
+      not message_exists_in_channel(DM_ID, CH))
+check("trio_dm: recipients resolved to Bob", dm.get("recipients") == [bob])
 row = dm_row(DM_ID)
 check("trio_dm: recipients stored on row", json.loads(row["recipients"]) == [bob])
 check("trio_dm: recipient auto-added to ping set", bob in json.loads(row["mentions"] or "[]"))

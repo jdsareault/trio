@@ -103,8 +103,16 @@ try:
     st, d = http(port, "/api/channels")
     by_code = {c["code"]: c for c in d.get("channels", [])}
     unread_before_dm = by_code.get("chan-a", {}).get("unread")
-    srv.nth_dm(channel="chan-a", member_id=ra["member_id"],
-               message="alpha-private-dm", to=rc["member_id"])
+    dm_out = json.loads(srv.nth_dm(channel="chan-a", member_id=ra["member_id"],
+                                   message="alpha-private-dm", to=rc["member_id"]))
+    _dmdb = _sqlite3.connect(str(srv.DB_PATH))
+    try:
+        dm_row = _dmdb.execute(
+            "SELECT channel FROM messages WHERE id=?", (dm_out["message_id"],)).fetchone()
+    finally:
+        _dmdb.close()
+    check("/api/channels: direct DM row is stored in global inbox",
+          dm_row and dm_row[0] == web.AGENT_INBOX_CHANNEL)
     st, d = http(port, "/api/channels")
     by_code = {c["code"]: c for c in d.get("channels", [])}
     check("/api/channels: a DM into chan-a does not inflate its unread count",
