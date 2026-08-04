@@ -746,13 +746,17 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
     )
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
-    # Revoke their sessions so a lingering token can't be reused if the same
-    # member_id ever re-joins (defence-in-depth; also stops row build-up).
-    db.execute(
-        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-        "AND revoked_at IS NULL",
-        (now, channel, target_id),
-    )
+    # Sessions are agent-global: revoke only when this was the final channel
+    # presence, matching nth_server._purge_member.
+    remaining_presence = db.execute(
+        "SELECT 1 FROM members WHERE id = ? LIMIT 1", (target_id,)
+    ).fetchone()
+    if not remaining_presence:
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, target_id),
+        )
 
     released_ids = [r["id"] for r in released]
     msg = f"[culled] {target_name} ({target_id}) removed from channel"
@@ -4930,16 +4934,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            # Join the event ring to this channel's live sessions for the member.
-            # The ring is already capped per session; LIMIT bounds the response.
+            # Join the event ring to the agent-global live session. Tool events
+            # have no channel column; channel membership is the access boundary
+            # for this handler, while the session itself is global.
             rows = db.execute(
                 "SELECT te.tool_name AS tool_name, te.target AS target, "
                 "te.created_at AS created_at "
                 "FROM tool_events te "
                 "JOIN sessions s ON s.fingerprint = te.session_id "
-                "WHERE s.channel = ? AND s.member_id = ? AND s.revoked_at IS NULL "
+                "WHERE s.member_id = ? AND s.revoked_at IS NULL "
                 "ORDER BY te.id DESC LIMIT 40",
-                (self.channel, member),
+                (member,),
             ).fetchall()
             events = [{
                 "tool_name": r["tool_name"] or "",

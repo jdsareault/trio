@@ -11,6 +11,9 @@
 - `_get_session` resolves a non-revoked token globally. Every channel-scoped
   caller still checks membership in the target channel before reading or
   mutating it.
+- The one-time `p2-global-agent-session-v1` schema migration revokes all
+  pre-existing P1 per-channel bearer rows before global lookup is enabled;
+  later `get_db()` calls are idempotent and leave post-migration sessions live.
 - Legacy per-channel session rows remain readable by token for migration
   compatibility; new connects use the agent-global session model.
 
@@ -32,6 +35,12 @@ The phase-end audit also removed channel-scoped joins from the dashboard, web
 roster, web liveness, and stall-watchdog session lookups. A global session may
 retain its legacy first-connected `sessions.channel` for compatibility, but it
 now supplies observability to every surviving channel presence.
+
+The remaining session-channel references are intentional: the composite legacy
+index is retained and a watchdog prefers the legacy channel as its single
+owner, falling back to a surviving presence if that channel was culled. The
+web cull path mirrors server cull semantics and only revokes after the final
+presence is gone. Operator authentication remains separate.
 
 ## Capability and mutation audit
 

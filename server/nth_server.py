@@ -68,6 +68,12 @@ def _find_free_port(preferred: int = 8000) -> int:
 SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# One-time schema migration marker. P1 sessions were channel-scoped; once
+# token lookup becomes global, retaining those bearer tokens would silently
+# grant cross-channel authority. The first post-upgrade get_db() revokes them;
+# later calls leave newly minted global sessions alone.
+GLOBAL_SESSION_MIGRATION = "p2-global-agent-session-v1"
+
 # One nth_server.py subprocess is spawned per managed Claude agent (each
 # `claude` invocation gets its own --mcp-config stdio child), so this process
 # only ever speaks for one Trio identity. Captured on trio_connect so
@@ -401,10 +407,9 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             PRIMARY KEY (owner_id, thread_key)
         )
     """)
-    # v6: sessions table. Per-session watermark + capability role so
-    # sub-agents spawned with a read_only token cannot forge posts under
-    # the parent's member_id. member_id stays the public identity;
-    # session_token is the private mutation capability.
+    # v6/P2: sessions table. The capability is now agent-global; channel is
+    # retained for legacy observability/ownership rows. member_id stays the
+    # public identity; session_token is the private mutation capability.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_token   TEXT PRIMARY KEY,
@@ -421,6 +426,25 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name       TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    # P1 minted one live bearer token per channel. Revoke that pre-upgrade
+    # population exactly once before P2's global token lookup can authenticate
+    # it in another channel. INSERT OR IGNORE is the idempotent guard and also
+    # serializes concurrent first callers through SQLite's write transaction.
+    migration = conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (GLOBAL_SESSION_MIGRATION, now_iso()),
+    )
+    if migration.rowcount:
+        conn.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL",
+            (now_iso(),),
+        )
     # last_turn_end: stamped by the nth_turn_hook Stop/StopFailure hook when a
     # Claude turn ends, so the dashboard can tell "working" (acted since the last
     # turn end) from "idle" (turn ended, waiting). Added here too for DBs that
@@ -445,6 +469,10 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_member_global
+        ON sessions (member_id)
     """)
     # Reverse lookup: the stall-watchdog resolves a StopFailure hook's
     # session_id back to a member via sessions.fingerprint.
