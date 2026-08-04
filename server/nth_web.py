@@ -1129,9 +1129,9 @@ class EventHub:
     # ── DB poll ──
     def _fetch_roster(self, db: sqlite3.Connection,
                       name_cache: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-        # v6.2+ session-mode clients write sessions.last_read / last_seen
-        # and never touch members.*. Reconcile like nth_monitor.py:171-183
-        # so the web console sees real watermark + liveness movement.
+        # Read state is per (agent, channel), so members.last_read is the
+        # web console's sole watermark. Session rows still provide live
+        # heartbeat/observability fields; their legacy last_read is global.
         # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
         try:
             rows = db.execute(
@@ -1140,7 +1140,6 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, m.model AS model, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen, "
                 "MAX(s.last_turn_end) AS session_last_turn_end, "
                 "MAX(s.last_tool_name) AS last_tool_name, "
@@ -1162,7 +1161,6 @@ class EventHub:
                 "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen "
                 "FROM members m "
                 "LEFT JOIN sessions s "
@@ -1201,10 +1199,7 @@ class EventHub:
             pass
         out = []
         for r in rows:
-            effective_last_read = max(
-                r["member_last_read"] or 0,
-                r["session_last_read"] or 0,
-            )
+            effective_last_read = r["member_last_read"] or 0
             m_ls = r["member_last_seen"] or ""
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
