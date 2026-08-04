@@ -44,7 +44,8 @@ try:
         "SELECT id, name, reclaim_secret FROM agents WHERE id=?", (member_id,)
     ).fetchall()
     placements = db.execute(
-        "SELECT channel FROM members WHERE id=? ORDER BY channel", (member_id,)
+        "SELECT channel FROM members WHERE id=? AND channel != ? ORDER BY channel",
+        (member_id, srv.AGENT_INBOX_CHANNEL),
     ).fetchall()
     check("one global agents row backs both channel placements",
           len(agent_rows) == 1 and [row[0] for row in placements] == ["e2e-a", "e2e-b"])

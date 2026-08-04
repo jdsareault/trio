@@ -40,14 +40,25 @@ try:
 
     # The owner is a member of cap-a only. Every channel-scoped mutator must
     # reject the valid global token (or legacy member id) before it can inspect
-    # or change cap-b state.
+    # or change cap-b state. DMs are the intentional global exception: inbox
+    # membership, not topic placement, is their capability boundary.
+    dm = json.loads(srv.nth_dm(
+        channel="cap-b", member_id=agent, session_token=token,
+        message="global DM is allowed", to="CapabilityPeer"))
+    check("dm uses the global inbox capability", dm.get("ok") is True)
+    db = srv.get_db()
+    try:
+        dm_channel = db.execute(
+            "SELECT channel FROM messages WHERE id=?", (dm.get("message_id"),)
+        ).fetchone()
+    finally:
+        db.close()
+    check("dm is stored outside the topic channel", dm_channel and
+          dm_channel["channel"] == srv.AGENT_INBOX_CHANNEL)
     checks = {
         "send": srv.nth_send(
             channel="cap-b", member_id=agent, session_token=token,
             message="must not cross the channel boundary"),
-        "dm": srv.nth_dm(
-            channel="cap-b", member_id=agent, session_token=token,
-            message="must not cross the channel boundary", to="CapabilityPeer"),
         "ask": srv.nth_ask(
             channel="cap-b", member_id=agent, session_token=token,
             question="Should fail before target resolution?", options=["yes", "no"],

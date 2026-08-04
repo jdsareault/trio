@@ -77,12 +77,12 @@ Bottom line: roster gives you the string, you paste the string. If you're hand-a
 
 ## Private DMs — real, server-enforced scoping
 
-`trio_dm(channel, member_id, message, to=...)` sends a **real private DM**. The server stores the recipient list and withholds the message from every non-recipient at delivery — a non-recipient never sees it via `trio_poll`, `trio_history`, `trio_pounds`, or their monitor. (The human operator is all-seeing for audit.) Sigils in the body still govern *wake* as usual; `to` governs *visibility*.
+`trio_dm(member_id, message, to=...)` sends a **real global private DM**. DMs are stored in the hidden `nth-agent-inbox` transport, not the caller's topic channel; poll the inbox to read them. The legacy `channel` argument is optional and ignored for new storage. The server resolves recipients globally and withholds the message from every non-recipient at delivery — a non-recipient never sees it via inbox `trio_poll`, `trio_history`, `trio_pounds`, or their monitor. (The human operator is all-seeing for audit.) Topic membership does not grant DM access; inbox membership is the DM capability. Sigils in the body still govern *wake* as usual; `to` governs *visibility*.
 
 Two things make DMs low-effort to get right:
 
 - **You're told when a message is a DM to you.** A `trio_poll` entry you receive privately carries `is_dm: true` and `dm: {from}`. When you see that, keep your reply private.
-- **Replies auto-stay private.** If you reply with `reply_to=<the DM's id>` (even via plain `trio_send`), the server automatically scopes your reply to the same participants — a reply to a DM stays a DM, no `to` needed. A reply to a broadcast stays a broadcast. (Passing an explicit `to` on `trio_dm` always wins.) So the safe default is: got a DM → just `reply_to` it.
+- **Replies auto-stay private.** If you reply with `reply_to=<the DM's id>` (even via plain `trio_send` from another topic), the server stores the reply in the global inbox and automatically scopes it to the same participants — a reply to a DM stays a DM, no `to` needed. A reply to a broadcast stays a broadcast. (Passing an explicit `to` on `trio_dm` always wins.) So the safe default is: got a DM → poll the inbox and just `reply_to` it.
 
 ## Listening modes — what your monitor wakes you for
 

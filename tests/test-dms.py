@@ -26,7 +26,7 @@ SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
 import nth_server as srv          # noqa: E402
 import nth_web as web            # noqa: E402
-from nth_constants import can_see, is_all_seeing  # noqa: E402
+from nth_constants import AGENT_INBOX_CHANNEL, can_see, is_all_seeing  # noqa: E402
 
 failures = []
 
@@ -42,16 +42,23 @@ srv.DB_DIR = Path(_tmp)
 srv.DB_PATH = Path(_tmp) / "nth.db"
 
 
+def _poll_one(channel, member_id):
+    r = json.loads(srv.nth_poll(channel=channel, member_id=member_id, wait_seconds=0))
+    return r.get("messages", []) if r.get("event") == "new_messages" else []
+
+
 def poll_ids(member_id, contents=None):
-    """Return (ids, contents) of messages a member sees on a 0-wait poll."""
-    r = json.loads(srv.nth_poll(channel=CH, member_id=member_id, wait_seconds=0))
-    msgs = r.get("messages", []) if r.get("event") == "new_messages" else []
+    """Return topic + global-inbox messages visible to this member."""
+    msgs = _poll_one(CH, member_id) + _poll_one(AGENT_INBOX_CHANNEL, member_id)
     return [m["id"] for m in msgs], [m["content"] for m in msgs]
 
 
 def history_ids(member_id=""):
-    r = json.loads(srv.nth_history(channel=CH, last_n=100, member_id=member_id))
-    return [m["id"] for m in r.get("messages", [])]
+    topic = json.loads(srv.nth_history(channel=CH, last_n=100, member_id=member_id))
+    inbox = json.loads(srv.nth_history(
+        channel=AGENT_INBOX_CHANNEL, last_n=100, member_id=member_id))
+    return [m["id"] for m in topic.get("messages", [])] + [
+        m["id"] for m in inbox.get("messages", [])]
 
 
 def watermark(member_id):
@@ -59,7 +66,7 @@ def watermark(member_id):
     try:
         row = db.execute(
             "SELECT last_read FROM members WHERE channel=? AND id=?",
-            (CH, member_id)).fetchone()
+            (AGENT_INBOX_CHANNEL, member_id)).fetchone()
         return row["last_read"] if row else None
     finally:
         db.close()
@@ -69,8 +76,18 @@ def dm_row(msg_id):
     db = srv.get_db()
     try:
         return db.execute(
-            "SELECT member_id, recipients, mentions FROM messages WHERE id=?",
+            "SELECT channel, member_id, recipients, mentions FROM messages WHERE id=?",
             (msg_id,)).fetchone()
+    finally:
+        db.close()
+
+
+def message_exists_in_channel(msg_id, channel):
+    db = srv.get_db()
+    try:
+        return db.execute(
+            "SELECT 1 FROM messages WHERE id=? AND channel=?",
+            (msg_id, channel)).fetchone() is not None
     finally:
         db.close()
 
@@ -88,9 +105,13 @@ srv.nth_poll(channel=CH, member_id=carol, wait_seconds=0)
 
 # ── Alice DMs Bob ──
 dm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="secret-for-bob", to="Bob"))
-check("trio_dm: ok", dm.get("ok") is True)
-check("trio_dm: recipients resolved to Bob", dm.get("recipients") == [bob])
 DM_ID = dm["message_id"]
+check("trio_dm: ok", dm.get("ok") is True)
+check("trio_dm: new DM row is in the global inbox",
+      dm_row(DM_ID)["channel"] == AGENT_INBOX_CHANNEL)
+check("trio_dm: new DM is absent from the topic channel",
+      not message_exists_in_channel(DM_ID, CH))
+check("trio_dm: recipients resolved to Bob", dm.get("recipients") == [bob])
 row = dm_row(DM_ID)
 check("trio_dm: recipients stored on row", json.loads(row["recipients"]) == [bob])
 check("trio_dm: recipient auto-added to ping set", bob in json.loads(row["mentions"] or "[]"))
@@ -119,13 +140,13 @@ check("(b) unidentified history sees broadcasts only (no DM)", DM_ID not in hist
 #     Alice DMs Bob but #references Carol — Carol must NOT see it via pounds.
 dm2 = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="re #Carol, tell nobody", to="Bob"))
 DM2_ID = dm2["message_id"]
-carol_pounds = json.loads(srv.nth_pounds(channel=CH, member_id=carol))
+carol_pounds = json.loads(srv.nth_pounds(channel=AGENT_INBOX_CHANNEL, member_id=carol))
 check("(b) non-recipient does NOT see referenced DM via pounds",
       DM2_ID not in [m["id"] for m in carol_pounds.get("messages", [])])
 # Bob (a recipient) who is #referenced would see it; sanity: Bob referenced?
 dm3 = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="hey #Bob look", to="Bob"))
 DM3_ID = dm3["message_id"]
-bob_pounds = json.loads(srv.nth_pounds(channel=CH, member_id=bob))
+bob_pounds = json.loads(srv.nth_pounds(channel=AGENT_INBOX_CHANNEL, member_id=bob))
 check("(b) recipient DOES see their referenced DM via pounds",
       DM3_ID in [m["id"] for m in bob_pounds.get("messages", [])])
 
@@ -156,8 +177,8 @@ def monitor_visible(member_id):
     try:
         rows = db.execute(
             "SELECT id, mentions, refs, bangs, recipients, member_id, member_name, content "
-            "FROM messages WHERE channel=? AND id>0 AND member_id!=? ORDER BY id",
-            (CH, member_id)).fetchall()
+            "FROM messages WHERE channel IN (?, ?) AND id>0 AND member_id!=? ORDER BY id",
+            (CH, AGENT_INBOX_CHANNEL, member_id)).fetchall()
     finally:
         db.close()
     return [m["id"] for m in rows
@@ -181,6 +202,10 @@ try:
             "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, "
             "last_read, joined_at, active, kind) VALUES (?,?,?,?,'',?,0,?,1,'human')",
             (mid, CH, nm, "human", now, now))
+        db.execute(
+            "INSERT OR IGNORE INTO members (id, channel, name, summary, skills, last_seen, "
+            "last_read, joined_at, active, kind) VALUES (?,?,?,?,'',?,0,?,1,'human')",
+            (mid, AGENT_INBOX_CHANNEL, nm, "human", now, now))
     db.commit()
 finally:
     db.close()
@@ -236,10 +261,12 @@ carol_again, _ = poll_ids(carol)
 check("(e) hidden DM does not re-surface on next poll", DM_ID not in carol_again)
 
 # ── Dashboard path: operator /api/send with recipients=[bob] is a real DM ──
-hub = web.EventHub(srv.DB_PATH, CH)
+hub = web.EventHub(srv.DB_PATH, AGENT_INBOX_CHANNEL)
+topic_hub = web.EventHub(srv.DB_PATH, CH)
 server = None
 try:
     hub.start()
+    topic_hub.start()
     web.NthWebHandler.hub = hub
     web.NthWebHandler.channel = CH
     web.NthWebHandler.db_path = srv.DB_PATH
@@ -249,29 +276,30 @@ try:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     time.sleep(0.2)
 
-    def drain_primed(viewer_id, all_seeing):
-        qq = hub.subscribe(viewer_id=viewer_id, all_seeing=all_seeing)
+    def drain_primed(which_hub, viewer_id, all_seeing):
+        qq = which_hub.subscribe(viewer_id=viewer_id, all_seeing=all_seeing)
         got = []
         try:
             while True:
                 got.append(json.loads(qq.get_nowait()))
         except Exception:
             pass
-        hub.unsubscribe(qq)
+        which_hub.unsubscribe(qq)
         return [e["id"] for e in got if e.get("type") == "message"]
 
     # (c) operator dashboard is all-seeing on the WEB SSE feed: the hub primes
     #     every row (incl. the private DM) to the operator subscriber.
-    op_seen = drain_primed(OP, all_seeing=True)
+    op_seen = drain_primed(hub, OP, all_seeing=True)
     check("(c) operator SSE feed ships others' DM (all-seeing web surface)", DM_ID in op_seen)
 
     # (c-guest) a GUEST subscriber's live feed is scoped: others' DMs are
     #     withheld from the primed history; broadcasts and DMs to the guest
     #     still arrive. This is REAL server withholding, not client-side CSS.
-    guest_seen = drain_primed(GUEST, all_seeing=False)
+    guest_seen = drain_primed(hub, GUEST, all_seeing=False)
+    topic_seen = drain_primed(topic_hub, GUEST, all_seeing=False)
     check("(c-guest) guest SSE feed WITHHOLDS others' DM", DM_ID not in guest_seen)
     check("(c-guest) guest SSE feed delivers DM addressed to guest", GDM_ID in guest_seen)
-    check("(c-guest) guest SSE feed delivers broadcasts", BC_ID in guest_seen)
+    check("(c-guest) guest SSE feed delivers broadcasts", BC_ID in topic_seen)
 
     # Direct unit check of the fan-out visibility gate used by prime + live.
     dm_ev = {"type": "message", "id": DM_ID, "member_id": alice, "recipients": [bob]}
@@ -318,6 +346,7 @@ finally:
     if server is not None:
         server.shutdown()
     hub.stop()
+    topic_hub.stop()
 
 shutil.rmtree(_tmp, ignore_errors=True)
 print()
