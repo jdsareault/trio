@@ -147,8 +147,9 @@ try:
     finally:
         db.close()
 
-    # Culling one presence must not revoke the global session while another
-    # channel presence remains. Culling the final presence must revoke it.
+    # Culling topic presences must not revoke the global session while the
+    # permanent global inbox presence remains. Full teardown of that inbox
+    # presence is what revokes the session.
     secondary_cull = parse(srv.nth_cull(
         channel="e2e-b", member_id=peer_b["member_id"],
         target_member_id=agent))
@@ -162,13 +163,30 @@ try:
     final_cull = parse(srv.nth_cull(
         channel="e2e-a", member_id=peer_a["member_id"],
         target_member_id=agent))
-    check("culling the final presence succeeds", final_cull.get("ok") is True)
+    check("culling the final topic presence succeeds", final_cull.get("ok") is True)
     db = srv.get_db()
     try:
         revoked = db.execute(
             "SELECT revoked_at FROM sessions WHERE member_id = ?", (agent,)
         ).fetchone()["revoked_at"]
-        check("final cull revokes the global session", bool(revoked))
+        check("final topic cull preserves the global session", not revoked)
+    finally:
+        db.close()
+
+    inbox_cull = parse(srv.nth_cull(
+        channel=srv.AGENT_INBOX_CHANNEL, member_id=peer_a["member_id"],
+        target_member_id=agent))
+    check("culling the global inbox presence succeeds", inbox_cull.get("ok") is True)
+    db = srv.get_db()
+    try:
+        inbox_member = db.execute(
+            "SELECT 1 FROM members WHERE id=? AND channel=?",
+            (agent, srv.AGENT_INBOX_CHANNEL)).fetchone()
+        revoked = db.execute(
+            "SELECT revoked_at FROM sessions WHERE member_id = ?", (agent,)
+        ).fetchone()["revoked_at"]
+        check("global inbox teardown removes the final presence", inbox_member is None)
+        check("global inbox teardown revokes the global session", bool(revoked))
     finally:
         db.close()
     denied_after_final = parse(srv.nth_send(

@@ -139,10 +139,18 @@ try:
           st == 200 and ar is not None and ar["archived_at"] is not None)
     db = sqlite3.connect(str(srv.DB_PATH))
     left = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=?", (aid,)).fetchone()[0]
-    active = db.execute("SELECT active FROM members WHERE id=?", (aid,)).fetchone()
+    public_placement = db.execute(
+        "SELECT COUNT(*) FROM agent_channels WHERE agent_id=? AND channel='chan-x'", (aid,)
+    ).fetchone()[0]
+    inbox_member = db.execute(
+        "SELECT 1 FROM members WHERE id=? AND channel=?", (aid, srv.AGENT_INBOX_CHANNEL)
+    ).fetchone()
+    active = db.execute("SELECT active FROM members WHERE id=? AND channel='chan-x'", (aid,)).fetchone()
     revoked = db.execute("SELECT revoked_at FROM sessions WHERE session_token='delete-token'").fetchone()
     db.close()
-    check("archive: placements retained, member deactivated", left >= 1 and active and active[0] == 0)
+    check("archive: public placement retained, inbox presence removed",
+          left == 1 and public_placement == 1 and inbox_member is None)
+    check("archive: public member deactivated", active and active[0] == 0)
     check("archive: outstanding MCP sessions revoked", revoked and bool(revoked[0]))
     # archived agents are excluded from the default roster
     st, d = http(port, "/api/agents", "GET")
@@ -157,9 +165,18 @@ try:
     ur = row(aid)
     check("unarchive: 200 + archived_at cleared", st == 200 and ur and ur["archived_at"] is None)
     db = sqlite3.connect(str(srv.DB_PATH))
-    active = db.execute("SELECT active FROM members WHERE id=?", (aid,)).fetchone()
+    active = db.execute("SELECT active FROM members WHERE id=? AND channel='chan-x'", (aid,)).fetchone()
+    inbox_member = db.execute(
+        "SELECT active FROM members WHERE id=? AND channel=?", (aid, srv.AGENT_INBOX_CHANNEL)
+    ).fetchone()
+    inbox_placement = db.execute(
+        "SELECT 1 FROM agent_channels WHERE agent_id=? AND channel=?",
+        (aid, srv.AGENT_INBOX_CHANNEL),
+    ).fetchone()
     db.close()
     check("unarchive: member presence restored", active and active[0] == 1)
+    check("unarchive: global inbox presence restored",
+          inbox_member and inbox_member[0] == 1 and inbox_placement is not None)
     st, d = http(port, "/api/agents", "GET")
     ids = [a["id"] for a in d.get("agents", [])]
     check("unarchive: visible in default roster again", aid in ids)

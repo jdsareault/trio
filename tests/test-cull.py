@@ -81,7 +81,17 @@ try:
     live_sess = db.execute(
         "SELECT 1 FROM sessions WHERE channel=? AND member_id=? AND revoked_at IS NULL",
         (CH, victim)).fetchone()
-    check("cull_member: victim's sessions revoked", live_sess is None)
+    check("cull_member: topic cull preserves global session", live_sess is not None)
+    inbox_res, inbox_err = web.cull_member(
+        db, srv.AGENT_INBOX_CHANNEL, asker, "Asker", victim
+    )
+    db.commit()
+    check("cull_member: global inbox teardown succeeds",
+          inbox_err is None and inbox_res and inbox_res["culled_id"] == victim)
+    live_sess = db.execute(
+        "SELECT 1 FROM sessions WHERE member_id=? AND revoked_at IS NULL", (victim,)
+    ).fetchone()
+    check("cull_member: global inbox teardown revokes session", live_sess is None)
     tstatus = db.execute("SELECT status, claimed_by FROM tasks WHERE id=?", (task_id,)).fetchone()
     check("cull_member: task back to open", tstatus["status"] == "open" and tstatus["claimed_by"] is None)
     cmsg = db.execute(

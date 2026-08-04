@@ -4772,9 +4772,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif action == "archive":
             # Soft-delete: stamp archived_at FIRST (so the agent is hidden from
             # the roster even if the runtime stop fails), then stop the runtime,
-            # revoke sessions, and deactivate presence. Keep the agents row and
-            # agent_channels so the agent can be unarchived later. Mirrors the
-            # channel archive pattern (archived_at/archived_by columns).
+            # revoke sessions, and deactivate presence. The private inbox is a
+            # full-agent capability, not a placement: remove its member and
+            # agent_channels rows so this archive is a true teardown. Keep the
+            # agents row and public agent_channels so unarchive can restore the
+            # public placements.
             now = now_iso()
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
@@ -4787,6 +4789,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         self._error(404, "agent not found")
                         return
                     db.execute("UPDATE members SET active = 0 WHERE id = ?", (agent_id,))
+                    db.execute(
+                        "DELETE FROM members WHERE id=? AND channel=?",
+                        (agent_id, AGENT_INBOX_CHANNEL))
+                    db.execute(
+                        "DELETE FROM agent_channels WHERE agent_id=? AND channel=?",
+                        (agent_id, AGENT_INBOX_CHANNEL))
                     db.execute(
                         "UPDATE sessions SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL",
                         (now, agent_id))
@@ -4811,6 +4819,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     self._error(404, "agent not found")
                     return
                 with db:
+                    agent = db.execute(
+                        "SELECT name, model, base_prompt FROM agents WHERE id=?",
+                        (agent_id,)).fetchone()
                     cur = db.execute(
                         "UPDATE agents SET archived_at=NULL, archived_by=NULL, "
                         "state=?, pid=NULL WHERE id=?",
@@ -4818,14 +4829,36 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if cur.rowcount == 0:
                         self._error(404, "agent not found")
                         return
-                    # Restore presence only in channels where the agent still
-                    # has an agent_channels row (i.e. was NOT removed before
-                    # archiving) + the private inbox.
+                    # Restore public presence only in channels where the agent
+                    # still has an agent_channels row (i.e. was NOT removed
+                    # before archiving), then recreate the permanent inbox
+                    # capability explicitly.
                     db.execute(
                         "UPDATE members SET active = 1 WHERE id=? AND channel IN ("
-                        "SELECT channel FROM agent_channels WHERE agent_id=?"
-                        " UNION SELECT ?)",
-                        (agent_id, agent_id, AGENT_INBOX_CHANNEL))
+                        "SELECT channel FROM agent_channels WHERE agent_id=?)",
+                        (agent_id, agent_id))
+                    now = now_iso()
+                    if agent is not None:
+                        db.execute(
+                            "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+                            "VALUES (?, 'active', ?, ?)",
+                            (AGENT_INBOX_CHANNEL, now, now))
+                        db.execute(
+                            "INSERT OR IGNORE INTO members "
+                            "(id, channel, name, summary, skills, last_seen, last_read, joined_at, "
+                            "active, kind, model) VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+                            (agent_id, AGENT_INBOX_CHANNEL, agent["name"],
+                             (agent["base_prompt"] or "")[:200], "", now, now,
+                             agent["model"] or ""))
+                        db.execute(
+                            "UPDATE members SET active=1, name=?, summary=?, model=? "
+                            "WHERE id=? AND channel=?",
+                            (agent["name"], (agent["base_prompt"] or "")[:200],
+                             agent["model"] or "", agent_id, AGENT_INBOX_CHANNEL))
+                        db.execute(
+                            "INSERT OR IGNORE INTO agent_channels "
+                            "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+                            (agent_id, AGENT_INBOX_CHANNEL, agent_id, now))
             finally:
                 db.close()
             ok = True
