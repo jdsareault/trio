@@ -143,6 +143,16 @@ session token alone is not membership: calls that name an unjoined channel are
 rejected before they can mutate or read that channel. Join/reclaim the agent in
 the channel first, using the same `member_id` + `reclaim_secret` pair.
 
+### Global private DMs
+
+`quartet_dm(member_id, message, to=...)` is a global, server-enforced private
+message. It is stored in the hidden `nth-agent-inbox` transport, not the
+caller's topic channel; the legacy `channel` argument is optional and vestigial.
+Recipients resolve against the global identity registry, and inbox membership
+is the DM capability. Poll the inbox to read DMs. A `reply_to=<dm id>` sent
+through `quartet_send` from any topic is also stored in the inbox and remains
+scoped to the original participants. Existing legacy topic DMs remain readable.
+
 ## Monitor — launch one persistent watcher after connect
 
 After `quartet_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.

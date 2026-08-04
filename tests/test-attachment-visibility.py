@@ -37,6 +37,7 @@ import nth_web as web            # noqa: E402
 from nth_web import OperatorIdentity, OPERATOR_REGISTRY  # noqa: E402
 from nth_web import (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_GUEST,  # noqa: E402
                      IDENTITY_SOURCE_PENDING)
+from nth_constants import AGENT_INBOX_CHANNEL  # noqa: E402
 
 failures = []
 
@@ -94,7 +95,7 @@ def write_attachment(channel, message_id, member_id, data=PNG_1x1):
 # ── Alice DMs Bob (recipients=[bob]) with an attachment ──
 dm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="secret pic", to="Bob"))
 DM_ID = dm["message_id"]
-DM_ATT = write_attachment(CH, DM_ID, alice)
+DM_ATT = write_attachment(AGENT_INBOX_CHANNEL, DM_ID, alice)
 
 # ── Alice broadcasts with an attachment (recipients empty = everyone) ──
 bc = json.loads(srv.nth_send(channel=CH, member_id=alice, message="team photo"))
@@ -121,11 +122,11 @@ OPERATOR_REGISTRY.put(PEND_TOK, OperatorIdentity(
     member_id="_op_p_unknown", name="", source=IDENTITY_SOURCE_PENDING))
 
 
-def fetch(att_id, token=None):
+def fetch(att_id, token=None, channel=CH):
     """GET /api/attachment/<att_id> with an optional identity cookie.
     Returns (status, body_bytes)."""
     req = urllib.request.Request(
-        f"http://127.0.0.1:{PORT}/api/attachment/{att_id}", method="GET")
+        f"http://127.0.0.1:{PORT}/api/attachment/{att_id}?channel={channel}", method="GET")
     if token:
         req.add_header("Cookie", f"{web.OP_COOKIE}={token}")
     try:
@@ -167,22 +168,22 @@ try:
     time.sleep(0.2)
 
     # (op) all-seeing operator fetches the DM attachment -> 200 + real bytes
-    st, body = fetch(DM_ATT, OP_TOK)
+    st, body = fetch(DM_ATT, OP_TOK, AGENT_INBOX_CHANNEL)
     check("(op) operator fetches DM attachment -> 200", st == 200)
     check("(op) operator gets the real bytes", body == PNG_1x1)
 
     # (recip) the DM's recipient (Bob) fetches it -> 200
-    st, body = fetch(DM_ATT, BOB_TOK)
+    st, body = fetch(DM_ATT, BOB_TOK, AGENT_INBOX_CHANNEL)
     check("(recip) DM recipient fetches DM attachment -> 200", st == 200)
     check("(recip) recipient gets the real bytes", body == PNG_1x1)
 
     # (sender) the DM's sender (Alice) fetches their own attachment -> 200
-    st, _ = fetch(DM_ATT, ALICE_TOK)
+    st, _ = fetch(DM_ATT, ALICE_TOK, AGENT_INBOX_CHANNEL)
     check("(sender) DM sender fetches own DM attachment -> 200", st == 200)
 
     # (deny) a NON-recipient (Carol) fetches the DM attachment -> 404, NOT 403,
     #        and no bytes. 404 keeps the id from being an existence oracle.
-    st, body = fetch(DM_ATT, CAROL_TOK)
+    st, body = fetch(DM_ATT, CAROL_TOK, AGENT_INBOX_CHANNEL)
     check("(deny) non-recipient guest DENIED DM attachment -> 404", st == 404)
     check("(deny) non-recipient gets NO bytes", body != PNG_1x1)
     check("(deny) denial is 404 not 403 (no existence oracle)", st != 403)
@@ -199,7 +200,7 @@ try:
     # (pending) a pending / unidentified requester gets nothing — even for a
     #           broadcast — matching the sibling gated endpoints.
     check("(pending) pending requester DENIED DM attachment -> 403",
-          fetch(DM_ATT, PEND_TOK)[0] == 403)
+          fetch(DM_ATT, PEND_TOK, AGENT_INBOX_CHANNEL)[0] == 403)
     check("(pending) pending requester DENIED broadcast attachment -> 403",
           fetch(BC_ATT, PEND_TOK)[0] == 403)
 

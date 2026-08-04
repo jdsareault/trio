@@ -1985,8 +1985,9 @@ def dm_audit_thread_key(message) -> str:
 def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
     """Create the private DM transport and place every managed agent in it.
 
-    This is an idempotent migration.  Existing agents become directly
-    messageable on the next hub start without acquiring a visible channel.
+    This is an idempotent migration. Existing canonical agents — whether
+    supervisor-managed or externally launched — become directly messageable
+    on the next hub start without acquiring a visible channel.
     """
     now = now_iso()
     conn.execute(
@@ -1994,7 +1995,7 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
         "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
     rows = conn.execute(
         "SELECT id, name, model, base_prompt FROM agents "
-        "WHERE managed = 1 AND archived_at IS NULL"
+        "WHERE archived_at IS NULL"
     ).fetchall()
     for row in rows:
         agent_id, name, model, base_prompt = row
@@ -2566,8 +2567,9 @@ def build_agent_preamble(name: str, channels: List[str], member_id: str = "",
         f"You are {name}, an agent in the Trio multi-agent workspace. You are "
         f"placed in these public channels: {chans}."
         + (f" Your private DM transport is #{AGENT_INBOX_CHANNEL}; it is hidden "
-           "from the workspace channel list. Reply to direct messages there "
-           "with trio_dm so only the human recipient can see them." if has_inbox else "")
+           "from the workspace channel list. Keep a monitor/poll on that inbox "
+           "while working in public channels; reply to direct messages with "
+           "trio_dm so only the intended recipients can see them." if has_inbox else "")
         + f"{connect_lines} Talk to a channel "
         "through the Trio MCP tools (trio_connect / trio_send / trio_poll), "
         "naming the target channel explicitly on each reply. These are MCP tools "
@@ -2751,6 +2753,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
         _token, ident, _is_new = self._resolve_identity()
         if is_all_seeing(ident.member_id):
             return True
+        if ch == AGENT_INBOX_CHANNEL:
+            # The hidden inbox is the global DM capability. A scoped web
+            # identity may access it only when it has an explicit inbox
+            # presence; topic placement alone is not sufficient.
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                inbox_member = db.execute(
+                    "SELECT 1 FROM members WHERE channel=? AND id=? AND active=1",
+                    (AGENT_INBOX_CHANNEL, ident.member_id),
+                ).fetchone()
+            finally:
+                db.close()
+            if inbox_member:
+                return True
         if self._default_channel and ch == self._default_channel:
             return True
         self._error(403, "not authorized for this channel")
@@ -3191,6 +3207,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 if rid not in recipient_ids:
                     recipient_ids.append(rid)
 
+        # Any addressed web send is a global DM, regardless of the topic
+        # channel in the request URL. A reply to an inbox DM follows the same
+        # rule even when the composer is still open on a topic view; the
+        # participant set is inherited below once the operator row exists.
+        storage_channel = AGENT_INBOX_CHANNEL if recipient_ids else self.channel
+        # Uploads are staged under the composer’s topic channel. If the send
+        # is later promoted to a global DM, retain that attachment storage
+        # channel while linking it to the inbox message; the attachment read
+        # path below validates the owning message’s global channel separately.
+        attachment_channel = self.channel
+
         raw_sel = body.get("selection")
         selection_json = None
         has_selection = raw_sel is not None
@@ -3254,14 +3281,37 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                # DM replies are global too. Do this lookup before choosing the
+                # operator presence so a reply from topic Y cannot leak back
+                # into Y. Explicit recipients win when the UI supplied them.
+                global_dm_target = None
+                if reply_to is not None and not recipient_ids:
+                    global_dm_target = db.execute(
+                        "SELECT member_id, recipients FROM messages "
+                        "WHERE id = ? AND channel = ?",
+                        (reply_to, AGENT_INBOX_CHANNEL),
+                    ).fetchone()
+                    if (global_dm_target and
+                            parse_recipients(global_dm_target["recipients"])):
+                        storage_channel = AGENT_INBOX_CHANNEL
+
+                op_id, op_name = ensure_operator_row(db, storage_channel, ident)
+                if global_dm_target and not recipient_ids:
+                    participants = list(dict.fromkeys([
+                        global_dm_target["member_id"],
+                        *parse_recipients(global_dm_target["recipients"]),
+                    ]))
+                    recipient_ids = [pid for pid in participants if pid != op_id]
+                    if not recipient_ids:
+                        recipient_ids = participants
                 now = now_iso()
 
-                # Validate reply_to references a real message in this channel.
+                # Validate reply_to references a real message in the chosen
+                # storage channel.
                 if reply_to is not None:
                     tgt = db.execute(
                         "SELECT id, choices FROM messages WHERE id = ? AND channel = ?",
-                        (reply_to, self.channel),
+                        (reply_to, storage_channel),
                     ).fetchone()
                     if not tgt:
                         db.execute("ROLLBACK")
@@ -3322,7 +3372,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         already = db.execute(
                             "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
                             "AND selection IS NOT NULL AND selection != '' LIMIT 1",
-                            (self.channel, reply_to),
+                            (storage_channel, reply_to),
                         ).fetchone()
                         if already:
                             db.execute("ROLLBACK")
@@ -3340,7 +3390,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     owned = db.execute(
                         f"SELECT id FROM attachments WHERE id IN ({placeholders}) "
                         "AND channel = ? AND member_id = ? AND message_id IS NULL",
-                        (*attachment_ids, self.channel, op_id),
+                        (*attachment_ids, attachment_channel, op_id),
                     ).fetchall()
                     if {r["id"] for r in owned} != set(attachment_ids):
                         db.execute("ROLLBACK")
@@ -3369,7 +3419,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "INSERT INTO tasks (channel, posted_by, status, description, "
                         " blocked_by, created_at, updated_at) "
                         "VALUES (?, ?, 'open', ?, '[]', ?, ?)",
-                        (self.channel, op_id, task_body, now, now),
+                        (storage_channel, op_id, task_body, now, now),
                     )
                     task_id = tcur.lastrowid
                     posted_content = f"[task #{task_id}] {task_body}"
@@ -3378,7 +3428,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # matching nth_send's behavior so web-operator posts carry the
                 # same wake semantics as MCP-agent posts.
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
-                    db, self.channel, posted_content
+                    db, storage_channel, posted_content
                 )
                 # A DM's recipients are auto-added to the ping set so they wake
                 # (they can see it); visibility stays governed by recipients.
@@ -3400,7 +3450,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "(channel, member_id, member_name, content, created_at, "
                     " mentions, refs, bangs, reply_to, selection, recipients) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.channel, op_id, op_name, posted_content, now,
+                    (storage_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
@@ -3415,11 +3465,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "UPDATE attachments SET message_id = ? "
                         "WHERE id = ? AND channel = ? AND member_id = ? "
                         "AND message_id IS NULL",
-                        [(msg_id, aid, self.channel, op_id) for aid in attachment_ids],
+                        [(msg_id, aid, attachment_channel, op_id) for aid in attachment_ids],
                     )
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                    (now, self.channel, op_id),
+                    (now, storage_channel, op_id),
                 )
                 db.execute("COMMIT")
             except sqlite3.Error:
@@ -3803,10 +3853,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _handle_dms(self, parsed) -> None:
         """Return the operator's unified, cross-channel DM surface.
 
-        Messages remain channel-backed for protocol compatibility.  This view
-        groups those rows above the channel dimension, yielding one operator
-        thread per agent plus a separate agent-to-agent audit section.  Passing
-        ``?with=<member_id>`` also returns the merged history for that thread.
+        New messages live in the global agent inbox; legacy topic-scattered DM
+        rows remain readable. This view groups both kinds above the channel
+        dimension, yielding one operator thread per agent plus a separate
+        agent-to-agent audit section. Passing ``?with=<member_id>`` also
+        returns the merged history for that thread.
         """
         ident = self._require_operator()
         if ident is None:
@@ -5453,10 +5504,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             row = db.execute(
-                "SELECT mime, path, message_id, member_id FROM attachments "
-                "WHERE id = ? AND channel = ?",
-                (att_id, self.channel),
+                "SELECT mime, path, message_id, member_id, channel FROM attachments "
+                "WHERE id = ?",
+                (att_id,),
             ).fetchone()
+            # A freshly uploaded, unlinked attachment is still scoped to the
+            # composer channel. Once linked, its owning message determines the
+            # visibility/channel boundary; this permits a topic-staged upload
+            # to be linked to a global inbox DM without copying bytes.
+            if row is not None and row["message_id"] is None \
+                    and row["channel"] != self.channel:
+                row = None
             # Load the OWNING message so its sender + recipients drive can_see.
             # Only needed for non-operators (the operator is all-seeing) and only
             # when the attachment is linked to a message. Defensive: fall back to
@@ -5516,7 +5574,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, "not found")
                 return
         try:
-            chan_root = channel_attach_dir(self.channel, base=ATTACH_DIR).resolve()
+            chan_root = channel_attach_dir(row["channel"], base=ATTACH_DIR).resolve()
             resolved = Path(row["path"]).resolve()
             # Defense in depth: only serve files under THIS channel's dir.
             if not resolved.is_relative_to(chan_root):

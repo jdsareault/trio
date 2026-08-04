@@ -792,6 +792,46 @@ def _get_member(db, channel, member_id):
     ).fetchone()
 
 
+def _ensure_agent_inbox_membership(db: sqlite3.Connection, agent_id: str,
+                                   now: str) -> None:
+    """Make the global DM transport a durable capability for this agent.
+
+    Topic-channel presence is optional and may be culled, but an agent's
+    membership in the hidden inbox is what authorizes global DM reads/writes.
+    Keep that presence synchronized from the canonical ``agents`` row whenever
+    an externally launched agent connects or reclaims its identity.
+    """
+    agent = db.execute(
+        "SELECT name, model, base_prompt FROM agents WHERE id = ?",
+        (agent_id,),
+    ).fetchone()
+    if not agent:
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+        "VALUES (?, 'active', ?, ?)",
+        (AGENT_INBOX_CHANNEL, now, now),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO members "
+        "(id, channel, name, summary, skills, last_seen, last_read, joined_at, "
+        " active, kind, model) VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+        (agent_id, AGENT_INBOX_CHANNEL, agent["name"],
+         (agent["base_prompt"] or "")[:200], "", now, now, agent["model"] or ""),
+    )
+    db.execute(
+        "UPDATE members SET active=1, name=?, summary=?, model=? "
+        "WHERE id=? AND channel=?",
+        (agent["name"], (agent["base_prompt"] or "")[:200],
+         agent["model"] or "", agent_id, AGENT_INBOX_CHANNEL),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO agent_channels "
+        "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+        (agent_id, AGENT_INBOX_CHANNEL, agent_id, now),
+    )
+
+
 def _is_member_active(last_seen: str | None) -> bool:
     """Compute liveness from last_seen timestamp vs wall clock."""
     if not last_seen:
@@ -1188,6 +1228,7 @@ def nth_connect(
                     "VALUES (?, ?, ?, ?, ?)",
                     (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
                 )
+            _ensure_agent_inbox_membership(db, member_id, now)
             db.commit()
             action = "reclaimed" if (reclaiming and reclaimed_existing) else "joined"
         else:
@@ -1243,6 +1284,7 @@ def nth_connect(
                     "UPDATE channels SET pinned_message_id = ? WHERE code = ?",
                     (pin_cur.lastrowid, channel),
                 )
+            _ensure_agent_inbox_membership(db, member_id, now)
             db.commit()
             action = "created"
 
@@ -1695,6 +1737,26 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
     db = get_db()
     try:
+        requested_channel = channel
+        ch = _get_channel(db, requested_channel)
+        if not ch:
+            return json.dumps({"error": f'Channel "{channel}" not found.'})
+        if ch["status"] == "ended":
+            return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+        # A reply to a recipient-scoped message in the global inbox is itself
+        # a global DM. Message ids are database-global, so check the inbox
+        # before validating the caller's topic-local target; this is the
+        # explicit leak-prevention boundary for replies from topic Y.
+        dm_reply_target = None
+        if reply_to is not None:
+            dm_reply_target = db.execute(
+                "SELECT id, recipients FROM messages WHERE id = ? AND channel = ?",
+                (reply_to, AGENT_INBOX_CHANNEL),
+            ).fetchone()
+            if dm_reply_target and parse_recipients(dm_reply_target["recipients"]):
+                channel = AGENT_INBOX_CHANNEL
+
         ch = _get_channel(db, channel)
         if not ch:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
@@ -1933,15 +1995,27 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         db.close()
 
 
-def _resolve_recipients(db, channel: str, to: str) -> tuple[list, list]:
-    """Resolve a comma-separated `to` string of names and/or member_ids to a
-    de-duplicated list of recipient member_ids. Returns (recipient_ids,
-    unresolved_tokens). Matching is by exact member_id first, then
-    case-insensitive display name; a leading '@' the caller may have typed is
-    tolerated. Names that collide keep the first roster match."""
-    roster = db.execute(
-        "SELECT id, name FROM members WHERE channel = ?", (channel,)
-    ).fetchall()
+def _resolve_recipients(db, channel: str, to: str,
+                        global_scope: bool = False) -> tuple[list, list]:
+    """Resolve recipient names/ids, optionally against the global registry.
+
+    Topic sends retain channel-local name resolution. Global DMs resolve over
+    ``agents`` plus all active member presences, with canonical agent rows
+    taking precedence for duplicate ids/names. Every connected agent is also
+    placed in ``AGENT_INBOX_CHANNEL`` by the connect path, so a resolved agent
+    has the inbox capability required to receive the message.
+    """
+    if global_scope:
+        roster = db.execute(
+            "SELECT id, name FROM agents WHERE archived_at IS NULL"
+        ).fetchall()
+        roster += db.execute(
+            "SELECT id, name FROM members WHERE active = 1"
+        ).fetchall()
+    else:
+        roster = db.execute(
+            "SELECT id, name FROM members WHERE channel = ?", (channel,)
+        ).fetchall()
     by_id = {r["id"] for r in roster}
     by_name: dict = {}
     for r in roster:
@@ -2033,15 +2107,17 @@ def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_dm")
-def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: str = "", reply_to: int | None = None) -> str:
+def nth_dm(channel: str = "", member_id: str = "", message: str = "",
+           to: str = "", session_token: str = "",
+           reply_to: int | None = None) -> str:
     """Send a PRIVATE direct message to specific member(s) — a REAL DM.
 
     Unlike trio_send (which broadcasts to the whole channel), trio_dm is
-    addressed: the server stores the recipient list and WITHHOLDS the message
-    from every non-recipient at delivery time. Only the sender, the named
-    recipients, and the human operator (all-seeing, for audit) will ever see
-    it via trio_poll / trio_history / trio_pounds / the dashboard / the
-    monitor. Other agents' polls never return it.
+    addressed: the server stores the recipient list in the global
+    ``AGENT_INBOX_CHANNEL`` transport and WITHHOLDS the message from every
+    non-recipient at delivery time. Only the sender, the named recipients,
+    and the human operator (all-seeing, for audit) will ever see it via
+    inbox-scoped reads. Other agents' polls never return it.
 
     Boundary strength depends on deployment (see FUTURE_IMPROVEMENTS #9):
     against a well-behaved agent — which only ever touches the channel through
@@ -2058,18 +2134,16 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         are woken by nothing they can see, so their monitor stays quiet.
 
     Args:
-        channel: Channel code
+        channel: Legacy topic-channel parameter. Optional and ignored for
+            storage/auth; retained so old callers continue to work.
         member_id: Your member ID (from trio_connect)
         message: The private message (max 4000 chars). @/#/! sigils still parse.
         to: Comma-separated recipient names and/or member_ids
             (e.g. "Reviewer, x1y2z3"). Names match case-insensitively.
         session_token: Your session token (same capability check as trio_send).
-        reply_to: Optional id of a message this replies to (must be in-channel).
+        reply_to: Optional id of a message this replies to (must be in the
+            global inbox transport).
     """
-    err = validate_channel_code(channel)
-    if err:
-        return json.dumps({"error": err})
-
     if not message or not message.strip():
         return json.dumps({"error": "Message cannot be empty."})
     if len(message) > MAX_MESSAGE_LENGTH:
@@ -2079,6 +2153,7 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
 
     db = get_db()
     try:
+        channel = AGENT_INBOX_CHANNEL
         ch = _get_channel(db, channel)
         if not ch:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
@@ -2105,14 +2180,16 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         # Resolve recipients against the roster BEFORE inserting. A DM with no
         # resolvable recipient must be rejected — storing '[]' would silently
         # turn it into a broadcast (a privacy inversion / leak).
-        recipient_ids, unresolved = _resolve_recipients(db, channel, to)
+        recipient_ids, unresolved = _resolve_recipients(
+            db, channel, to, global_scope=True)
         if unresolved:
             return json.dumps({"error": f"Unknown recipient(s): {', '.join(unresolved)}. "
                                         "Use names or member_ids from the roster (trio_roster)."})
         if not recipient_ids:
             return json.dumps({"error": "trio_dm requires at least one recipient in `to`."})
 
-        # Validate reply_to (must reference an existing in-channel message).
+        # Validate reply_to against the global transport, never the caller's
+        # legacy topic-channel argument.
         if reply_to is not None:
             target = db.execute(
                 "SELECT id FROM messages WHERE id = ? AND channel = ?",
@@ -2179,6 +2256,10 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         recipient_names = []
         for rid in recipient_ids:
             rm = _get_member(db, channel, rid)
+            if not rm:
+                rm = db.execute(
+                    "SELECT name FROM agents WHERE id = ?", (rid,)
+                ).fetchone()
             recipient_names.append(rm["name"] if rm and rm["name"] else rid)
         _console("🔒", channel, f"{member['name']} → {', '.join(recipient_names)} (DM): {content}", 35)
 

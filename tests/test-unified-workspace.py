@@ -130,8 +130,9 @@ try:
 
     st, thread = http(port, "/api/dms?with=" + aid)
     messages = thread.get("messages", [])
-    check("merged DM history includes both source channels",
-          st == 200 and {m.get("channel") for m in messages} == {"chan-a", "chan-b"})
+    check("merged DM history includes inbox and legacy source channels",
+          st == 200 and {m.get("channel") for m in messages} ==
+          {web.AGENT_INBOX_CHANNEL, "chan-a", "chan-b"})
 
     # Agent-to-agent audit threads are listed in the sidebar but must also
     # return their merged history when the human opens one.

@@ -159,9 +159,8 @@ try:
     db = _sqlite3.connect(str(srv.DB_PATH))
     all_count = db.execute("SELECT COUNT(*) FROM messages WHERE channel='chan-a'").fetchone()[0]
     db.close()
-    check("channel-size: strictly fewer messages than the naive all-messages count "
-          "(the DM is genuinely excluded, not coincidentally equal)",
-          d.get("message_count") < all_count)
+    check("channel-size: global DM is absent from the topic channel",
+          d.get("message_count") == all_count)
     expected_tokens = round((content_chars + name_chars + d["message_count"] * 80) / 4)
     check("channel-size: estimated_tokens matches char/4 + per-message JSON overhead",
           d.get("estimated_tokens") == expected_tokens)

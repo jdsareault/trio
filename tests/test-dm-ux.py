@@ -30,7 +30,7 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
 import nth_server as srv          # noqa: E402
-from nth_constants import can_see, parse_recipients  # noqa: E402
+from nth_constants import AGENT_INBOX_CHANNEL, can_see, parse_recipients  # noqa: E402
 
 failures = []
 
@@ -47,9 +47,13 @@ srv.DB_PATH = Path(_tmp) / "nth.db"
 
 
 def poll(member_id):
-    """Return the list of message entry dicts a member sees on a 0-wait poll."""
-    r = json.loads(srv.nth_poll(channel=CH, member_id=member_id, wait_seconds=0))
-    return r.get("messages", []) if r.get("event") == "new_messages" else []
+    """Return topic + global-inbox entries visible to a member."""
+    out = []
+    for channel in (CH, AGENT_INBOX_CHANNEL):
+        r = json.loads(srv.nth_poll(channel=channel, member_id=member_id, wait_seconds=0))
+        if r.get("event") == "new_messages":
+            out.extend(r.get("messages", []))
+    return out
 
 
 def poll_ids(member_id):
@@ -119,20 +123,13 @@ rb = json.loads(srv.nth_send(channel=CH, member_id=bob, message="hi back", reply
 check("(R3) reply-to-broadcast stays broadcast (recipients empty)", row_recipients(rb["message_id"]) == [])
 check("(R3) broadcast reply reaches non-participant Carol", rb["message_id"] in poll_ids(carol))
 
-# (R4) A NON-participant (Carol) replies to Alice→Bob DM. Must NOT inherit:
-#      it becomes an ordinary broadcast (not privately scoped to alice/bob),
-#      so Carol cannot inject herself into the private thread, and no leak.
+# (R4) A NON-participant (Carol) replies to Alice→Bob DM. The global inbox
+#      cannot safely degrade this into an inbox broadcast, so it rejects the
+#      injection rather than leaking a topic message or widening the DM.
 for mid in (alice, bob, carol, dave):
     srv.nth_poll(channel=CH, member_id=mid, wait_seconds=0)
 rc = json.loads(srv.nth_send(channel=CH, member_id=carol, message="butting in", reply_to=DM_ID))
-RC_ID = rc["message_id"]
-check("(R4) non-participant reply does NOT inherit DM scope (stays broadcast)",
-      row_recipients(RC_ID) == [])
-check("(R4) non-participant reply is NOT scoped to the DM participants",
-      not (set(row_recipients(RC_ID) or {}) & {alice, bob}))
-# Because it's a plain broadcast of Carol's OWN words, Dave (outside) sees it —
-# proving no private injection happened. No DM content leaked either way.
-check("(R4) non-participant reply visible as a normal broadcast", RC_ID in poll_ids(dave))
+check("(R4) non-participant reply is rejected", "error" in rc)
 
 # (R5) Group DM: Alice → Bob + Carol. Bob's reply reaches every participant but Bob.
 gdm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="team secret", to="Bob, Carol"))
@@ -190,37 +187,37 @@ try:
     check("(unit) inherit over broadcast target → None",
           srv._inherited_dm_recipients(db, CH, BC_ID, bob, "agent") is None)
     # DM target, participant → participants minus replier
-    got = srv._inherited_dm_recipients(db, CH, DM_ID, bob, "agent")
+    got = srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, DM_ID, bob, "agent")
     check("(unit) inherit over DM by participant → [alice]", json.loads(got) == [alice])
     # DM target, non-participant → None
     check("(unit) inherit over DM by non-participant → None",
-          srv._inherited_dm_recipients(db, CH, DM_ID, dave, "agent") is None)
+          srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, DM_ID, dave, "agent") is None)
     # SECURITY: a forged/caller-supplied operator id is NOT trusted as an
     # all-seeing participant on the unauthenticated MCP path (default
     # allow_all_seeing=False) — it must NOT auto-scope into a DM it isn't in.
     check("(unit) forged operator id gets NO inheritance on MCP path (leak closed)",
-          srv._inherited_dm_recipients(db, CH, DM_ID, "_op_l_host", "human") is None)
+          srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, DM_ID, "_op_l_host", "human") is None)
     # Only an AUTHENTICATED surface (allow_all_seeing=True) grants the operator
     # all-seeing participant status — and even then it only narrows scope.
-    op_got = srv._inherited_dm_recipients(db, CH, DM_ID, "_op_l_host", "human",
+    op_got = srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, DM_ID, "_op_l_host", "human",
                                           allow_all_seeing=True)
     check("(unit) all-seeing operator inherits full set only when authenticated",
           op_got is not None and set(json.loads(op_got)) == {alice, bob})
     # missing target → None (never crashes)
     check("(unit) inherit over missing reply_to → None",
-          srv._inherited_dm_recipients(db, CH, 999999, alice, "agent") is None)
+          srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, 999999, alice, "agent") is None)
     # None reply_to → None
     check("(unit) inherit over None reply_to → None",
-          srv._inherited_dm_recipients(db, CH, None, alice, "agent") is None)
+          srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, None, alice, "agent") is None)
     # self-DM edge: a DM Alice addressed to herself, Alice replies → falls back
     # to the participant set rather than degrading to a broadcast.
     selfdm = db.execute(
         "INSERT INTO messages (channel, member_id, member_name, content, recipients, created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (CH, alice, "Alice", "note to self", json.dumps([alice]), srv.now_iso()))
+        (AGENT_INBOX_CHANNEL, alice, "Alice", "note to self", json.dumps([alice]), srv.now_iso()))
     db.commit()
     self_id = selfdm.lastrowid
-    self_got = srv._inherited_dm_recipients(db, CH, self_id, alice, "agent")
+    self_got = srv._inherited_dm_recipients(db, AGENT_INBOX_CHANNEL, self_id, alice, "agent")
     check("(unit) self-DM reply falls back to participants (never broadcast)",
           self_got is not None and json.loads(self_got) == [alice])
 finally:
@@ -256,7 +253,7 @@ def monitor_has_dms(member_id):
         rows = db.execute(
             "SELECT id, recipients, member_id FROM messages "
             "WHERE channel=? AND id>? AND member_id!=? ORDER BY id",
-            (CH, SIG_DM - 1, member_id)).fetchall()
+            (AGENT_INBOX_CHANNEL, SIG_DM - 1, member_id)).fetchall()
     finally:
         db.close()
     vis = [m for m in rows
