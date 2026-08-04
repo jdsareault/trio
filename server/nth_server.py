@@ -1266,19 +1266,20 @@ def nth_connect(
                        allow_all_seeing=False)
         ][:10]
 
-        # Set watermark to current latest message. Use the true latest id
-        # (including any hidden DMs) so the joiner's cursor starts past them —
-        # a DM sent before they joined must never surface on their first poll.
+        # Initialize only a newly-created channel presence to the current
+        # latest message. A reclaimed presence already has the authoritative
+        # per-channel cursor in members.last_read; resetting it on reconnect
+        # would discard unread work (and the old session cursor is global).
         latest_id = recent_raw[0]["id"] if recent_raw else 0
-        db.execute(
-            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-            (latest_id, member_id, channel),
-        )
+        if not (reclaiming and reclaimed_existing):
+            db.execute(
+                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+                (latest_id, member_id, channel),
+            )
 
-        # v6: mint a primary session token for this connect. Clients that
-        # pass it to subsequent RPCs get per-session watermarks and author
-        # provenance. Clients that ignore it see legacy (member_id-only)
-        # behavior — backward-compatible.
+        # Mint or refresh the agent-global primary session for this connect.
+        # The channel-local read cursor lives in members.last_read; the
+        # session carries capability, provenance, and liveness only.
         session_pid = None
         try:
             session_pid = int(os.environ.get("CLAUDE_PID") or os.getpid())
@@ -1304,9 +1305,8 @@ def nth_connect(
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
             reuse_existing=True,
         )
-        # Preserve the existing global session cursor during a cross-channel
-        # reconnect. Unit 2 moves reads fully to members.last_read; for now,
-        # only initialize a newly minted session from this channel's cursor.
+        # Keep the legacy sessions.last_read column initialized for old
+        # observers, but it is no longer a read source of truth.
         if not existing_global_session:
             db.execute(
                 "UPDATE sessions SET last_read = ? WHERE session_token = ?",
@@ -2489,9 +2489,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     from_name_lower = from_name.strip().lower() if from_name else ""
     db = get_db()
 
-    # v6: resolve session_token up front. If provided, watermark lives in
-    # sessions.last_read (per-session) and auto_ack defaults to False.
-    # If not provided, watermark lives in members.last_read (legacy).
+    # Resolve session_token up front. The token is a global capability; the
+    # read cursor is always the target channel's members.last_read.
     sess_row = None
     if session_token:
         sess_row = _get_session(db, channel, session_token)
@@ -2513,13 +2512,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
 
-            # Current watermark depends on whether the caller uses a session token
-            if sess_row is not None:
-                # Re-read sessions row in case an ack bumped it between iterations
-                fresh = _get_session(db, channel, session_token)
-                current_watermark = fresh["last_read"] if fresh else sess_row["last_read"]
-            else:
-                current_watermark = member["last_read"]
+            # Read state is per agent/channel, even though the capability
+            # session is global to the agent.
+            current_watermark = member["last_read"]
 
             ch = _get_channel(db, channel)
             if not ch:
@@ -2644,8 +2639,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
                 # Advance watermark behavior depends on session mode:
                 #   - session_token present: NEVER auto-advance. Caller must
-                #     call nth_ack explicitly. This is the split-ack path
-                #     that prevents rogue-holder watermark desync.
+                #     call nth_ack explicitly, but that ack updates this
+                #     channel's members.last_read row.
                 #   - no session_token, auto_ack=True: legacy behavior —
                 #     advance members.last_read to the batch max.
                 #   - no session_token, auto_ack=False: don't advance.
@@ -2816,7 +2811,8 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
 
-        # v6: session_token resolves which watermark to advance
+        # A session token authenticates the agent globally; the target
+        # channel's members.last_read remains the sole read watermark.
         sess = None
         if session_token:
             sess = _get_session(db, channel, session_token)
@@ -2824,9 +2820,7 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
                 return json.dumps({"error": "Invalid or revoked session_token."})
             if sess["member_id"] != member_id:
                 return json.dumps({"error": "session_token does not match member_id."})
-            current = sess["last_read"]
-        else:
-            current = member["last_read"]
+        current = member["last_read"]
 
         # force=True allows walking back the watermark (e.g., to recover from
         # a rogue sub-agent that advanced past unread messages). Without force,
@@ -2850,15 +2844,14 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if through_id < 0:
             return json.dumps({"error": f"through_id cannot be negative."})
 
+        db.execute(
+            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+            (through_id, member_id, channel),
+        )
         if sess is not None:
             db.execute(
-                "UPDATE sessions SET last_read = ?, last_seen = ? WHERE session_token = ?",
-                (through_id, now_iso(), session_token),
-            )
-        else:
-            db.execute(
-                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-                (through_id, member_id, channel),
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now_iso(), session_token),
             )
         db.commit()
         return json.dumps({"ok": True, "watermark": through_id, "force": force if force else None})
