@@ -865,14 +865,40 @@ def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
 
 def _mint_session_token(db, member_id: str, channel: str,
                         role: str = "primary", fingerprint: str = "",
-                        pid: int | None = None) -> str:
-    """Mint a new session token for (member_id, channel). Role is 'primary'
-    (full capability) or 'read_only' (poll/history only — rejects send/ack/retract).
+                        pid: int | None = None,
+                        reuse_existing: bool = False) -> str:
+    """Mint or refresh a session token for an agent.
 
-    The token is a bearer capability: whoever holds it can act as (member_id,
-    channel) with the given role. Never log the token value — this function
-    returns it to the caller and nowhere else.
+    ``channel`` remains part of the legacy row shape for observability and old
+    databases, but the token is now resolved globally by ``member_id``. When
+    ``reuse_existing`` is true (the connect path), an active session for this
+    agent is refreshed and returned instead of minting a second bearer token.
+    Role is 'primary' (full capability) or 'read_only' (poll/history only —
+    rejects send/ack/retract).
+
+    The token is a bearer capability: whoever holds it can act as the agent
+    identified by ``member_id`` in any channel where that agent is a member,
+    with the given role. Never log the token value — this function returns it
+    to the caller and nowhere else.
     """
+    if reuse_existing:
+        existing = db.execute(
+            "SELECT session_token FROM sessions "
+            "WHERE member_id = ? AND revoked_at IS NULL "
+            "ORDER BY last_seen DESC, connected_at DESC LIMIT 1",
+            (member_id,),
+        ).fetchone()
+        if existing:
+            # A connect is a primary agent session. Refresh process metadata so
+            # the one global session continues to describe the live process;
+            # retain the original channel for compatibility with old rows.
+            db.execute(
+                "UPDATE sessions SET role = ?, pid = ?, fingerprint = ?, "
+                "last_seen = ? WHERE session_token = ?",
+                (role, pid, fingerprint, now_iso(), existing["session_token"]),
+            )
+            return existing["session_token"]
+
     # Use secrets (CSPRNG) not random.choices — the local boundary is
     # trusted today but SSE remote exposure would leak predictable tokens.
     token = "s_" + secrets.token_hex(16)
@@ -887,13 +913,17 @@ def _mint_session_token(db, member_id: str, channel: str,
 
 
 def _get_session(db, channel: str, session_token: str):
-    """Look up a session. Returns row or None. Rejects revoked tokens."""
+    """Look up a session globally. Returns row or None. Rejects revoked tokens.
+
+    ``channel`` remains in the signature for callers and legacy compatibility,
+    but is deliberately not an authentication constraint: a global agent
+    session must work in every channel where that agent has membership.
+    """
     if not session_token:
         return None
     row = db.execute(
-        "SELECT * FROM sessions WHERE session_token = ? AND channel = ? "
-        "AND revoked_at IS NULL",
-        (session_token, channel),
+        "SELECT * FROM sessions WHERE session_token = ? AND revoked_at IS NULL",
+        (session_token,),
     ).fetchone()
     return row
 
@@ -1265,14 +1295,23 @@ def nth_connect(
             or os.environ.get("CLAUDE_SESSION_ID")
             or ""
         )[:64]
+        existing_global_session = db.execute(
+            "SELECT 1 FROM sessions WHERE member_id = ? AND revoked_at IS NULL "
+            "LIMIT 1", (member_id,)
+        ).fetchone()
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
+            reuse_existing=True,
         )
-        db.execute(
-            "UPDATE sessions SET last_read = ? WHERE session_token = ?",
-            (latest_id, session_token),
-        )
+        # Preserve the existing global session cursor during a cross-channel
+        # reconnect. Unit 2 moves reads fully to members.last_read; for now,
+        # only initialize a newly minted session from this channel's cursor.
+        if not existing_global_session:
+            db.execute(
+                "UPDATE sessions SET last_read = ? WHERE session_token = ?",
+                (latest_id, session_token),
+            )
         db.commit()
 
         # Fetch objective (pinned message) if any
