@@ -170,6 +170,39 @@ def generate_member_id() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
 
+def _register_agent_identity(db: sqlite3.Connection, member_id: str,
+                             name: str, model: str, now: str) -> str:
+    """Register or refresh a self-connected agent's global identity.
+
+    ``members`` is channel-scoped, but an MCP connection is an agent, so its
+    generated id must also be durable in the global ``agents`` registry. The
+    secret is returned to the caller once and is required for future
+    cross-channel reclaims. Existing managed rows retain their management
+    flag and secret; a legacy row with no secret is upgraded in place.
+    """
+    row = db.execute(
+        "SELECT reclaim_secret FROM agents WHERE id = ?", (member_id,)
+    ).fetchone()
+    stored_secret = ((row["reclaim_secret"] if row and
+                      "reclaim_secret" in row.keys() else "") or "")
+    reclaim_secret = stored_secret or secrets.token_urlsafe(32)
+    if row is None:
+        db.execute(
+            "INSERT INTO agents "
+            "(id, name, model, managed, reclaim_secret, created_at, last_active_at) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?)",
+            (member_id, name, model or "", reclaim_secret, now, now),
+        )
+    else:
+        db.execute(
+            "UPDATE agents SET name = ?, "
+            "model = CASE WHEN ? <> '' THEN ? ELSE model END, "
+            "reclaim_secret = ?, last_active_at = ? WHERE id = ?",
+            (name, model or "", model or "", reclaim_secret, now, member_id),
+        )
+    return reclaim_secret
+
+
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
 _GUEST_KEBAB_RE = re.compile(r"[-_]guest\s*$", re.IGNORECASE)
 _GUEST_PREFIX_RE = re.compile(r"^\s*guest[:\-]\s*", re.IGNORECASE)
@@ -490,6 +523,7 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             permission_profile TEXT NOT NULL DEFAULT 'balanced',
             wake_mode      TEXT NOT NULL DEFAULT 'at',
             avatar_name    TEXT NOT NULL DEFAULT '',
+            reclaim_secret TEXT NOT NULL DEFAULT '',
             created_at     TEXT NOT NULL,
             last_active_at TEXT,
             archived_at    TEXT,
@@ -913,6 +947,8 @@ def nth_connect(
     Returns a JSON object with:
       - "channel": the channel code (remember this for all subsequent calls)
       - "member_id": your unique ID (remember this too)
+      - "reclaim_secret": the private secret to reuse this identity on
+        subsequent channel connects (returned for registered agents)
       - "action": "created" or "joined"
       - "members": list of current members (names, skills, summaries)
       - "recent_messages": last few messages for context
@@ -959,9 +995,43 @@ def nth_connect(
     # caller), behaviour is unchanged.
     reclaiming = bool(resume_member_id and resume_member_id.strip())
     reclaimed_existing = False
-    member_id = resume_member_id.strip() if reclaiming else generate_member_id()
     now = now_iso()
     db = get_db()
+    if reclaiming:
+        member_id = resume_member_id.strip()
+    else:
+        # A self-registered id is global, not merely unique within this
+        # channel. Check both registries before exposing/registering it so a
+        # rare short-id collision cannot hand a new caller an existing
+        # agent's reclaim secret.
+        while True:
+            member_id = generate_member_id()
+            collision = db.execute(
+                "SELECT 1 FROM agents WHERE id = ? "
+                "UNION ALL SELECT 1 FROM members WHERE id = ? LIMIT 1",
+                (member_id, member_id),
+            ).fetchone()
+            if collision is None:
+                break
+
+    # A registered agent is globally reclaimable, so authenticate it before
+    # looking at the channel-local member row. Otherwise the first connect to
+    # a new channel could claim a known canonical id without its secret.
+    registered_agent = None
+    if reclaiming:
+        registered_agent = db.execute(
+            "SELECT reclaim_secret FROM agents WHERE id = ?", (member_id,)
+        ).fetchone()
+        if registered_agent:
+            stored_secret = ((registered_agent["reclaim_secret"]
+                              if "reclaim_secret" in registered_agent.keys()
+                              else "") or "")
+            supplied_secret = (reclaim_secret or "").strip()
+            if not stored_secret or not supplied_secret or not \
+                    secrets.compare_digest(stored_secret, supplied_secret):
+                return json.dumps({
+                    "error": "Cannot reclaim this identity: invalid or "
+                             "missing reclaim_secret."})
 
     try:
         existing = _get_channel(db, channel)
@@ -989,11 +1059,10 @@ def nth_connect(
                         (existing_row["kind"] if "kind" in existing_row.keys()
                          else "agent") or "agent") != "agent":
                     return json.dumps({"error": "Cannot reclaim this identity."})
-                # Reclaim also requires the supervisor-issued per-spawn secret
-                # (never exposed via the public roster or any API response) —
-                # knowing a public member_id alone must not be enough to mint a
-                # second primary session as that agent.
-                if reclaimed_existing:
+                # Legacy member rows without a global registry entry retain the
+                # old same-channel secret check. Newly registered agents were
+                # authenticated above, before the channel-local lookup.
+                if reclaimed_existing and not registered_agent:
                     agent_row = db.execute(
                         "SELECT reclaim_secret FROM agents WHERE id = ?",
                         (member_id,)).fetchone()
@@ -1124,7 +1193,19 @@ def nth_connect(
                 "UPDATE members SET model = ? WHERE id = ? AND channel = ?",
                 (model, member_id, channel),
             )
-            db.commit()
+        response_reclaim_secret = ""
+        if reclaiming and registered_agent:
+            response_reclaim_secret = ((registered_agent["reclaim_secret"]
+                                        if "reclaim_secret" in registered_agent.keys()
+                                        else "") or "")
+            db.execute(
+                "UPDATE agents SET last_active_at = ? WHERE id = ?",
+                (now, member_id),
+            )
+        elif not reclaiming:
+            response_reclaim_secret = _register_agent_identity(
+                db, member_id, name, model, now)
+        db.commit()
 
         # Gather current state for the joiner
         members = db.execute(
@@ -1237,6 +1318,8 @@ def nth_connect(
                 f"(3) Never call {TOOL_PREFIX}_end or {TOOL_PREFIX}_cull without explicit user permission."
             ),
         }
+        if response_reclaim_secret:
+            resp["reclaim_secret"] = response_reclaim_secret
         if objective:
             resp["objective"] = objective
         if action == "created":
