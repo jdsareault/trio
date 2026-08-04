@@ -57,7 +57,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (AGENT_INBOX_CHANNEL, ANIMAL_EMOJIS, ATTACH_DIR,
                            animal_for, animal_for_channel, can_see, channel_attach_dir,
-                           is_all_seeing, parse_recipients)
+                           is_all_seeing, narrow_wake, parse_recipients)
 import nth_supervisor as nsup
 import nth_agent_manager as nam
 
@@ -3313,6 +3313,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     for rid in recipient_ids:
                         if rid not in mention_ids:
                             mention_ids.append(rid)
+                    # Wake-vs-visibility invariant: a scoped (DM) message must
+                    # never wake a non-recipient. Drop @/#/! targets outside
+                    # recipients — a stale "@Tempest" chip while DMing Cedar is
+                    # inert, not a phantom ping. Mirrors trio_dm; see
+                    # narrow_wake / atrium-north-star ("Slack for Humans+Agents").
+                    mention_ids = narrow_wake(mention_ids, recipient_ids, op_id)
+                    ref_ids = narrow_wake(ref_ids, recipient_ids, op_id)
+                    bang_ids = narrow_wake(bang_ids, recipient_ids, op_id)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
@@ -4892,7 +4900,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         must be its author (member_id == op_id) and it must not be retracted."""
         op_id, op_name = ensure_operator_row(db, self.channel, ident)
         row = db.execute(
-            "SELECT member_id, retracted_at FROM messages WHERE id = ? AND channel = ?",
+            "SELECT member_id, retracted_at, recipients FROM messages WHERE id = ? AND channel = ?",
             (mid, self.channel),
         ).fetchone()
         if not row:
@@ -4936,13 +4944,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("BEGIN IMMEDIATE")
             try:
                 row, _op, err = self._edit_target(db, mid, ident)
-                if err:
+                if err or row is None:
                     db.execute("ROLLBACK")
                     code = (404 if err == "message not found"
-                            else 403 if "your own" in err else 400)
-                    self._error(code, err)
+                            else 403 if err and "your own" in err else 400)
+                    self._error(code, err or "message not found")
                     return
                 m_ids, r_ids, b_ids = _parse_sigils_against_roster(db, self.channel, content)
+                # Preserve the wake⊆visibility invariant on edits too: if this
+                # message is a scoped DM, an @/#/! edited in that names a
+                # non-recipient must stay inert (narrow_wake), matching the send
+                # paths — otherwise an edit reintroduces the woken-but-blind bug
+                # (Aragorn). Broadcasts (empty recipients) are untouched.
+                recips = parse_recipients(row["recipients"] if "recipients" in row.keys() else "")
+                if recips:
+                    m_ids = narrow_wake(m_ids, recips, row["member_id"])
+                    r_ids = narrow_wake(r_ids, recips, row["member_id"])
+                    b_ids = narrow_wake(b_ids, recips, row["member_id"])
                 db.execute(
                     "UPDATE messages SET content = ?, mentions = ?, refs = ?, bangs = ?, "
                     "edited_at = ? WHERE id = ? AND channel = ?",

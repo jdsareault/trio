@@ -28,7 +28,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (AGENT_INBOX_CHANNEL, SLEEPING_KEYWORDS, can_see,
-                           is_all_seeing, parse_recipients)
+                           is_all_seeing, narrow_wake, parse_recipients)
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -1677,9 +1677,16 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         # trio_dm): they CAN see it, so add them to the ping set even if the
         # replier didn't @them. Visibility stays governed by `recipients`.
         if recipients_json is not None:
-            for rid in json.loads(recipients_json):
+            recips = json.loads(recipients_json)
+            for rid in recips:
                 if rid not in mention_ids:
                     mention_ids.append(rid)
+            # Wake-vs-visibility invariant: a scoped (inherited-DM) reply must
+            # never wake a non-participant it doesn't make visible. Drop @/#/!
+            # targets outside recipients — see narrow_wake / atrium-north-star.
+            mention_ids = narrow_wake(mention_ids, recips, member_id)
+            ref_ids = narrow_wake(ref_ids, recips, member_id)
+            bang_ids = narrow_wake(bang_ids, recips, member_id)
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
         bangs_json = json.dumps(bang_ids) if bang_ids else ""
@@ -1958,6 +1965,13 @@ def nth_dm(channel: str, member_id: str, message: str, to: str, session_token: s
         for rid in recipient_ids:
             if rid not in mention_ids:
                 mention_ids.append(rid)
+        # Wake-vs-visibility invariant: a DM must never wake a non-recipient.
+        # An @/#/! naming someone not in `to` (e.g. "@Tempest" while DMing
+        # Cedar) is inert here — it neither wakes nor exposes them. Mirrors
+        # Slack; see narrow_wake / atrium-north-star.
+        mention_ids = narrow_wake(mention_ids, recipient_ids, member_id)
+        ref_ids = narrow_wake(ref_ids, recipient_ids, member_id)
+        bang_ids = narrow_wake(bang_ids, recipient_ids, member_id)
 
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""

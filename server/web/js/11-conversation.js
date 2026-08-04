@@ -495,6 +495,17 @@
         const others = [...recips].filter(id => id !== op);
         if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
       }
+    } else if (isPrivate(msg)) {
+      // Channel view (no dmKey): a recipients-scoped DM belongs to the separate
+      // DM surface and must NEVER render inline in a channel — not even for the
+      // all-seeing operator (the server can't distinguish a channel view from a
+      // DM view on the shared per-channel stream, so this is enforced here).
+      // DMs appear only in the DM inbox, grouped globally by participant — which
+      // is what makes them "global" from the user's seat and fixes "messages
+      // showing up in a channel I didn't send them in". The DM view (state.dmKey
+      // set, handled above) still receives these, so live DM updates are
+      // unaffected. See atrium "Slack for Humans and Agents" model.
+      return;
     } else if (msg.channel && state.channel && msg.channel !== state.channel) {
       // A message from another channel must not render in the channel
       // currently open. The workspace-wide SSE stream (00-core.js) multiplexes

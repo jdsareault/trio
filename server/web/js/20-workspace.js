@@ -75,7 +75,11 @@
     state.dmKey = isDm ? (state.dmKey || '') : '';
     state.dmLoading = false;
     state.dmError = '';
-    if (!isDm) state.dmThread = null;
+    // Leaving a DM for a channel must also drop the DM's target identity —
+    // otherwise buildSendPayload falls through to state.dmTargetId and stamps
+    // a CHANNEL post with recipients=[last DM target], silently rescoping a
+    // public message into a private DM (Sauron). Clear it with dmThread.
+    if (!isDm) { state.dmThread = null; state.dmTargetId = ''; state.dmMemberIds = []; }
     state.channel = channel;
     renderRail();
     document.getElementById('h-channel').textContent = title;
@@ -94,6 +98,10 @@
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
     Trio.conversation?.render?.();
     Trio.composer?.syncReadOnly?.();
+    // Swap the composer to THIS conversation's own draft/targets/images now that
+    // channel + dmKey are final. openChannel fires the router before this point,
+    // so the router hook alone would load stale state (Bug C).
+    Trio.composer?.refresh?.();
     Trio.startEvents?.(state.channel);
   }
   function openDm(dm, readOnly = false, audit = false) {
@@ -716,7 +724,12 @@
     if (route.name === 'channel') {
       const subtitle = route.params.archived ? 'Archived channel — read only' : 'Live agent workspace';
       if (state.channel !== route.params.code) loadConversation(route.params.code, '#' + route.params.code, subtitle, !!route.params.archived, false);
-      else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; showConversationPage(); updateTopbar('#' + route.params.code, subtitle); renderFacePile(); renderRail(); }
+      // Same-code partial switch (e.g. browser Back from a DM whose transport
+      // IS this channel) bypasses loadConversation, so it must itself drop the
+      // DM's target identity + aux composer state and reload the composer —
+      // otherwise the DM's @-chips/images and dmTargetId leak into the channel
+      // (Sauron/Frodo). Mirrors the !isDm reset in loadConversation.
+      else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; state.dmThread = null; state.dmTargetId = ''; state.dmMemberIds = []; showConversationPage(); updateTopbar('#' + route.params.code, subtitle); renderFacePile(); renderRail(); Trio.composer?.refresh?.(); }
     }
     else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
     else if (route.name === 'home') showView('home');
