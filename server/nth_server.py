@@ -3067,10 +3067,15 @@ def nth_retract(channel: str, member_id: str, message_id: int, reason: str = "",
             if not session_token:
                 return json.dumps({"error": "This message has a session-bound authorship. "
                                   "Provide the session_token that originally posted it to retract."})
+            # Revalidate the supplied token even when it equals author_session —
+            # a REVOKED authoring token must not still be able to retract (a
+            # revoked session should never act; this matters more post-P2 with
+            # one global session per agent). _get_session rejects revoked/unknown
+            # tokens. Then confirm it is the authoring session.
+            sess = _get_session(db, channel, session_token)
+            if not sess or sess["member_id"] != member_id:
+                return json.dumps({"error": "Invalid or mismatched session_token."})
             if session_token != msg["author_session"]:
-                sess = _get_session(db, channel, session_token)
-                if not sess or sess["member_id"] != member_id:
-                    return json.dumps({"error": "Invalid or mismatched session_token."})
                 return json.dumps({"error": "session_token did not author this message. "
                                   "Only the authoring session can retract."})
         else:
