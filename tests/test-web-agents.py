@@ -93,14 +93,18 @@ try:
     check("create: auto themed name assigned", bool(agent.get("name")))
     check("create: placed in chan-x", agent.get("channels") == ["chan-x"])
     # The supervisor's spawn() flips state to "running" only after the process
-    # proves alive, which lands slightly after the HTTP response — poll briefly
-    # instead of asserting on a race between the response and that DB commit.
+    # proves alive, and the startup nudge can complete before this read moves
+    # it to "idle". Assert the durable invariant (live process + active state),
+    # not which side of that legitimate transition the test catches.
     r = row(aid)
     deadline = time.monotonic() + 1.0
-    while (not r or r["state"] != "running") and time.monotonic() < deadline:
+    while (not r or r["state"] not in ("running", "idle")
+           or not web.get_supervisor().is_running(aid)) and time.monotonic() < deadline:
         time.sleep(0.05)
         r = row(aid)
-    check("create: agents row running", r and r["state"] == "running")
+    check("create: agents row active",
+          r and r["state"] in ("running", "idle")
+          and web.get_supervisor().is_running(aid))
     check("create: session_id captured", r and r["session_id"] == "sess-fake-sonnet-001")
     db = sqlite3.connect(str(srv.DB_PATH))
     ac = db.execute("SELECT COUNT(*) FROM agent_channels WHERE agent_id=?", (aid,)).fetchone()[0]

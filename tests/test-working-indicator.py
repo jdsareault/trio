@@ -243,11 +243,13 @@ finally:
 check("_agent_liveness: sessions.last_seen alone keeps agent live+working",
       liveness(agent) == (True, True))
 
-# LIVE_SECONDS boundary: 59s fresh, 61s stale.
+# LIVE_SECONDS boundary: 59s fresh, 61s stale. Global identity means the
+# hidden inbox presence participates in the liveness aggregate, so age every
+# presence when testing the stale boundary.
 c = raw()
 try:
-    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
-              (iso(-59), iso(-59), CH, agent))
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE id=?",
+              (iso(-59), iso(-59), agent))
     c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
               (iso(-59), iso(-100), "wi-sid-1"))
 finally:
@@ -255,8 +257,8 @@ finally:
 check("_agent_liveness: heartbeat at 59s is still fresh", (liveness(agent) or (False,))[0] is True)
 c = raw()
 try:
-    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
-              (iso(-61), iso(-61), CH, agent))
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE id=?",
+              (iso(-61), iso(-61), agent))
     c.execute("UPDATE sessions SET last_seen=? WHERE fingerprint=?", (iso(-61), "wi-sid-1"))
 finally:
     c.close()
@@ -283,8 +285,8 @@ finally:
 # no heartbeat within LIVE_SECONDS from any source -> not live, not working.
 c = raw()
 try:
-    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE channel=? AND id=?",
-              (iso(-200), iso(-200), CH, agent))
+    c.execute("UPDATE members SET last_seen=?, messenger_heartbeat=? WHERE id=?",
+              (iso(-200), iso(-200), agent))
     c.execute("UPDATE sessions SET last_seen=?, last_turn_end=? WHERE fingerprint=?",
               (iso(-200), iso(-100), "wi-sid-1"))
 finally:
