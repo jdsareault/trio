@@ -90,9 +90,14 @@ try:
                     (CH,)).fetchone()
     revoked = c.execute("SELECT revoked_at FROM sessions WHERE channel=? AND member_id=?",
                         (CH, dev1)).fetchone()
+    inbox = c.execute(
+        "SELECT 1 FROM members WHERE id=? AND channel=?",
+        (dev1, srv.AGENT_INBOX_CHANNEL),
+    ).fetchone()
 finally:
     c.close()
 check("1: a [superseded] system line was posted", sup is not None)
+check("1: the ghost's final inbox presence was removed", inbox is None)
 check("1: the ghost's session was revoked", revoked and revoked["revoked_at"] is not None)
 
 

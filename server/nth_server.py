@@ -929,6 +929,30 @@ def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
             continue  # process still alive (active, idle, or stalled) — not a ghost
         gid = r["id"]
         _purge_member(db, channel, gid, now)
+        # A stale duplicate can retain the hidden global inbox presence that
+        # every agent receives on connect. If this was its last topic
+        # presence, finish the teardown so its stale bearer session cannot
+        # survive forever as an invisible ghost. When another topic presence
+        # remains, preserve the inbox and global session: this was only a
+        # channel-local ghost cleanup, not a full-agent teardown.
+        remaining_topic = db.execute(
+            "SELECT 1 FROM members WHERE id = ? AND channel != ? LIMIT 1",
+            (gid, AGENT_INBOX_CHANNEL),
+        ).fetchone()
+        if not remaining_topic:
+            db.execute(
+                "DELETE FROM members WHERE id = ? AND channel = ?",
+                (gid, AGENT_INBOX_CHANNEL),
+            )
+            db.execute(
+                "DELETE FROM agent_channels WHERE agent_id = ? AND channel = ?",
+                (gid, AGENT_INBOX_CHANNEL),
+            )
+            db.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+                "AND revoked_at IS NULL",
+                (now, gid),
+            )
         db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
