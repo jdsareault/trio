@@ -115,6 +115,28 @@ try:
     check("web roster uses A's member watermark",
           owner_row is not None and owner_row["last_read"] >= max(a_ids))
 
+    # The global session's legacy channel is A. Clear B's member heartbeat so
+    # this proves the secondary-channel roster joins observability globally.
+    db = srv.get_db()
+    try:
+        db.execute(
+            "UPDATE members SET last_seen = '', messenger_heartbeat = '', "
+            "watchdog_heartbeat = '' WHERE id = ? AND channel = 'e2e-b'",
+            (agent,),
+        )
+        db.commit()
+    finally:
+        db.close()
+    hub_b = web.EventHub(srv.DB_PATH, "e2e-b")
+    db = srv.get_db()
+    try:
+        roster_b = hub_b._fetch_roster(db)
+    finally:
+        db.close()
+    owner_b = next((row for row in roster_b if row["id"] == agent), None)
+    check("secondary web roster inherits global session observability",
+          owner_b is not None and bool(owner_b["last_seen"]))
+
     db = srv.get_db()
     try:
         active = db.execute(
@@ -124,6 +146,36 @@ try:
         check("agent has one active global session row", active == 1)
     finally:
         db.close()
+
+    # Culling one presence must not revoke the global session while another
+    # channel presence remains. Culling the final presence must revoke it.
+    secondary_cull = parse(srv.nth_cull(
+        channel="e2e-b", member_id=peer_b["member_id"],
+        target_member_id=agent))
+    check("culling the secondary presence succeeds", secondary_cull.get("ok") is True)
+    still_allowed = parse(srv.nth_send(
+        channel="e2e-a", member_id=agent, session_token=token,
+        message="still alive in A after B cull"))
+    check("secondary cull preserves the global session in A",
+          still_allowed.get("ok") is True)
+
+    final_cull = parse(srv.nth_cull(
+        channel="e2e-a", member_id=peer_a["member_id"],
+        target_member_id=agent))
+    check("culling the final presence succeeds", final_cull.get("ok") is True)
+    db = srv.get_db()
+    try:
+        revoked = db.execute(
+            "SELECT revoked_at FROM sessions WHERE member_id = ?", (agent,)
+        ).fetchone()["revoked_at"]
+        check("final cull revokes the global session", bool(revoked))
+    finally:
+        db.close()
+    denied_after_final = parse(srv.nth_send(
+        channel="e2e-a", member_id=agent, session_token=token,
+        message="must fail after final cull"))
+    check("revoked session cannot act after final cull",
+          "error" in denied_after_final)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

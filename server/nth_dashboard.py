@@ -306,7 +306,7 @@ class Dashboard:
             "MAX(s.last_seen) AS session_last_seen "
             "FROM members m "
             "LEFT JOIN sessions s "
-            "  ON s.channel = m.channel AND s.member_id = m.id "
+            "  ON s.member_id = m.id "
             "  AND s.revoked_at IS NULL "
             "WHERE m.channel = ? "
             "GROUP BY m.id, m.channel",

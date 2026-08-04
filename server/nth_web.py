@@ -496,7 +496,7 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
             "  s.blocked_since AS blocked_since "
             "FROM members m "
             "LEFT JOIN sessions s "
-            "  ON s.member_id = m.id AND s.channel = m.channel AND s.revoked_at IS NULL"
+            "  ON s.member_id = m.id AND s.revoked_at IS NULL"
         ).fetchall()
     except sqlite3.Error:
         return out
@@ -1148,7 +1148,7 @@ class EventHub:
                 "MAX(s.blocked_since) AS blocked_since "
                 "FROM members m "
                 "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  ON s.member_id = m.id "
                 "  AND s.revoked_at IS NULL "
                 "WHERE m.channel = ? "
                 "GROUP BY m.id, m.channel "
@@ -1164,7 +1164,7 @@ class EventHub:
                 "MAX(s.last_seen) AS session_last_seen "
                 "FROM members m "
                 "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  ON s.member_id = m.id "
                 "  AND s.revoked_at IS NULL "
                 "WHERE m.channel = ? "
                 "GROUP BY m.id, m.channel "
@@ -1488,12 +1488,16 @@ class StallWatchdog:
         # 1. Map the Claude session_id back to a trio member via the fingerprint
         #    captured at connect. Newest live session wins.
         sess = db.execute(
-            "SELECT s.member_id AS member_id, s.channel AS channel, "
+            "SELECT s.member_id AS member_id, m.channel AS channel, "
             "       COALESCE(m.kind, 'agent') AS kind "
             "FROM sessions s "
-            "JOIN members m ON m.id = s.member_id AND m.channel = s.channel "
+            "JOIN members m ON m.id = s.member_id "
             "WHERE s.fingerprint = ? AND s.revoked_at IS NULL "
-            "ORDER BY s.connected_at DESC LIMIT 1",
+            # Prefer the session's legacy channel as the single watchdog
+            # owner when that presence still exists; otherwise hand ownership
+            # to any surviving channel presence of the global agent.
+            "ORDER BY CASE WHEN m.channel = s.channel THEN 0 ELSE 1 END, "
+            "s.connected_at DESC LIMIT 1",
             (ev["session_id"],),
         ).fetchone()
 

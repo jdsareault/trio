@@ -786,9 +786,10 @@ def _seconds_since(iso_timestamp: str) -> float:
 
 def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
     """Tear down a member: release its claimed tasks, drop its locks, delete the
-    row, and revoke its sessions. Shared by nth_cull and _prune_name_ghosts so
-    the teardown lives in exactly one place. Returns (released_task_ids,
-    released_lock_names); the caller posts its own system line and commits.
+    row, and revoke its global sessions only when no channel presence remains.
+    Shared by nth_cull and _prune_name_ghosts so the teardown lives in exactly
+    one place. Returns (released_task_ids, released_lock_names); the caller
+    posts its own system line and commits.
     """
     released_tasks = db.execute(
         "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
@@ -806,11 +807,18 @@ def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
     ).fetchall()
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, member_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (member_id, channel))
-    db.execute(
-        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-        "AND revoked_at IS NULL",
-        (now, channel, member_id),
-    )
+    remaining_presence = db.execute(
+        "SELECT 1 FROM members WHERE id = ? LIMIT 1", (member_id,)
+    ).fetchone()
+    if not remaining_presence:
+        # Sessions are agent-global. Revoke only after the final channel
+        # presence disappears; membership checks keep a still-joined agent's
+        # token unusable in the culled channel without killing other channels.
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, member_id),
+        )
     return [t["id"] for t in released_tasks], [lk["resource"] for lk in released_locks]
 
 

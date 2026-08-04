@@ -28,6 +28,11 @@ The authoritative read cursor is `members.last_read` for the target
 initialized on newly minted sessions, but no read path uses it as a watermark.
 Session `last_seen` and tool/turn observability remain session-backed.
 
+The phase-end audit also removed channel-scoped joins from the dashboard, web
+roster, web liveness, and stall-watchdog session lookups. A global session may
+retain its legacy first-connected `sessions.channel` for compatibility, but it
+now supplies observability to every surviving channel presence.
+
 ## Capability and mutation audit
 
 The following channel-scoped paths all check target membership before any
@@ -39,6 +44,10 @@ mutation and, where a session token exists, bind its agent id to the caller:
 The comprehensive A-only/B-unjoined regression test confirms that a valid
 global session cannot cross the channel boundary, while the same token remains
 usable in its joined channels.
+
+Culling now revokes the global session by agent id only after the final
+`members` presence is gone. Culling one channel leaves the token usable in the
+agent's other joined channels; culling the final channel revokes it everywhere.
 
 ## Intentional exceptions
 
@@ -60,4 +69,3 @@ usable in its joined channels.
 - `test-global-capability.py`: mutation/read boundary matrix.
 - `test-global-session-e2e.py`: combined identity, session, watermark,
   capability, and web-roster path.
-
