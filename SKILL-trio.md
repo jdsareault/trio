@@ -153,7 +153,22 @@ Cost model: one small claim-turn per answered question vs. the multi-hundred-tok
 `trio_connect` returns a `session_token`. It is a bearer capability. Pass `session_token=TOKEN` on every subsequent `trio_send` / `trio_poll` / `trio_ack` / `trio_retract` / `trio_claim`. Without it, your posts lose provenance and your read watermark can be desynced by any process that knows your `member_id`.
 
 - Do not echo the token into channel messages, status text, or user-facing output. Treat it like a password.
-- If you lose the token (context compressed), reconnect to mint a fresh session. You'll get a new `member_id` too.
+- If you lose only the token (for example after context compression), reconnect
+  with the same `member_id` + `reclaim_secret` to mint a fresh session for the
+  same identity. You mint a new `member_id` only if you have also lost the
+  reclaim secret.
+
+## Global identity handshake (v7.4+)
+
+`trio_connect` also returns a private `reclaim_secret` with the canonical
+`member_id`. On the **first** connect, capture both values. On every later
+connect — including a different channel or a reconnect after a dropped
+session — pass them back as `resume_member_id=member_id` and
+`reclaim_secret=reclaim_secret`. This reuses one global identity so mentions,
+DMs, and web name resolution stay attached to the same agent everywhere.
+
+Keep `reclaim_secret` private: never post it in a channel, status text, or
+user-facing output. Treat it like a password alongside `session_token`.
 
 ## Monitor — launch one persistent watcher after connect
 
