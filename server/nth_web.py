@@ -880,7 +880,60 @@ def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[st
             for r in rows]
 
 
-def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+def resolve_display_name(db: sqlite3.Connection, member_id: str,
+                         cache: Optional[Dict[str, str]] = None) -> str:
+    """Resolve a global agent/member id for web display surfaces.
+
+    Global agent names win over channel-local presence names. For legacy ids
+    without an ``agents`` row, use the lexicographically greatest non-empty
+    member name across channels, then fall back to the id itself. This is
+    presentation-only; callers still use the id for auth and visibility.
+    """
+    ident = str(member_id or "")
+    if not ident:
+        return ident
+    if cache is not None and ident in cache:
+        return cache[ident]
+
+    def row_name(row):
+        if row is None:
+            return ""
+        try:
+            return (row["name"] or "").strip()
+        except (IndexError, KeyError, TypeError):
+            return (row[0] or "").strip()
+
+    try:
+        agent = db.execute(
+            "SELECT name FROM agents WHERE id = ?", (ident,)
+        ).fetchone()
+        name = row_name(agent)
+        if name:
+            if cache is not None:
+                cache[ident] = name
+            return name
+    except sqlite3.Error:
+        pass
+
+    try:
+        member = db.execute(
+            "SELECT MAX(name) AS name FROM members "
+            "WHERE id = ? AND COALESCE(name, '') <> ''", (ident,)
+        ).fetchone()
+        name = row_name(member)
+        if name:
+            if cache is not None:
+                cache[ident] = name
+            return name
+    except sqlite3.Error:
+        pass
+    if cache is not None:
+        cache[ident] = ident
+    return ident
+
+
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row,
+                   name_cache: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Build the SSE 'message' payload from a messages row. Shared by the
     history prime and the live tick so both ship identical shapes, including
     the selectable-answers fields (choices/selection/reply_to). Tolerant of
@@ -890,7 +943,7 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "type": "message",
         "id": r["id"],
         "member_id": r["member_id"],
-        "member_name": r["member_name"] or r["member_id"],
+        "member_name": resolve_display_name(db, r["member_id"], name_cache),
         "content": r["content"] or "",
         "mentions": parse_mentions_json(r["mentions"]),
         "refs": parse_mentions_json(r["refs"] if "refs" in keys else ""),
@@ -1000,7 +1053,8 @@ class EventHub:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
-            members = self._fetch_roster(db)
+            name_cache: Dict[str, str] = {}
+            members = self._fetch_roster(db, name_cache)
             # Stamped for the same reason as message events (see the comment
             # a few lines below on _message_event's channel field): the
             # cross-channel workspace stream multiplexes every hub's roster
@@ -1018,7 +1072,7 @@ class EventHub:
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                ev = _message_event(db, r)
+                ev = _message_event(db, r, name_cache)
                 # Stamp the channel this hub is scoped to. Needed so the
                 # cross-channel workspace SSE stream (_serve_workspace_sse,
                 # which multiplexes every channel's hub into one connection)
@@ -1062,7 +1116,8 @@ class EventHub:
                     self._subs.remove(d)
 
     # ── DB poll ──
-    def _fetch_roster(self, db: sqlite3.Connection) -> List[Dict[str, Any]]:
+    def _fetch_roster(self, db: sqlite3.Connection,
+                      name_cache: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         # v6.2+ session-mode clients write sessions.last_read / last_seen
         # and never touch members.*. Reconcile like nth_monitor.py:171-183
         # so the web console sees real watermark + liveness movement.
@@ -1157,7 +1212,7 @@ class EventHub:
             context_pct, context_tokens = context_by_id.get(r["id"], (None, None))
             out.append({
                 "id": r["id"],
-                "name": r["name"] or r["id"],
+                "name": resolve_display_name(db, r["id"], name_cache),
                 "avatar_url": character_avatars.get(r["id"], ""),
                 "status_text": r["status_text"] or "",
                 "last_seen": effective_last_seen,
@@ -1223,6 +1278,7 @@ class EventHub:
 
             while not self._stop.is_set():
                 try:
+                    name_cache: Dict[str, str] = {}
                     prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
@@ -1231,7 +1287,7 @@ class EventHub:
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        ev = _message_event(db, r)
+                        ev = _message_event(db, r, name_cache)
                         ev["channel"] = self.channel  # see prime-payload comment above
                         self._broadcast(ev)
                         self.last_msg_id = r["id"]
@@ -1249,13 +1305,13 @@ class EventHub:
                         (self.channel, prev_last, self._change_scan, self._change_scan),
                     ).fetchall()
                     for r in changed:
-                        ev = _message_event(db, r)
+                        ev = _message_event(db, r, name_cache)
                         ev["type"] = "message_update"
                         ev["channel"] = self.channel
                         self._broadcast(ev)
                     self._change_scan = scan_now
 
-                    members = self._fetch_roster(db)
+                    members = self._fetch_roster(db, name_cache)
                     snapshot = json.dumps(members, sort_keys=True)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
@@ -3535,8 +3591,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "ORDER BY id DESC LIMIT 200",
                     (self.channel, like),
                 ).fetchall()
+            name_cache: Dict[str, str] = {}
             results = [{"id": r["id"], "member_id": r["member_id"],
-                        "member_name": r["member_name"] or r["member_id"],
+                        "member_name": resolve_display_name(db, r["member_id"], name_cache),
                         "content": r["content"] or "", "created_at": r["created_at"]}
                        for r in rows
                        if viewer_all_seeing or can_see(
@@ -3752,13 +3809,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "ORDER BY m.id DESC LIMIT 2000",
                 (operator_id,),
             ).fetchall()
-            names: Dict[str, str] = {}
-            for r in db.execute("SELECT id, name FROM agents").fetchall():
-                names[r["id"]] = r["name"]
-            for r in db.execute(
-                    "SELECT id, MAX(name) AS name FROM members GROUP BY id").fetchall():
-                names.setdefault(r["id"], r["name"] or r["id"])
-            names[operator_id] = ident.display_name
+            name_cache: Dict[str, str] = {operator_id: ident.display_name}
+
+            def display_name(member_id: str) -> str:
+                if member_id not in name_cache:
+                    resolve_display_name(db, member_id, name_cache)
+                return name_cache[member_id]
+
             archive_rows = db.execute(
                 "SELECT thread_key, archived_through_id, archived_at "
                 "FROM dm_archives WHERE owner_id=?", (operator_id,)).fetchall()
@@ -3777,10 +3834,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if key not in yours:
                         yours[key] = {
                             "key": key, "member_ids": others,
-                            "name": ", ".join(names.get(i, i) for i in others),
+                            "name": ", ".join(display_name(i) for i in others),
                             "channel": r["channel"], "last_id": r["id"],
                             "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
-                            "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                            "from": display_name(r["member_id"]),
                             "unread": 0,
                         }
                     if r["member_id"] != operator_id and not r["is_read"]:
@@ -3791,10 +3848,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if key and key not in agent_threads:
                         agent_threads[key] = {
                             "key": key, "member_ids": ids,
-                            "name": " ↔ ".join(names.get(i, i) for i in ids),
+                            "name": " ↔ ".join(display_name(i) for i in ids),
                             "channel": r["channel"], "last_id": r["id"],
                             "last_at": r["created_at"], "preview": (r["content"] or "")[:120],
-                            "from": r["member_name"] or names.get(r["member_id"], r["member_id"]),
+                            "from": display_name(r["member_id"]),
                             "unread": 0,
                         }
 
@@ -3828,7 +3885,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     marker and latest and latest <= marker["archived_through_id"])
                 if thread_is_archived == archived:
                     for r in reversed(matched):
-                        evt = _message_event(db, r)
+                        evt = _message_event(db, r, name_cache)
                         evt["channel"] = r["channel"]
                         merged.append(evt)
 
@@ -3839,7 +3896,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             ).fetchall()
             for a in agent_rows:
                 channels = public_agent_channels(db, a["id"])
-                targets.append({"id": a["id"], "name": a["name"],
+                targets.append({"id": a["id"], "name": resolve_display_name(db, a["id"]),
                                 "state": a["state"], "model": a["model"],
                                 "channels": channels,
                                 "dm_channel": AGENT_INBOX_CHANNEL})
@@ -3990,7 +4047,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 _agent_live = _agent_is_live(
                     sup.is_running(r["id"]), _hb_fresh, _agent_working, r["state"] or "")
                 agents.append({
-                    "id": r["id"], "name": r["name"], "model": r["model"],
+                    "id": r["id"], "name": resolve_display_name(db, r["id"]), "model": r["model"],
                     "state": r["state"], "managed": bool(r["managed"]),
                     "effort": (r["effort"] if "effort" in r.keys() else "") or "",
                     "provider": r["runtime_provider"] or "claude",
@@ -4126,6 +4183,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "ORDER BY id DESC LIMIT 2000",
                 (operator_id,)).fetchall()
             questions = []
+            name_cache: Dict[str, str] = {}
             for r in rows:
                 choices = parse_obj_json(r["choices"])
                 if not isinstance(choices, dict) or choices.get("target") != operator_id:
@@ -4141,7 +4199,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "id": r["id"],
                     "channel": r["channel"],
                     "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
+                    "member_name": resolve_display_name(db, r["member_id"], name_cache),
                     "created_at": r["created_at"],
                     "question": qs[0].get("question", "") or "Question",
                     "questions": qs,
@@ -4173,6 +4231,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "ORDER BY m.id DESC LIMIT 2000",
                 (operator_id, f"%{operator_id}%", operator_id)).fetchall()
             mentions = []
+            name_cache: Dict[str, str] = {}
             unread_count = 0
             for r in rows:
                 m_ids = parse_mentions_json(r["mentions"])
@@ -4185,7 +4244,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "id": r["id"],
                     "channel": r["channel"],
                     "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
+                    "member_name": resolve_display_name(db, r["member_id"], name_cache),
                     "created_at": r["created_at"],
                     "content": r["content"] or "",
                     "read": is_read,
