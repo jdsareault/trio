@@ -496,7 +496,7 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
             "  s.blocked_since AS blocked_since "
             "FROM members m "
             "LEFT JOIN sessions s "
-            "  ON s.member_id = m.id AND s.channel = m.channel AND s.revoked_at IS NULL"
+            "  ON s.member_id = m.id AND s.revoked_at IS NULL"
         ).fetchall()
     except sqlite3.Error:
         return out
@@ -746,13 +746,17 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
     )
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
-    # Revoke their sessions so a lingering token can't be reused if the same
-    # member_id ever re-joins (defence-in-depth; also stops row build-up).
-    db.execute(
-        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-        "AND revoked_at IS NULL",
-        (now, channel, target_id),
-    )
+    # Sessions are agent-global: revoke only when this was the final channel
+    # presence, matching nth_server._purge_member.
+    remaining_presence = db.execute(
+        "SELECT 1 FROM members WHERE id = ? LIMIT 1", (target_id,)
+    ).fetchone()
+    if not remaining_presence:
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, target_id),
+        )
 
     released_ids = [r["id"] for r in released]
     msg = f"[culled] {target_name} ({target_id}) removed from channel"
@@ -1129,9 +1133,9 @@ class EventHub:
     # ── DB poll ──
     def _fetch_roster(self, db: sqlite3.Connection,
                       name_cache: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-        # v6.2+ session-mode clients write sessions.last_read / last_seen
-        # and never touch members.*. Reconcile like nth_monitor.py:171-183
-        # so the web console sees real watermark + liveness movement.
+        # Read state is per (agent, channel), so members.last_read is the
+        # web console's sole watermark. Session rows still provide live
+        # heartbeat/observability fields; their legacy last_read is global.
         # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
         try:
             rows = db.execute(
@@ -1140,7 +1144,6 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, m.model AS model, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen, "
                 "MAX(s.last_turn_end) AS session_last_turn_end, "
                 "MAX(s.last_tool_name) AS last_tool_name, "
@@ -1149,7 +1152,7 @@ class EventHub:
                 "MAX(s.blocked_since) AS blocked_since "
                 "FROM members m "
                 "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  ON s.member_id = m.id "
                 "  AND s.revoked_at IS NULL "
                 "WHERE m.channel = ? "
                 "GROUP BY m.id, m.channel "
@@ -1162,11 +1165,10 @@ class EventHub:
                 "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen "
                 "FROM members m "
                 "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  ON s.member_id = m.id "
                 "  AND s.revoked_at IS NULL "
                 "WHERE m.channel = ? "
                 "GROUP BY m.id, m.channel "
@@ -1201,10 +1203,7 @@ class EventHub:
             pass
         out = []
         for r in rows:
-            effective_last_read = max(
-                r["member_last_read"] or 0,
-                r["session_last_read"] or 0,
-            )
+            effective_last_read = r["member_last_read"] or 0
             m_ls = r["member_last_seen"] or ""
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
@@ -1493,12 +1492,16 @@ class StallWatchdog:
         # 1. Map the Claude session_id back to a trio member via the fingerprint
         #    captured at connect. Newest live session wins.
         sess = db.execute(
-            "SELECT s.member_id AS member_id, s.channel AS channel, "
+            "SELECT s.member_id AS member_id, m.channel AS channel, "
             "       COALESCE(m.kind, 'agent') AS kind "
             "FROM sessions s "
-            "JOIN members m ON m.id = s.member_id AND m.channel = s.channel "
+            "JOIN members m ON m.id = s.member_id "
             "WHERE s.fingerprint = ? AND s.revoked_at IS NULL "
-            "ORDER BY s.connected_at DESC LIMIT 1",
+            # Prefer the session's legacy channel as the single watchdog
+            # owner when that presence still exists; otherwise hand ownership
+            # to any surviving channel presence of the global agent.
+            "ORDER BY CASE WHEN m.channel = s.channel THEN 0 ELSE 1 END, "
+            "s.connected_at DESC LIMIT 1",
             (ev["session_id"],),
         ).fetchone()
 
@@ -4931,16 +4934,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            # Join the event ring to this channel's live sessions for the member.
-            # The ring is already capped per session; LIMIT bounds the response.
+            # Join the event ring to the agent-global live session. Tool events
+            # have no channel column; channel membership is the access boundary
+            # for this handler, while the session itself is global.
             rows = db.execute(
                 "SELECT te.tool_name AS tool_name, te.target AS target, "
                 "te.created_at AS created_at "
                 "FROM tool_events te "
                 "JOIN sessions s ON s.fingerprint = te.session_id "
-                "WHERE s.channel = ? AND s.member_id = ? AND s.revoked_at IS NULL "
+                "WHERE s.member_id = ? AND s.revoked_at IS NULL "
                 "ORDER BY te.id DESC LIMIT 40",
-                (self.channel, member),
+                (member,),
             ).fetchall()
             events = [{
                 "tool_name": r["tool_name"] or "",

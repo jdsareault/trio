@@ -68,6 +68,12 @@ def _find_free_port(preferred: int = 8000) -> int:
 SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# One-time schema migration marker. P1 sessions were channel-scoped; once
+# token lookup becomes global, retaining those bearer tokens would silently
+# grant cross-channel authority. The first post-upgrade get_db() revokes them;
+# later calls leave newly minted global sessions alone.
+GLOBAL_SESSION_MIGRATION = "p2-global-agent-session-v1"
+
 # One nth_server.py subprocess is spawned per managed Claude agent (each
 # `claude` invocation gets its own --mcp-config stdio child), so this process
 # only ever speaks for one Trio identity. Captured on trio_connect so
@@ -401,10 +407,9 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             PRIMARY KEY (owner_id, thread_key)
         )
     """)
-    # v6: sessions table. Per-session watermark + capability role so
-    # sub-agents spawned with a read_only token cannot forge posts under
-    # the parent's member_id. member_id stays the public identity;
-    # session_token is the private mutation capability.
+    # v6/P2: sessions table. The capability is now agent-global; channel is
+    # retained for legacy observability/ownership rows. member_id stays the
+    # public identity; session_token is the private mutation capability.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_token   TEXT PRIMARY KEY,
@@ -421,6 +426,25 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name       TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    # P1 minted one live bearer token per channel. Revoke that pre-upgrade
+    # population exactly once before P2's global token lookup can authenticate
+    # it in another channel. INSERT OR IGNORE is the idempotent guard and also
+    # serializes concurrent first callers through SQLite's write transaction.
+    migration = conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (GLOBAL_SESSION_MIGRATION, now_iso()),
+    )
+    if migration.rowcount:
+        conn.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL",
+            (now_iso(),),
+        )
     # last_turn_end: stamped by the nth_turn_hook Stop/StopFailure hook when a
     # Claude turn ends, so the dashboard can tell "working" (acted since the last
     # turn end) from "idle" (turn ended, waiting). Added here too for DBs that
@@ -445,6 +469,10 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_member_global
+        ON sessions (member_id)
     """)
     # Reverse lookup: the stall-watchdog resolves a StopFailure hook's
     # session_id back to a member via sessions.fingerprint.
@@ -786,9 +814,10 @@ def _seconds_since(iso_timestamp: str) -> float:
 
 def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
     """Tear down a member: release its claimed tasks, drop its locks, delete the
-    row, and revoke its sessions. Shared by nth_cull and _prune_name_ghosts so
-    the teardown lives in exactly one place. Returns (released_task_ids,
-    released_lock_names); the caller posts its own system line and commits.
+    row, and revoke its global sessions only when no channel presence remains.
+    Shared by nth_cull and _prune_name_ghosts so the teardown lives in exactly
+    one place. Returns (released_task_ids, released_lock_names); the caller
+    posts its own system line and commits.
     """
     released_tasks = db.execute(
         "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
@@ -806,11 +835,18 @@ def _purge_member(db, channel: str, member_id: str, now: str) -> tuple:
     ).fetchall()
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, member_id))
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (member_id, channel))
-    db.execute(
-        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
-        "AND revoked_at IS NULL",
-        (now, channel, member_id),
-    )
+    remaining_presence = db.execute(
+        "SELECT 1 FROM members WHERE id = ? LIMIT 1", (member_id,)
+    ).fetchone()
+    if not remaining_presence:
+        # Sessions are agent-global. Revoke only after the final channel
+        # presence disappears; membership checks keep a still-joined agent's
+        # token unusable in the culled channel without killing other channels.
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, member_id),
+        )
     return [t["id"] for t in released_tasks], [lk["resource"] for lk in released_locks]
 
 
@@ -865,14 +901,40 @@ def _prune_name_ghosts(db, channel: str, name: str, now: str) -> list:
 
 def _mint_session_token(db, member_id: str, channel: str,
                         role: str = "primary", fingerprint: str = "",
-                        pid: int | None = None) -> str:
-    """Mint a new session token for (member_id, channel). Role is 'primary'
-    (full capability) or 'read_only' (poll/history only — rejects send/ack/retract).
+                        pid: int | None = None,
+                        reuse_existing: bool = False) -> str:
+    """Mint or refresh a session token for an agent.
 
-    The token is a bearer capability: whoever holds it can act as (member_id,
-    channel) with the given role. Never log the token value — this function
-    returns it to the caller and nowhere else.
+    ``channel`` remains part of the legacy row shape for observability and old
+    databases, but the token is now resolved globally by ``member_id``. When
+    ``reuse_existing`` is true (the connect path), an active session for this
+    agent is refreshed and returned instead of minting a second bearer token.
+    Role is 'primary' (full capability) or 'read_only' (poll/history only —
+    rejects send/ack/retract).
+
+    The token is a bearer capability: whoever holds it can act as the agent
+    identified by ``member_id`` in any channel where that agent is a member,
+    with the given role. Never log the token value — this function returns it
+    to the caller and nowhere else.
     """
+    if reuse_existing:
+        existing = db.execute(
+            "SELECT session_token FROM sessions "
+            "WHERE member_id = ? AND revoked_at IS NULL "
+            "ORDER BY last_seen DESC, connected_at DESC LIMIT 1",
+            (member_id,),
+        ).fetchone()
+        if existing:
+            # A connect is a primary agent session. Refresh process metadata so
+            # the one global session continues to describe the live process;
+            # retain the original channel for compatibility with old rows.
+            db.execute(
+                "UPDATE sessions SET role = ?, pid = ?, fingerprint = ?, "
+                "last_seen = ? WHERE session_token = ?",
+                (role, pid, fingerprint, now_iso(), existing["session_token"]),
+            )
+            return existing["session_token"]
+
     # Use secrets (CSPRNG) not random.choices — the local boundary is
     # trusted today but SSE remote exposure would leak predictable tokens.
     token = "s_" + secrets.token_hex(16)
@@ -887,13 +949,17 @@ def _mint_session_token(db, member_id: str, channel: str,
 
 
 def _get_session(db, channel: str, session_token: str):
-    """Look up a session. Returns row or None. Rejects revoked tokens."""
+    """Look up a session globally. Returns row or None. Rejects revoked tokens.
+
+    ``channel`` remains in the signature for callers and legacy compatibility,
+    but is deliberately not an authentication constraint: a global agent
+    session must work in every channel where that agent has membership.
+    """
     if not session_token:
         return None
     row = db.execute(
-        "SELECT * FROM sessions WHERE session_token = ? AND channel = ? "
-        "AND revoked_at IS NULL",
-        (session_token, channel),
+        "SELECT * FROM sessions WHERE session_token = ? AND revoked_at IS NULL",
+        (session_token,),
     ).fetchone()
     return row
 
@@ -1236,19 +1302,20 @@ def nth_connect(
                        allow_all_seeing=False)
         ][:10]
 
-        # Set watermark to current latest message. Use the true latest id
-        # (including any hidden DMs) so the joiner's cursor starts past them —
-        # a DM sent before they joined must never surface on their first poll.
+        # Initialize only a newly-created channel presence to the current
+        # latest message. A reclaimed presence already has the authoritative
+        # per-channel cursor in members.last_read; resetting it on reconnect
+        # would discard unread work (and the old session cursor is global).
         latest_id = recent_raw[0]["id"] if recent_raw else 0
-        db.execute(
-            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-            (latest_id, member_id, channel),
-        )
+        if not (reclaiming and reclaimed_existing):
+            db.execute(
+                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+                (latest_id, member_id, channel),
+            )
 
-        # v6: mint a primary session token for this connect. Clients that
-        # pass it to subsequent RPCs get per-session watermarks and author
-        # provenance. Clients that ignore it see legacy (member_id-only)
-        # behavior — backward-compatible.
+        # Mint or refresh the agent-global primary session for this connect.
+        # The channel-local read cursor lives in members.last_read; the
+        # session carries capability, provenance, and liveness only.
         session_pid = None
         try:
             session_pid = int(os.environ.get("CLAUDE_PID") or os.getpid())
@@ -1265,14 +1332,22 @@ def nth_connect(
             or os.environ.get("CLAUDE_SESSION_ID")
             or ""
         )[:64]
+        existing_global_session = db.execute(
+            "SELECT 1 FROM sessions WHERE member_id = ? AND revoked_at IS NULL "
+            "LIMIT 1", (member_id,)
+        ).fetchone()
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
+            reuse_existing=True,
         )
-        db.execute(
-            "UPDATE sessions SET last_read = ? WHERE session_token = ?",
-            (latest_id, session_token),
-        )
+        # Keep the legacy sessions.last_read column initialized for old
+        # observers, but it is no longer a read source of truth.
+        if not existing_global_session:
+            db.execute(
+                "UPDATE sessions SET last_read = ? WHERE session_token = ?",
+                (latest_id, session_token),
+            )
         db.commit()
 
         # Fetch objective (pinned message) if any
@@ -2450,9 +2525,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     from_name_lower = from_name.strip().lower() if from_name else ""
     db = get_db()
 
-    # v6: resolve session_token up front. If provided, watermark lives in
-    # sessions.last_read (per-session) and auto_ack defaults to False.
-    # If not provided, watermark lives in members.last_read (legacy).
+    # Resolve session_token up front. The token is a global capability; the
+    # read cursor is always the target channel's members.last_read.
     sess_row = None
     if session_token:
         sess_row = _get_session(db, channel, session_token)
@@ -2474,13 +2548,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
 
-            # Current watermark depends on whether the caller uses a session token
-            if sess_row is not None:
-                # Re-read sessions row in case an ack bumped it between iterations
-                fresh = _get_session(db, channel, session_token)
-                current_watermark = fresh["last_read"] if fresh else sess_row["last_read"]
-            else:
-                current_watermark = member["last_read"]
+            # Read state is per agent/channel, even though the capability
+            # session is global to the agent.
+            current_watermark = member["last_read"]
 
             ch = _get_channel(db, channel)
             if not ch:
@@ -2605,8 +2675,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
                 # Advance watermark behavior depends on session mode:
                 #   - session_token present: NEVER auto-advance. Caller must
-                #     call nth_ack explicitly. This is the split-ack path
-                #     that prevents rogue-holder watermark desync.
+                #     call nth_ack explicitly, but that ack updates this
+                #     channel's members.last_read row.
                 #   - no session_token, auto_ack=True: legacy behavior —
                 #     advance members.last_read to the batch max.
                 #   - no session_token, auto_ack=False: don't advance.
@@ -2777,7 +2847,8 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
 
-        # v6: session_token resolves which watermark to advance
+        # A session token authenticates the agent globally; the target
+        # channel's members.last_read remains the sole read watermark.
         sess = None
         if session_token:
             sess = _get_session(db, channel, session_token)
@@ -2785,9 +2856,7 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
                 return json.dumps({"error": "Invalid or revoked session_token."})
             if sess["member_id"] != member_id:
                 return json.dumps({"error": "session_token does not match member_id."})
-            current = sess["last_read"]
-        else:
-            current = member["last_read"]
+        current = member["last_read"]
 
         # force=True allows walking back the watermark (e.g., to recover from
         # a rogue sub-agent that advanced past unread messages). Without force,
@@ -2811,15 +2880,14 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if through_id < 0:
             return json.dumps({"error": f"through_id cannot be negative."})
 
+        db.execute(
+            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+            (through_id, member_id, channel),
+        )
         if sess is not None:
             db.execute(
-                "UPDATE sessions SET last_read = ?, last_seen = ? WHERE session_token = ?",
-                (through_id, now_iso(), session_token),
-            )
-        else:
-            db.execute(
-                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-                (through_id, member_id, channel),
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now_iso(), session_token),
             )
         db.commit()
         return json.dumps({"ok": True, "watermark": through_id, "force": force if force else None})
