@@ -169,12 +169,15 @@ CHAIN2 = chain2["message_id"]
 check("(R7) depth-2 reply reaches original participant Bob", CHAIN2 in poll_ids(bob))
 check("(R7) depth-2 reply still hidden from outsider Carol", CHAIN2 not in poll_ids(carol))
 
-# (R8) Never-broadens with sigils: an @mention of a NON-participant in an
-#      auto-scoped reply widens the wake set (mentions) but NOT visibility
-#      (recipients). Bob replies to the Alice→Bob DM with "@Dave hi".
+# (R8) Wake ⊆ visibility: an @mention of a NON-participant in an auto-scoped
+#      (DM) reply is INERT — it neither wakes (mentions) nor reveals
+#      (recipients). narrow_wake drops any wake target that isn't a recipient,
+#      so a message can never wake someone who can't see it. Bob replies to the
+#      Alice→Bob DM with "@Dave look"; Dave is outside the DM.
 davedm = json.loads(srv.nth_send(channel=CH, member_id=bob, message="@Dave look", reply_to=DM_ID))
 DAVEDM = davedm["message_id"]
-check("(R8) @non-participant is added to mentions (wake)", dave in row_mentions(DAVEDM))
+check("(R8) @non-participant is NOT added to mentions (not woken — narrow_wake)",
+      dave not in row_mentions(DAVEDM))
 check("(R8) @non-participant is NOT added to recipients (visibility unchanged)",
       dave not in (row_recipients(DAVEDM) or []))
 check("(R8) @non-participant Dave still cannot see the scoped reply",
