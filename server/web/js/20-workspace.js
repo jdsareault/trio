@@ -471,7 +471,7 @@
     const splitCount = Trio.splitscreen?.paneCount?.() || 0;
     if (splitCount) {
       const splitLabel = Trio.splitscreen?.label?.() || 'Chats';
-      const splitItem = navItem(splitCount + ' ' + splitLabel, 'split', () => Trio.splitscreen?.show?.(), '', splitActive);
+      const splitItem = navItem(splitCount + ' ' + splitLabel, 'split', () => Trio.splitscreen?.toggle?.(), '', splitActive);
       splitItem.classList.add('split-nav-item');
       rail.append(splitItem);
     }
