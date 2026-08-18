@@ -145,6 +145,7 @@
   function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }); }
   function openChannel(code, extra = '') {
     const readOnly = extra === 'archived';
+    Trio.splitscreen?.hide?.();
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
     loadConversation(code, '#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
   }
@@ -466,6 +467,12 @@
       if (state.staleOpen?.dms) nav.staleDms.forEach(d => dmItems.push(dmItem(d)));
     }
     rail.append(section('Workspace', workspaceItems));
+    const splitCount = Trio.splitscreen?.paneCount?.() || 0;
+    if (splitCount) {
+      const splitItem = navItem('[' + splitCount + '] Chats', 'split', () => Trio.splitscreen?.show?.(), '', !!Trio.splitscreen?.isActive?.());
+      splitItem.classList.add('split-nav-item');
+      rail.append(splitItem);
+    }
     rail.append(section('Channels', channelItems, true, createChannel, 'Create channel',
                         'No channels yet — use + to make one.'));
     rail.append(section('Direct Messages', dmItems, true, openDmDialog, 'Start direct message',
@@ -482,6 +489,7 @@
     if (m) m.textContent = subtitle || '';
   }
   function showConversationPage() {
+    Trio.splitscreen?.hide?.();
     const shell = document.querySelector('.conversation-shell');
     shell?.classList.remove('workspace-page');
     document.querySelectorAll('[data-trio-view]').forEach(panel => { panel.hidden = true; });
@@ -1050,6 +1058,7 @@
     panel.append(list);
   }
   function showView(view) {
+    Trio.splitscreen?.hide?.();
     state.view = view;
     state.channel = '';
     state.dmKey = '';

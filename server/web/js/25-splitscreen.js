@@ -7,6 +7,7 @@
   const themes = [['sage','Sage'],['sky','Sky'],['coral','Coral'],['violet','Violet']];
   const split = { active: false, panes: [], streams: new Map() };
   const $ = id => document.getElementById(id);
+  function syncRail() { Trio.workspace?.render?.(); }
   const paneId = target => `${target.kind}:${target.key}`;
   const targets = () => {
     const channels = (state.channels || []).filter(c => !c.archived).map(c => ({kind:'channel',key:c.code,title:'#' + c.code,channel:c.code}));
@@ -63,12 +64,14 @@
     stream.onmessage = event => { try { const payload = JSON.parse(event.data); const incoming = Array.isArray(payload) ? payload : (payload.messages || [payload.message || payload]); incoming.filter(m => messageMatches(m, pane) && !pane.messages.some(old => old.id === m.id)).forEach(m => pane.messages.push(m)); pane.loading = false; render(); } catch (_) {} };
     stream.onerror = () => { pane.loading = false; render(); };
   }
-  function addPane(target = targets()[0]) { if (!target || split.panes.length >= MAX_PANES || split.panes.some(p => p.id === paneId(target))) return; const pane = {id:paneId(target), target, theme:themes[split.panes.length % themes.length][0], messages:[], loading:true}; split.panes.push(pane); listen(pane); render(); }
-  function removePane(id) { closeStream(id); split.panes = split.panes.filter(p => p.id !== id); if (!split.panes.length) close(); else render(); }
+  function addPane(target = targets()[0]) { if (!target || split.panes.length >= MAX_PANES || split.panes.some(p => p.id === paneId(target))) return; const pane = {id:paneId(target), target, theme:themes[split.panes.length % themes.length][0], messages:[], loading:true}; split.panes.push(pane); listen(pane); render(); syncRail(); }
+  function removePane(id) { closeStream(id); split.panes = split.panes.filter(p => p.id !== id); if (!split.panes.length) close(); else { render(); syncRail(); } }
   function render() { const view = $('split-view'); if (!view || !split.active) return; view.replaceChildren(); const grid = document.createElement('div'); grid.className = 'split-grid'; split.panes.forEach(pane => grid.append(renderPane(pane))); view.append(grid); if (split.panes.length < MAX_PANES) { const add = document.createElement('button'); add.type = 'button'; add.className = 'split-add'; add.textContent = '+ Add another channel or DM'; add.addEventListener('click', () => addPane(targets().find(t => !split.panes.some(p => p.id === paneId(t))))); view.append(add); } }
-  function open() { if (!split.active) { split.active = true; const target = currentTarget(); addPane(target); } const shell = document.querySelector('.conversation-shell'); shell?.classList.add('splitscreen-active'); $('split-view')?.removeAttribute('hidden'); render(); }
-  function close() { split.active = false; split.panes.forEach(pane => closeStream(pane.id)); split.panes = []; document.querySelector('.conversation-shell')?.classList.remove('splitscreen-active'); $('split-view')?.setAttribute('hidden',''); }
-  function toggle() { if (split.active) close(); else open(); }
-  function mount() { Trio.splitscreen = {open, close, toggle, addPane, render}; }
-  Trio.splitscreen = {open, close, toggle, addPane, render};
+  function show() { if (!split.panes.length) return open(); split.active = true; const shell = document.querySelector('.conversation-shell'); shell?.classList.add('splitscreen-active'); $('split-view')?.removeAttribute('hidden'); render(); syncRail(); }
+  function hide() { if (!split.active) return; split.active = false; document.querySelector('.conversation-shell')?.classList.remove('splitscreen-active'); $('split-view')?.setAttribute('hidden',''); syncRail(); }
+  function open() { if (!split.panes.length) { split.active = true; addPane(currentTarget()); } else show(); }
+  function close() { split.active = false; split.panes.forEach(pane => closeStream(pane.id)); split.panes = []; document.querySelector('.conversation-shell')?.classList.remove('splitscreen-active'); $('split-view')?.setAttribute('hidden',''); syncRail(); }
+  function toggle() { if (split.active) hide(); else show(); }
+  function mount() { Trio.splitscreen = {open, show, hide, close, toggle, addPane, render, isActive: () => split.active, paneCount: () => split.panes.length}; }
+  Trio.splitscreen = {open, show, hide, close, toggle, addPane, render, isActive: () => split.active, paneCount: () => split.panes.length};
 })();
