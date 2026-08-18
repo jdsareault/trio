@@ -1359,7 +1359,11 @@
     items.querySelectorAll('.account-item, .split-account-item').forEach(btn => btn.addEventListener('click', () => {
       const view = btn.dataset.view;
       closeAccountMenu();
-      if (view === 'splitscreen') { Trio.splitscreen?.toggle?.(); return; }
+      if (view === 'splitscreen') {
+        if (Trio.splitscreen?.isActive?.()) Trio.splitscreen?.close?.();
+        else Trio.splitscreen?.open?.();
+        return;
+      }
       navigateView(view);
     }));
   }
