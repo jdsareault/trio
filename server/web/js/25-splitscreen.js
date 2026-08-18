@@ -57,7 +57,7 @@
     composer.addEventListener('submit', async event => { event.preventDefault(); const input = composer.querySelector('input'); const content = input.value.trim(); if (!content) return; const payload = {content}; if (pane.target.kind === 'channel') payload.channel = pane.target.channel; else { payload.recipients = pane.target.memberIds.slice(); if (pane.target.channel) payload.channel = pane.target.channel; } const sendUrl = pane.target.channel ? '/api/send?channel=' + encodeURIComponent(pane.target.channel) : '/api/send'; try { const result = await Trio.api.post(sendUrl, payload, false); if (result?.message) { pane.messages.push(result.message); render(); } input.value = ''; } catch (error) { Trio.ui?.toast?.(error.message || 'Could not send message'); } });
     wrap.append(composer); return wrap;
   }
-  function setTarget(pane, target) { closeStream(pane.id); pane.id = paneId(target); pane.target = target; pane.messages = []; pane.loading = true; listen(pane); render(); }
+  function setTarget(pane, target) { closeStream(pane.id); pane.id = paneId(target); pane.target = target; pane.messages = []; pane.loading = true; listen(pane); render(); syncRail(); }
   function listen(pane) {
     if (!pane.target.channel) { pane.loading = false; return; }
     const stream = new EventSource(`/api/events?channel=${encodeURIComponent(pane.target.channel)}`); split.streams.set(pane.id, stream);
@@ -72,6 +72,7 @@
   function open() { if (!split.panes.length) { split.active = true; addPane(currentTarget()); } else show(); }
   function close() { split.active = false; split.panes.forEach(pane => closeStream(pane.id)); split.panes = []; document.querySelector('.conversation-shell')?.classList.remove('splitscreen-active'); $('split-view')?.setAttribute('hidden',''); syncRail(); }
   function toggle() { if (split.active) hide(); else show(); }
-  function mount() { Trio.splitscreen = {open, show, hide, close, toggle, addPane, render, isActive: () => split.active, paneCount: () => split.panes.length}; }
-  Trio.splitscreen = {open, show, hide, close, toggle, addPane, render, isActive: () => split.active, paneCount: () => split.panes.length};
+  function label() { const kinds = new Set(split.panes.map(pane => pane.target.kind)); return kinds.size === 1 && kinds.has('channel') ? 'Channels' : kinds.size === 1 && kinds.has('dm') ? 'DMs' : 'Chats'; }
+  function mount() { Trio.splitscreen = {open, show, hide, close, toggle, addPane, render, label, isActive: () => split.active, paneCount: () => split.panes.length}; }
+  Trio.splitscreen = {open, show, hide, close, toggle, addPane, render, label, isActive: () => split.active, paneCount: () => split.panes.length};
 })();

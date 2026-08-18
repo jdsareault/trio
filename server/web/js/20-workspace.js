@@ -470,7 +470,8 @@
     rail.append(section('Workspace', workspaceItems));
     const splitCount = Trio.splitscreen?.paneCount?.() || 0;
     if (splitCount) {
-      const splitItem = navItem(splitCount + ' Chats', 'split', () => Trio.splitscreen?.show?.(), '', splitActive);
+      const splitLabel = Trio.splitscreen?.label?.() || 'Chats';
+      const splitItem = navItem(splitCount + ' ' + splitLabel, 'split', () => Trio.splitscreen?.show?.(), '', splitActive);
       splitItem.classList.add('split-nav-item');
       rail.append(splitItem);
     }
