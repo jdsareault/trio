@@ -8286,6 +8286,7 @@ WEB_CSS_FILES = (
     "css/20-conversation.css",  # message rows, ask cards, attachments
     "css/30-workspace.css",     # home/inbox/tasks/roster/prefs pages
     "css/35-historic.css",      # Win98/3.1, Game Boy, and GeoCities component skins
+    "css/37-splitscreen.css",   # multi-conversation workspace panes
     "css/40-responsive.css",    # @media overrides — must stay last
 )
 
@@ -8320,7 +8321,7 @@ WEB_JS_FILES = (
     "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
     "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
-    "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
+    "js/14-lightbox.js", "js/20-workspace.js", "js/25-splitscreen.js", "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
     "js/45-notifications.js", "js/46-data.js",
     "js/90-boot.js", "js/99-test-hook.js",

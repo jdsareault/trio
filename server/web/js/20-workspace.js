@@ -302,7 +302,8 @@
       database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
       x: '<path d="M18 6 6 18M6 6l12 12"/>',
-      settings: '<circle cx="12" cy="12" r="3"/><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/>'
+      settings: '<circle cx="12" cy="12" r="3"/><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/>',
+      split: '<path d="M4 5h6v14H4zM14 5h6v14h-6z"/><path d="M10 12h4"/>'
     };
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
   }
@@ -1318,6 +1319,7 @@
     if (trigger?.getAttribute('aria-expanded') === 'true') { closeAccountMenu(); return; }
     const list = [
       { view: 'prefs', icon: 'settings', label: 'Preferences' },
+      { view: 'splitscreen', icon: 'split', label: 'Splitscreen chats' },
       { view: 'archive', icon: 'archive', label: 'Archive' },
       // Data page ships in a sibling module (Trio.data). Only offer it once that
       // module is loaded, so the menu never points at a not-yet-available page.
@@ -1327,7 +1329,7 @@
     // these read identically to the top nav items; `account-item` is just a
     // behavioral hook for the click wiring / tests.
     items.innerHTML = `<div class="account-items-inner"><div class="account-menu-list">`
-      + list.map(it => `<button type="button" class="nav-item account-item" data-view="${esc(it.view)}"><span class="nav-hash">${navIcon(it.icon)}</span><span class="nav-label">${esc(it.label)}</span></button>`).join('')
+      + list.map(it => `<button type="button" class="nav-item ${it.view === 'splitscreen' ? 'split-account-item' : 'account-item'}" data-view="${esc(it.view)}"><span class="nav-hash">${navIcon(it.icon)}</span><span class="nav-label">${esc(it.label)}</span></button>`).join('')
       + `</div></div>`;
     items.removeAttribute('inert');
     items.setAttribute('aria-hidden', 'false');
@@ -1343,9 +1345,10 @@
         items.querySelector('button')?.focus();
       }
     }));
-    items.querySelectorAll('.account-item').forEach(btn => btn.addEventListener('click', () => {
+    items.querySelectorAll('.account-item, .split-account-item').forEach(btn => btn.addEventListener('click', () => {
       const view = btn.dataset.view;
       closeAccountMenu();
+      if (view === 'splitscreen') { Trio.splitscreen?.toggle?.(); return; }
       navigateView(view);
     }));
   }
