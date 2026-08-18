@@ -431,7 +431,7 @@
     const label = dm.name || dm.key || 'Conversation';
     const people = label.split(/\s*[↔·,]\s*/).filter(Boolean);
     const visual = audit && people.length > 1 ? `<span class="dm-pair">${avatarFor(people[0])}${avatarFor(people[1])}</span>` : avatarFor(people[0] || label, dm.unread ? 'online' : 'idle');
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'dm-item'; button.classList.toggle('active', state.view === 'conversation' && state.dmKey === dm.key);
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'dm-item'; button.classList.toggle('active', !Trio.splitscreen?.isActive?.() && state.view === 'conversation' && state.dmKey === dm.key);
     button.setAttribute('data-tip', label);
     button.innerHTML = `${visual}<span class="dm-copy"><span class="dm-name">${esc(label)}</span></span>${dm.unread ? '<span class="unread-dot" aria-label="Unread"></span>' : ''}`;
     button.addEventListener('click', () => openDm(dm, false, audit)); return button;
@@ -439,19 +439,20 @@
   function renderRail() {
     const rail = $('workspace-rail'); if (!rail) return;
     const nav = groupNavigation(state.channels || [], state.dms || {});
+    const splitActive = !!Trio.splitscreen?.isActive?.();
     rail.textContent = '';
     const workspaceItems = [
-      navItem('Home', 'home', () => navigateView('home'), '', state.view === 'home'),
-      navItem('Attention', 'attention', () => navigateView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
-      navItem('Messages', 'messages', () => navigateView('messages'), String(selectors.unreadDms() + selectors.unreadMentions() || ''), state.view === 'messages'),
-      itemWithAdd(navItem('Agent roster', 'roster', () => navigateView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
-      navItem('Tasks', 'tasks', () => navigateView('tasks'), '', state.view === 'tasks'),
+      navItem('Home', 'home', () => navigateView('home'), '', !splitActive && state.view === 'home'),
+      navItem('Attention', 'attention', () => navigateView('attention'), String(selectors.attention() || ''), !splitActive && state.view === 'attention'),
+      navItem('Messages', 'messages', () => navigateView('messages'), String(selectors.unreadDms() + selectors.unreadMentions() || ''), !splitActive && state.view === 'messages'),
+      itemWithAdd(navItem('Agent roster', 'roster', () => navigateView('roster'), '', !splitActive && state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
+      navItem('Tasks', 'tasks', () => navigateView('tasks'), '', !splitActive && state.view === 'tasks'),
       // Preferences moved off the rail into the account menu (sidebar name/avatar).
     ];
     // Number badge = unread @mentions (the loud signal); a plain dot = any
     // other unread messages (normal replies). So a channel with unread
     // non-mention traffic still shows *where* it is, without a nagging count.
-    const channelNav = c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread_mentions || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code, (c.unread || 0) > 0);
+    const channelNav = c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread_mentions || '', !splitActive && state.view === 'conversation' && !state.dmKey && state.channel === c.code, (c.unread || 0) > 0);
     const channelItems = nav.active.map(channelNav);
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
     // The stale group is expanded per-section and NOT persisted: it is a
@@ -469,7 +470,7 @@
     rail.append(section('Workspace', workspaceItems));
     const splitCount = Trio.splitscreen?.paneCount?.() || 0;
     if (splitCount) {
-      const splitItem = navItem('[' + splitCount + '] Chats', 'split', () => Trio.splitscreen?.show?.(), '', !!Trio.splitscreen?.isActive?.());
+      const splitItem = navItem(splitCount + ' Chats', 'split', () => Trio.splitscreen?.show?.(), '', splitActive);
       splitItem.classList.add('split-nav-item');
       rail.append(splitItem);
     }
