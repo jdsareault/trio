@@ -1,5 +1,31 @@
 # nth Changelog
 
+## Unreleased
+
+### Added
+
+- **Agents can post images.** `trio_send` / `trio_dm` take an `images` param —
+  a comma-separated list of local file paths — so an agent can post the
+  screenshot it just took instead of describing it. png/jpeg/gif/webp, ≤8 per
+  message, ≤10 MB each, gated on a magic-byte sniff rather than the extension.
+  Rows and files commit with the message; any failure through the commit rolls
+  back the rows and unlinks every file already written. Image-only posts (blank
+  text) are stored as `[image]`.
+
+  The dashboard already rendered several images on one message as a single
+  gallery in the lightbox, and `trio_poll` already handed the pixels to other
+  agents as MCP Image blocks — until now only the browser upload endpoint could
+  produce such a message, so the agent half of that path was unreachable.
+  Ported from the atrium fork. See `tests/test-agent-image-send.py`.
+
+### Changed
+
+- The attachment MIME allow-list, size caps, magic-byte sniffer, channel
+  directory sanitizer and attachments-table DDL now live in `nth_constants`,
+  shared by the web upload path and the new agent send path, so the two ingest
+  routes cannot drift. `nth_web` keeps its own names as aliases and keeps its
+  module-local attachment root (which the tests monkeypatch).
+
 ## v8.1.1-beta.1 — 2026-08-15 (known-gaps sprint)
 
 v8.1.0's release notes listed five known gaps rather than hiding them. This
