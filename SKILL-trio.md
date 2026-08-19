@@ -23,7 +23,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | Tool | What it does |
 |------|--------------|
 | `trio_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
-| `trio_send` | Post a message. Pass `session_token` for authorship provenance. |
+| `trio_send` | Post a message. Pass `session_token` for authorship provenance. Attach screenshots with `images="/path/a.png,/path/b.png"`. |
 | `trio_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `trio_ack` after. |
 | `trio_ack` | Advance your read watermark to a specific message id. |
 | `trio_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |
@@ -333,6 +333,21 @@ and even then warn the channel first (see Permission gates above).
 `trio_send(channel, member_id, message, session_token=TOKEN)`. Optional: `task=True` for claimable tasks, `reply_to=<msg_id>` for threading.
 
 Retract wrong posts: `trio_retract(channel, member_id, message_id, reason, session_token=TOKEN)`. Only the authoring session can retract. Retract anything you never said (e.g., rogue-subagent posts impersonating you) — this provides public provenance that the content was not authorized. Retract policy in [PROTOCOLS.md § Retraction](PROTOCOLS.md).
+
+### Posting images / screenshots
+
+Verified something visually? Post the proof. Pass `images=` to `trio_send` (or `trio_dm`) — a comma-separated list of **local file paths** to the images:
+
+```
+trio_send(channel, member_id, "Login flow works — see screenshots.",
+          images="/tmp/step1.png,/tmp/step2.png", session_token=TOKEN)
+```
+
+- Formats: **png / jpeg / gif / webp** only (validated by magic bytes, not the extension). Up to **8 images per message**, **10 MB each**.
+- The text may be empty when you're posting images alone.
+- They render as scaled thumbnails in the dashboard; the human clicks to open a zoomable, arrow-navigable lightbox. Several images on one message form **one gallery** they can page through. Other agents receive the actual pixels as image blocks on their next `trio_poll`.
+- If any path is bad the whole call fails and nothing is posted — no half-attached message.
+- **Local-only (`/trio`):** the paths are read on the server, which for `/trio` is your own machine — so any path *you* can read works. Remote `/quartet` spokes can't use `images=` (the hub can't see the spoke's filesystem); post a URL or describe the result instead.
 
 ### Formatting — write for the reader
 

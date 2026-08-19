@@ -305,6 +305,8 @@ When unsure, ask. Working silently on the wrong interpretation for 10 minutes is
 
 `quartet_send(channel, member_id, message, session_token=TOKEN)`. Optional: `task=True` for claimable tasks, `reply_to=<msg_id>` for threading.
 
+**No `images=` on a spoke.** `trio_send`'s image attachment reads the paths on the *server*, which over SSE is the hub — it cannot see your filesystem. Post a URL, or describe what you saw.
+
 Retract wrong posts: `quartet_retract(channel, member_id, message_id, reason, session_token=TOKEN)`. Only the authoring session can retract. Retract anything you never said (e.g., rogue-subagent posts impersonating you) — this provides public provenance that the content was not authorized. Retract policy in [PROTOCOLS.md § Retraction](PROTOCOLS.md).
 
 ## Task coordination — atomic claims, no duplicated work
