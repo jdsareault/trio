@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - zoneinfo is stdlib on 3.9+
     ZoneInfo = None  # type: ignore
 
 import nth_request_log as nrl
-from nth_constants import AGENT_INBOX_CHANNEL
+from nth_constants import (AGENT_INBOX_CHANNEL, narrow_wake, parse_sigils)
 
 # Distinguishes turn keys minted by THIS hub process from those of any earlier
 # one whose entries are still in the 24h request log. See _turn_key_locked.
@@ -1201,6 +1201,7 @@ class AgentSupervisor:
             agent = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
             if agent is None:
                 return
+            body = content.strip()
             recipients: List[str] = []
             if channel == AGENT_INBOX_CHANNEL:
                 # Use the specific message THIS turn was fed to answer — never
@@ -1214,13 +1215,38 @@ class AgentSupervisor:
                     recipients = [r["id"] for r in db.execute(
                         "SELECT id FROM members WHERE channel=? AND kind='human' "
                         "AND active=1 ORDER BY joined_at", (channel,)).fetchall()]
+            # Resolve @/#/! the same way nth_send does, so a bridged reply
+            # wakes the peers it names and surfaces the same human-side
+            # mention highlighting. Without this a bridged "@peer over to
+            # you" wrote mentions="" on a public channel and never woke
+            # peer, and !bang was unreachable from a bridged reply. See
+            # trio-managed-agent-token-efficiency-audit.md Improvement 1.
+            mention_ids, ref_ids, bang_ids = parse_sigils(db, channel, body)
+            if channel == AGENT_INBOX_CHANNEL:
+                # DM: visibility is governed by `recipients`, independent of
+                # the sigils. Auto-add the recipient to the ping set so the
+                # DM actually wakes them (mirrors nth_dm), then narrow every
+                # wake set to participants so an @/#/! naming someone NOT in
+                # `to` is inert — it can neither wake nor expose them. This
+                # is the wake-vs-visibility invariant; without narrow_wake a
+                # bridged DM that happens to name a third party would ping
+                # them into a thread they cannot read.
+                for rid in recipients:
+                    if rid not in mention_ids:
+                        mention_ids.append(rid)
+                mention_ids = narrow_wake(mention_ids, recipients, agent_id)
+                ref_ids = narrow_wake(ref_ids, recipients, agent_id)
+                bang_ids = narrow_wake(bang_ids, recipients, agent_id)
+            mentions_json = json.dumps(mention_ids) if mention_ids else ""
+            refs_json = json.dumps(ref_ids) if ref_ids else ""
+            bangs_json = json.dumps(bang_ids) if bang_ids else ""
+            recipients_json = json.dumps(recipients) if recipients else "[]"
             now = now_iso()
             db.execute(
                 "INSERT INTO messages (channel,member_id,member_name,content,mentions,"
-                "recipients,created_at) VALUES (?,?,?,?,?,?,?)",
-                (channel, agent_id, agent["name"], content.strip(),
-                 json.dumps(recipients) if recipients else "",
-                 json.dumps(recipients) if recipients else "[]", now))
+                "refs,bangs,recipients,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (channel, agent_id, agent["name"], body,
+                 mentions_json, refs_json, bangs_json, recipients_json, now))
             db.execute(
                 "UPDATE members SET last_seen=? WHERE channel=? AND id=?",
                 (now, channel, agent_id))
