@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
                            AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
                            narrow_wake, parse_recipients,
+                           guest_stem as _guest_stem,
+                           parse_sigils as _parse_sigils,
                            IMAGE_MIME_EXT, MAX_ATTACH_BYTES, MAX_ATTACH_COUNT,
                            channel_attach_dir, ensure_attachments_table,
                            sniff_image_mime)
@@ -242,34 +244,6 @@ def _register_agent_identity(db: sqlite3.Connection, name: str,
     raise RuntimeError(
         f"could not mint a unique agent identity in "
         f"{MAX_IDENTITY_MINT_ATTEMPTS} attempts")
-
-
-_GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
-_GUEST_KEBAB_RE = re.compile(r"[-_]guest\s*$", re.IGNORECASE)
-_GUEST_PREFIX_RE = re.compile(r"^\s*guest[:\-]\s*", re.IGNORECASE)
-
-
-def _guest_stem(name: str) -> str | None:
-    """Return the human-friendly stem of a guest-tagged name, or None.
-
-    Mirrors nth_web._guest_stem. Used as a belt-and-suspenders fallback
-    in the sigil parser so `@Gabe` still routes when the roster entry is
-    `gabe-guest` (or `Gabe (Guest)`, for pre-v7.3 names still lingering
-    in long-lived channels). The sigil parser is a strict literal match
-    by design — this is the narrow exception for the guest trust tag."""
-    if not name:
-        return None
-    s = name.strip()
-    m = _GUEST_SUFFIX_RE.search(s)
-    if m:
-        return (s[: m.start()].rstrip(" -_").strip()) or None
-    m = _GUEST_KEBAB_RE.search(s)
-    if m:
-        return (s[: m.start()].rstrip(" -_").strip()) or None
-    m = _GUEST_PREFIX_RE.match(s)
-    if m:
-        return (s[m.end():].lstrip(" -_").strip()) or None
-    return None
 
 
 def now_iso() -> str:
@@ -1566,133 +1540,6 @@ def nth_connect(
 
     finally:
         db.close()
-
-
-def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
-    """Resolve @pings / #pounds / !bangs in `content` against the channel
-    roster. Returns (mention_ids, ref_ids, bang_ids) — lists of member_ids.
-
-    All three sigils resolve in the same roster pass:
-      @name  → mentions (wakes the target under default filter modes)
-      #name  → refs     (never wakes on any filter; grep via nth_pounds)
-      !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
-    @all / !all both broadcast — @all pings everyone under their filter,
-    !all wakes everyone unconditionally. There is no #all.
-
-    Sigils govern WAKE, not visibility — a DM's recipients are set
-    separately. Shared by nth_send and nth_dm so both carry identical wake
-    semantics; mirrors nth_web._parse_sigils_against_roster on the web side."""
-    mention_ids: list = []
-    ref_ids: list = []
-    bang_ids: list = []
-    if "@" in content or "#" in content or "!" in content:
-        all_members = db.execute(
-            "SELECT id, name FROM members WHERE channel = ?",
-            (channel,),
-        ).fetchall()
-        try:
-            global_names = {
-                row["id"]: (row["name"] or "").strip()
-                for row in db.execute("SELECT id, name FROM agents").fetchall()
-            }
-        except sqlite3.Error:
-            global_names = {}
-        content_lower = content.lower()
-        all_ids = [m["id"] for m in all_members]
-        # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
-        # doesn't broadcast; "@all" or "@all " or "@all," does.
-        at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
-        bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
-        if at_all:
-            mention_ids = list(all_ids)
-        if bang_all:
-            bang_ids = list(all_ids)
-        hit_at: set = set()
-        hit_ref: set = set()
-        hit_bang: set = set()
-        literal_names_lower: set = set()
-        for m in all_members:
-            name_stripped = (m["name"] or "").strip()
-            mid = m["id"]
-            # Direct-id mention path: @<member_id> routes regardless of
-            # name. Agents that cache the id from nth_connect survive
-            # renames and don't need to re-parse the roster on every send.
-            id_esc = re.escape(mid)
-            if not at_all:
-                if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    if mid not in hit_at:
-                        mention_ids.append(mid)
-                        hit_at.add(mid)
-            if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                if mid not in hit_ref:
-                    ref_ids.append(mid)
-                    hit_ref.add(mid)
-            if not bang_all:
-                if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    if mid not in hit_bang:
-                        bang_ids.append(mid)
-                        hit_bang.add(mid)
-            # Match both the channel-local presence name and the global agent
-            # display name. The roster query above keeps this strictly scoped
-            # to members of the current channel.
-            candidate_names = {name_stripped, global_names.get(mid, "")}
-            for candidate in candidate_names:
-                if candidate.lower() == "all" or not candidate:
-                    continue
-                literal_names_lower.add(candidate.lower())
-                name_esc = re.escape(candidate)
-                if not at_all and mid not in hit_at:
-                    at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if at_pat.search(content):
-                        mention_ids.append(mid)
-                        hit_at.add(mid)
-                if mid not in hit_ref:
-                    hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if hash_pat.search(content):
-                        ref_ids.append(mid)
-                        hit_ref.add(mid)
-                if not bang_all and mid not in hit_bang:
-                    bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                    if bang_pat.search(content):
-                        bang_ids.append(mid)
-                        hit_bang.add(mid)
-
-        # Guest-stem fallback: if the roster has `gabe-guest` (or the
-        # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
-        # the guest — the `-guest` tag is a trust label, not part of
-        # the handle. Skip when the stem collides with a real member's
-        # literal name (trust favors the non-guest identity), or when
-        # multiple guests share a stem (ambiguous — force literal).
-        guest_by_stem: dict = {}
-        for m in all_members:
-            stem = _guest_stem(m["name"] or "")
-            if not stem:
-                continue
-            guest_by_stem.setdefault(stem.lower(), []).append(m)
-        _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
-        for stem_lower, guests in guest_by_stem.items():
-            if stem_lower in _RESERVED_STEMS:
-                continue  # never let a stem fight the @all/!all broadcast shortcut
-            if stem_lower in literal_names_lower:
-                continue
-            if len(guests) != 1:
-                continue
-            g = guests[0]
-            stem = _guest_stem(g["name"] or "") or ""
-            if not stem:
-                continue
-            stem_esc = re.escape(stem)
-            gid = g["id"]
-            if not at_all and gid not in hit_at:
-                if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    mention_ids.append(gid)
-            if gid not in hit_ref:
-                if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    ref_ids.append(gid)
-            if not bang_all and gid not in hit_bang:
-                if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                    bang_ids.append(gid)
-    return mention_ids, ref_ids, bang_ids
 
 
 def _resolve_recipients(db, channel: str, to: str,
