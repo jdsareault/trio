@@ -63,7 +63,10 @@ import nth_usage as nusage
 import nth_conversation as nconv
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
-                           parse_recipients, narrow_wake)
+                           parse_recipients, narrow_wake,
+                           IMAGE_MIME_EXT, MAX_ATTACH_BYTES,
+                           ensure_attachments_table, sniff_image_mime)
+from nth_constants import channel_attach_dir as _channel_attach_dir
 
 
 # ───────── Config ─────────
@@ -187,21 +190,22 @@ def _provider_models(provider: str) -> List[Dict[str, Any]]:
 
 
 def channel_attach_dir(channel: str, base: Optional[Path] = None) -> Path:
-    """On-disk attachment directory for one channel.
+    """On-disk attachment directory for one channel, defaulting to this
+    module's ATTACH_DIR.
 
     A managed agent is granted --add-dir for each channel it belongs to, and
     that grant has to name the SAME directory the upload path writes to — a
-    mismatch means the agent cannot read files people share with it. Sanitised
-    with the pattern already used inline at the four existing attachment sites;
-    those should route through here too, but that is a separate change."""
-    root = base if base is not None else ATTACH_DIR
-    return root / re.sub(r"[^\w.\-]", "_", channel or "")
+    mismatch means the agent cannot read files people share with it. The
+    sanitizer itself lives in nth_constants so the MCP agent send path shares
+    it; this wrapper only supplies the module-local root, which the tests
+    monkeypatch and which a shared default could therefore not honour."""
+    return _channel_attach_dir(channel, base if base is not None else ATTACH_DIR)
 
 
 def attach_dir_for(db_path: Path) -> Path:
     """Attachment root for a given database file."""
     return Path(db_path).resolve().parent / "attachments"
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+MAX_UPLOAD_BYTES = MAX_ATTACH_BYTES     # 10 MB hard cap per image (shared)
 # Total attachment bytes one member may hold in one channel. The per-image cap
 # bounds a single request; nothing bounded the SUM, so any identity allowed to
 # upload could fill the disk one legal 10 MB image at a time. sweep_attachments
@@ -216,10 +220,9 @@ ATTACH_GC_GRACE_S = 24 * 3600      # an unlinked upload is abandoned after this
 ATTACH_GC_MIN_INTERVAL_S = 600     # at most one sweep per process per 10 min
 ATTACH_GC_MAX_DELETES = 500        # deletions per sweep
 ATTACH_GC_MAX_SCAN = 2000          # files stat'd per sweep, resumed round-robin
-ALLOWED_IMAGE_MIME = {
-    "image/png": ".png", "image/jpeg": ".jpg",
-    "image/gif": ".gif", "image/webp": ".webp",
-}
+# Thin alias of the shared allow-list. Both ingest routes (this upload
+# endpoint and nth_server's `images` param) gate on the same map.
+ALLOWED_IMAGE_MIME = IMAGE_MIME_EXT
 
 # ── Local speech-to-text (optional; powers /api/stt/*) ──
 # Transcription runs via a persistent nth_stt_worker.py sidecar that keeps the
@@ -1363,20 +1366,6 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
             "released_locks": released_locks}, None
 
 
-def sniff_image_mime(data: bytes) -> Optional[str]:
-    """Real image MIME from magic bytes, or None if not a supported image.
-    We trust the sniffed type over the client-declared Content-Type."""
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if data[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return None
-
-
 _last_attach_gc = 0.0
 _attach_gc_cursor = 0        # resume point for the bounded orphan walk
 _attach_gc_lock = threading.Lock()
@@ -1557,36 +1546,6 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
             except sqlite3.Error:
                 pass
     return stats
-
-
-def ensure_attachments_table(db: sqlite3.Connection) -> None:
-    """Create the attachments table on demand. The web side owns this for the
-    prototype so it works before the MCP server ships the canonical CREATE —
-    both use IF NOT EXISTS, so it stays safe once the server half lands."""
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS attachments ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " channel TEXT NOT NULL,"
-        " message_id INTEGER,"
-        " member_id TEXT NOT NULL,"
-        " mime TEXT NOT NULL,"
-        " filename TEXT,"
-        " width INTEGER, height INTEGER, bytes INTEGER,"
-        " path TEXT NOT NULL,"
-        " created_at TEXT NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attachments_channel "
-        "ON attachments(channel)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attachments_unlinked "
-        "ON attachments(created_at) WHERE message_id IS NULL"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
-        "ON attachments(message_id)"
-    )
 
 
 def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[str, Any]]:
@@ -8032,7 +7991,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             att_id = cur.lastrowid
             fpath = None
             try:
-                chan_dir = ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)
+                chan_dir = channel_attach_dir(ch, base=ATTACH_DIR)
                 chan_dir.mkdir(parents=True, exist_ok=True)
                 fpath = chan_dir / f"{att_id}{ext}"
                 fpath.write_bytes(data)
@@ -8240,7 +8199,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "not found")
             return
         try:
-            chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)).resolve()
+            chan_root = channel_attach_dir(ch, base=ATTACH_DIR).resolve()
             resolved = Path(row["path"]).resolve()
             # Defense in depth: only serve files under THIS channel's dir.
             if not resolved.is_relative_to(chan_root):

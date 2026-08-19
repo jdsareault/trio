@@ -5,6 +5,9 @@
 # banner, the hub's /healthz + /fleet endpoints, node check-ins, and
 # nth_doctor's local-vs-hub version match.
 import json
+import re
+import sqlite3
+from pathlib import Path
 
 NTH_VERSION = "8.1.1-beta.1"
 
@@ -25,6 +28,94 @@ OPERATOR_ALL_SEEING_PREFIXES = ("_op_l_", "_op_t_")
 # A legitimate recipient set is small. The cap bounds the work every read path
 # does per message, so a malformed row cannot make reads expensive.
 MAX_RECIPIENTS = 256
+
+
+# ── Image attachment shared config + helpers ──────────────────────────
+# THE single source for the attachment MIME allow-list, the size caps, the
+# on-disk table shape, the magic-byte sniffer and the per-channel directory
+# sanitizer. Both ingest routes — the web upload endpoint (nth_web.py) and
+# the MCP agent send path (nth_server.py) — import from here so the two can
+# never drift into allowing different types, writing a differently-shaped
+# row, or scoping two different directories for the "same" channel.
+#
+# The attachment ROOT deliberately stays out of this module: nth_web derives
+# it from the --db it was pointed at (attach_dir_for) and nth_server from its
+# own DB_DIR, and both are monkeypatched per-module by the tests. Callers pass
+# their own root as `base` instead.
+
+# MIME → file extension. Doubles as the allow-list: a sniffed type absent
+# from this map is rejected. png/jpeg/gif/webp only — the four formats the
+# poll path can hand back to agents as MCP Image blocks.
+IMAGE_MIME_EXT = {
+    "image/png": ".png", "image/jpeg": ".jpg",
+    "image/gif": ".gif", "image/webp": ".webp",
+}
+
+# Per-file byte cap and per-message count cap, shared by both ingest paths.
+MAX_ATTACH_BYTES = 10 * 1024 * 1024   # 10 MB hard cap per image
+MAX_ATTACH_COUNT = 8                  # max images linked to one message
+
+_CHANNEL_DIR_SANITIZE_RE = re.compile(r"[^\w.\-]")
+
+
+def channel_attach_dir(channel: str, base: Path) -> Path:
+    """The on-disk attachment directory for one channel, under `base`.
+
+    THE single sanitizer for this path. The web upload/serve handlers, the
+    per-agent --add-dir grant, and the agent send path must all route through
+    it, or they drift into scoping two different directories for the same
+    channel and an agent cannot read the files people share with it.
+
+    `base` is explicit because each module owns its own attachment root (see
+    the note above); there is no module-level default to fall back to."""
+    return Path(base) / _CHANNEL_DIR_SANITIZE_RE.sub("_", channel or "")
+
+
+def sniff_image_mime(data: bytes):
+    """Real image MIME from magic bytes, or None if not a supported image.
+    We trust the sniffed type over any client-declared Content-Type or file
+    extension — the sniff is the security gate on both ingest paths."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def ensure_attachments_table(db: sqlite3.Connection) -> None:
+    """Create the attachments table + its indexes on demand.
+
+    THE canonical CREATE, shared by nth_web (upload) and nth_server (agent
+    send). Both call it with IF NOT EXISTS, so whichever ingest path runs
+    first wins and the other is a no-op — no ownership handoff needed."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS attachments ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " channel TEXT NOT NULL,"
+        " message_id INTEGER,"
+        " member_id TEXT NOT NULL,"
+        " mime TEXT NOT NULL,"
+        " filename TEXT,"
+        " width INTEGER, height INTEGER, bytes INTEGER,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_channel "
+        "ON attachments(channel)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_unlinked "
+        "ON attachments(created_at) WHERE message_id IS NULL"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
+        "ON attachments(message_id)"
+    )
 
 
 def is_all_seeing(reader_id, reader_kind=None) -> bool:
