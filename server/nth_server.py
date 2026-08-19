@@ -30,7 +30,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
                            AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
-                           narrow_wake, parse_recipients)
+                           narrow_wake, parse_recipients,
+                           IMAGE_MIME_EXT, MAX_ATTACH_BYTES, MAX_ATTACH_COUNT,
+                           channel_attach_dir, ensure_attachments_table,
+                           sniff_image_mime)
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -1765,8 +1768,122 @@ def _reader_kind(db, channel: str, member_id: str) -> str:
     return (row["kind"] if row and row["kind"] else "agent")
 
 
+
+# ── Agent-side image attachment ingest (mirrors the nth_web upload) ──────
+# An agent posts a screenshot by passing local file paths to trio_send /
+# trio_dm's `images` arg. We validate + read the bytes up front (pure
+# filesystem, no DB), then — once the message row exists — write each file
+# under the channel's attach dir and link an attachments row to the message.
+# The same magic-byte sniff, allow-list, byte cap and count cap as the web
+# upload path are used (all shared from nth_constants), so the two ingest
+# routes stay in lockstep.
+
+def _validate_agent_images(images: str) -> list:
+    """Parse the comma-separated `images` arg, read + validate each file, and
+    return [{data, mime, ext, filename}] ready to persist. Pure reads, no DB
+    or disk writes — so a bad path fails BEFORE any message is created.
+
+    Raises ValueError (with an agent-readable message) on: too many images, a
+    missing/unreadable path, an oversized file, or a non-image (magic-byte
+    sniff rejects it — the extension and any declared type are never trusted)."""
+    paths = [p.strip() for p in (images or "").split(",") if p.strip()]
+    if not paths:
+        return []
+    if len(paths) > MAX_ATTACH_COUNT:
+        raise ValueError(
+            f"Too many images ({len(paths)} > {MAX_ATTACH_COUNT} max per message).")
+    out = []
+    for p in paths:
+        fp = Path(p).expanduser()
+        # Reject non-regular files (FIFO, device, directory, socket) up front:
+        # reading a FIFO blocks forever and /dev/zero is an endless source. A
+        # symlink to a regular file is fine — the agent could read it directly
+        # anyway, so this is not a privilege boundary, just a liveness guard.
+        try:
+            if not fp.is_file():
+                raise ValueError(f"Not a readable image file: {p}")
+        except OSError as e:
+            raise ValueError(f"Could not access image {p}: {e}")
+        # Read at most one byte past the cap, so an oversized file (or anything
+        # that slips past is_file) can never be slurped whole into memory before
+        # the size check — the whole-file read was a self-inflicted DoS vector.
+        try:
+            with open(fp, "rb") as fh:
+                data = fh.read(MAX_ATTACH_BYTES + 1)
+        except FileNotFoundError:
+            raise ValueError(f"Image not found: {p}")
+        except OSError as e:
+            raise ValueError(f"Could not read image {p}: {e}")
+        if len(data) == 0:
+            raise ValueError(f"Image is empty: {p}")
+        if len(data) > MAX_ATTACH_BYTES:
+            raise ValueError(
+                f"Image too large: {p} (> {MAX_ATTACH_BYTES} bytes).")
+        mime = sniff_image_mime(data)
+        if mime not in IMAGE_MIME_EXT:
+            raise ValueError(
+                f"Not a supported image (png/jpeg/gif/webp): {p}")
+        # Sanitize the stored filename the same way the web upload path does
+        # (nth_web._handle_upload): strip anything outside [\w.\- ]. The disk
+        # name is always {att_id}{ext}, so this only hardens the filename
+        # column against a future consumer that renders it unsafely.
+        safe_name = re.sub(r"[^\w.\- ]", "_", fp.name)[:120]
+        out.append({
+            "data": data, "mime": mime, "ext": IMAGE_MIME_EXT[mime],
+            "filename": safe_name,
+        })
+    return out
+
+
+def _persist_agent_images(db: sqlite3.Connection, channel: str, member_id: str,
+                          msg_id: int, validated: list, now: str,
+                          written: list) -> list:
+    """Insert an attachments row + write the file to disk for each validated
+    image, linked to msg_id. Runs inside the caller's open transaction (rows
+    commit with the message). Returns [{id, mime, filename}] for the response.
+
+    Files are NOT transactional, so the CALLER owns cleanup of the whole
+    write→commit window: every path this call is about to write is appended to
+    the caller-owned `written` list BEFORE the bytes hit disk. That way a
+    failure anywhere — a half-finished `write_bytes`, a `chmod`, a later
+    `db.execute`, or the caller's own `db.commit()` — lets the caller unlink
+    every file that may exist while its `db.rollback()` discards the rows. This
+    function intentionally does not clean up on its own; a single owner (the
+    caller) avoids double-unlink races and covers post-return failures too."""
+    ensure_attachments_table(db)
+    chan_dir = channel_attach_dir(channel, base=ATTACH_DIR)
+    chan_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
+    meta = []
+    for v in validated:
+        cur = db.execute(
+            "INSERT INTO attachments "
+            "(channel, message_id, member_id, mime, filename, bytes, path, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, '', ?)",
+            (channel, msg_id, member_id, v["mime"], v["filename"], len(v["data"]), now),
+        )
+        att_id = cur.lastrowid
+        fpath = chan_dir / f"{att_id}{v['ext']}"
+        written.append(fpath)          # track BEFORE the write, so a mid-write
+        fpath.write_bytes(v["data"])   # or chmod failure is still cleanable
+        os.chmod(fpath, 0o644)
+        db.execute(
+            "UPDATE attachments SET path = ? WHERE id = ?", (str(fpath), att_id))
+        meta.append({"id": att_id, "mime": v["mime"], "filename": v["filename"]})
+    return meta
+
+
+def _unlink_agent_images(paths: list) -> None:
+    """Best-effort unlink of files written for a message that failed to commit.
+    Never raises — cleanup must not mask the original error."""
+    for fpath in paths:
+        try:
+            fpath.unlink()
+        except OSError:
+            pass
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_send")
-def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None) -> str:
+def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None, images: str = "") -> str:
     """Send a message to the channel. No turns — send anytime.
 
     All members will see this message on their next poll.
@@ -1786,6 +1903,14 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
     and leaves a breadcrumb bob can read on wake. "!all channel closing in
     60s" wakes every member unconditionally.
 
+    Attach images by passing `images` — a comma-separated list of local file
+    paths to screenshots/pictures you want to post (e.g. after verifying
+    something visually). They render inline in the dashboard, where several
+    images on one message form a single gallery in the lightbox, and are
+    delivered to other agents as image blocks on their next poll. png/jpeg/
+    gif/webp only, up to 8 images, 10 MB each. A message with images may have
+    empty text.
+
     Set task=True to simultaneously post the message as a claimable task.
     Set pin=True to pin this message as the channel objective (shown in
     nth_status and nth_connect for new joiners). Only one pin per channel.
@@ -1802,13 +1927,26 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         task: If True, also create a claimable task from this message
         pin: If True, pin this message as the channel objective
         blocked_by: Comma-separated task IDs this task depends on (requires task=True)
+        images: Optional comma-separated local file paths of images to attach
+            (png/jpeg/gif/webp, ≤8, ≤10 MB each). e.g. "/tmp/a.png,/tmp/b.png".
     """
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
 
-    if not message or not message.strip():
+    # Validate + read any attached images up front — pure filesystem reads, no
+    # DB yet — so a bad path fails before we create a message row.
+    try:
+        validated_images = _validate_agent_images(images)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+
+    if (not message or not message.strip()) and not validated_images:
         return json.dumps({"error": "Message cannot be empty."})
+    # An image-only post is allowed; give it a placeholder caption so the
+    # content column is never blank (matches the web upload convention).
+    if not message or not message.strip():
+        message = "[image]"
     if len(message) > MAX_MESSAGE_LENGTH:
         return json.dumps({"error": f"Message too long ({len(message)} > {MAX_MESSAGE_LENGTH})."})
 
@@ -1933,46 +2071,62 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         )
         msg_id = cur.lastrowid
 
-        # v6: extend session heartbeat on successful send
-        if author_session:
-            db.execute(
-                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
-                (now, author_session),
-            )
+        # Link any pre-validated images, run the heartbeat/channel updates, and
+        # commit — one transaction. Image FILES are written inside this window
+        # but aren't transactional, so if ANYTHING through the commit fails we
+        # roll back the rows AND unlink every file we wrote: no orphan rows, no
+        # orphan files.
+        attach_meta = []
+        written_paths = []
+        try:
+            if validated_images:
+                attach_meta = _persist_agent_images(
+                    db, channel, member_id, msg_id, validated_images, now, written_paths)
 
-        # Update heartbeat only — do NOT advance watermark here.
-        # Watermarks advance in nth_poll (MCP) only; the background monitor
-        # (nth_monitor.py) is read-only and tracks a local watermark of its
-        # own. Advancing in send would skip unread messages from other
-        # members that arrived between our last poll and this send.
-        #
-        # Auto-clear sleeping status on send (v5). If the member is actively
-        # sending messages, they're not sleeping. Clears the flag so the
-        # watchdog doesn't need to detect the inconsistency — the server
-        # enforces it. Also updates status_changed_at for transition tracking.
-        current_status = member["status_text"] if "status_text" in member.keys() else ""
-        if current_status and any(kw in current_status.lower() for kw in SLEEPING_KEYWORDS):
-            db.execute(
-                "UPDATE members SET last_seen = ?, status_text = '', status_changed_at = ? "
-                "WHERE id = ? AND channel = ?",
-                (now, now, member_id, channel),
-            )
-        else:
-            db.execute(
-                "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
-                (now, member_id, channel),
-            )
-        if pin:
-            db.execute(
-                "UPDATE channels SET pinned_message_id = ?, updated_at = ? WHERE code = ?",
-                (msg_id, now, channel),
-            )
-        else:
-            db.execute(
-                "UPDATE channels SET updated_at = ? WHERE code = ?",
-                (now, channel),
-            )
-        db.commit()
+            # v6: extend session heartbeat on successful send
+            if author_session:
+                db.execute(
+                    "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                    (now, author_session),
+                )
+
+            # Update heartbeat only — do NOT advance watermark here.
+            # Watermarks advance in nth_poll (MCP) only; the background monitor
+            # (nth_monitor.py) is read-only and tracks a local watermark of its
+            # own. Advancing in send would skip unread messages from other
+            # members that arrived between our last poll and this send.
+            #
+            # Auto-clear sleeping status on send (v5). If the member is actively
+            # sending messages, they're not sleeping. Clears the flag so the
+            # watchdog doesn't need to detect the inconsistency — the server
+            # enforces it. Also updates status_changed_at for transition tracking.
+            current_status = member["status_text"] if "status_text" in member.keys() else ""
+            if current_status and any(kw in current_status.lower() for kw in SLEEPING_KEYWORDS):
+                db.execute(
+                    "UPDATE members SET last_seen = ?, status_text = '', status_changed_at = ? "
+                    "WHERE id = ? AND channel = ?",
+                    (now, now, member_id, channel),
+                )
+            else:
+                db.execute(
+                    "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                    (now, member_id, channel),
+                )
+            if pin:
+                db.execute(
+                    "UPDATE channels SET pinned_message_id = ?, updated_at = ? WHERE code = ?",
+                    (msg_id, now, channel),
+                )
+            else:
+                db.execute(
+                    "UPDATE channels SET updated_at = ? WHERE code = ?",
+                    (now, channel),
+                )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            _unlink_agent_images(written_paths)
+            return json.dumps({"error": f"Failed to store image: {e}"})
 
         if task_id is not None:
             _console("📋", channel, f"{member['name']} posted task #{task_id}: {content}", 33)
@@ -1984,6 +2138,8 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             "channel": channel,
             "message_id": msg_id,
         }
+        if attach_meta:
+            result["attachments"] = attach_meta
         # Footer is only emitted on nth_poll — the active-read call. nth_send,
         # nth_ack, and nth_history responses are already dense enough; the
         # MESSAGE_FOOTER + sentinel nag repetition there was pure noise.
@@ -2334,8 +2490,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                                     # disagree about whether it is trusted — if
                                     # a row ever diverges from its channel dir,
                                     # both readers must refuse it, not one.
-                                    chan_root = (ATTACH_DIR / re.sub(
-                                        r"[^\w.\-]", "_", channel)).resolve()
+                                    chan_root = channel_attach_dir(
+                                        channel, base=ATTACH_DIR).resolve()
                                     resolved = Path(a["path"]).resolve()
                                     if resolved.is_relative_to(chan_root):
                                         raw = resolved.read_bytes()
@@ -2550,7 +2706,7 @@ def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
 @mcp.tool(name=f"{TOOL_PREFIX}_dm")
 def nth_dm(channel: str = "", member_id: str = "", message: str = "",
            to: str = "", session_token: str = "",
-           reply_to: int | None = None) -> str:
+           reply_to: int | None = None, images: str = "") -> str:
     """Send a PRIVATE direct message to specific member(s) — a REAL DM.
 
     Unlike trio_send (which broadcasts to the whole channel), trio_dm is
@@ -2584,9 +2740,16 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         session_token: Your session token (same capability check as trio_send).
         reply_to: Optional id of a message this replies to (must be in the
             global inbox transport).
+        images: Optional comma-separated local file paths of images to attach
+            (png/jpeg/gif/webp, ≤8, ≤10 MB each), same as trio_send.
     """
-    if not message or not message.strip():
+    try:
+        validated_images = _validate_agent_images(images)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if (not message or not message.strip()) and not validated_images:
         return json.dumps({"error": "Message cannot be empty."})
+    # An image-only DM is allowed; the placeholder keeps `content` non-blank.
     if not message or not message.strip():
         message = "[image]"
     if len(message) > MAX_MESSAGE_LENGTH:
@@ -2712,7 +2875,15 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         )
         msg_id = cur.lastrowid
 
+        # Link any pre-validated images inside the same commit window as the
+        # message (see nth_send: rows roll back, written files are unlinked).
+        attach_meta = []
+        written_paths = []
         try:
+            if validated_images:
+                attach_meta = _persist_agent_images(
+                    db, channel, member_id, msg_id, validated_images, now, written_paths)
+
             if author_session:
                 db.execute(
                     "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
@@ -2736,6 +2907,7 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
             db.commit()
         except Exception as e:
             db.rollback()
+            _unlink_agent_images(written_paths)
             return json.dumps({"error": f"Failed to send: {e}"})
 
         # Resolve recipient names for the console + response (audit-friendly).
@@ -2757,6 +2929,8 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
             "recipient_names": recipient_names,
             "private": True,
         }
+        if attach_meta:
+            result["attachments"] = attach_meta
         nag = _sentinel_nag(member)
         if nag:
             result["footer"] = nag
@@ -4644,7 +4818,7 @@ def _unlink_purged(paths, channel: str = "") -> None:
             pass
     if channel:
         try:
-            (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", channel)).rmdir()
+            channel_attach_dir(channel, base=ATTACH_DIR).rmdir()
         except OSError:
             pass
 
