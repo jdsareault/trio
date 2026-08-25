@@ -8,9 +8,16 @@ interfaces so peers on your tailnet can reach it over Tailscale. Tailscale's
 ACL is the access control layer — this server has no auth of its own, so
 never bind it to a public interface directly.
 
+Pass --tailscale-tls to serve https with a certificate Tailscale issues for
+this machine's MagicDNS name. That is not cosmetic: browsers expose the
+microphone only on a secure context (https, or a literal localhost origin), so
+over plain http at a tailnet IP the dictation feature cannot work from any
+device — including this one.
+
 Usage:
     python3 nth_web.py MYCHAN                # loopback only, port 8765
     python3 nth_web.py MYCHAN --tailnet      # bind all interfaces
+    python3 nth_web.py MYCHAN --tailscale-tls   # https for tailnet peers (dictation)
     python3 nth_web.py MYCHAN --port 9000
     python3 nth_web.py MYCHAN --host 100.x.y.z  # bind a specific interface
 
@@ -42,6 +49,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -863,6 +871,113 @@ def get_tailscale_ip() -> Optional[str]:
         except Exception:
             continue
     return None
+
+
+# ───────── HTTPS / TLS ─────────
+# Why this exists: browsers only expose getUserMedia (the microphone) on a
+# SECURE CONTEXT — https, or a literal localhost origin. A dashboard reached
+# at http://100.x.y.z:8765 is neither, so `navigator.mediaDevices` is simply
+# undefined there and BOTH dictation engines fail: the local-Whisper path
+# can't record, and the browser-SpeechRecognition fallback is refused on an
+# insecure origin too. Serving TLS is the whole fix; nothing in the composer
+# needed changing.
+#
+# We terminate TLS in THIS process rather than parking `tailscale serve` in
+# front, deliberately. A front proxy delivers every request from 127.0.0.1,
+# which trips resolve_from_loopback() — so every visitor, phone included,
+# would be minted as the local OS account: the operator's real tailnet
+# identity (`_op_t_…`) is lost, and every tailnet peer inherits loopback
+# trust (cull, local-path reveal). Terminating here keeps `client_address`
+# the peer's actual tailnet IP, so `tailscale_whois` still names them.
+TLS_DIR = DB_PATH.parent / "tls"
+TAILSCALE_CERT_TIMEOUT = 120    # first issuance contacts Let's Encrypt
+
+
+def tailscale_dns_name() -> Optional[str]:
+    """This host's MagicDNS name (e.g. "macbook.tail0abc.ts.net"), or None.
+
+    That name — not the tailnet IP — is what a Tailscale-issued certificate
+    is valid for, so it is also the URL that has to be used in the browser.
+    """
+    for cmd in TAILSCALE_CANDIDATES:
+        try:
+            out = subprocess.check_output(
+                [cmd, "status", "--json"], timeout=5, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            continue
+        try:
+            name = (json.loads(out).get("Self") or {}).get("DNSName") or ""
+        except ValueError:
+            continue
+        name = name.rstrip(".")
+        if name:
+            return name
+    return None
+
+
+def ensure_tailscale_cert(dns_name: str, directory: Path = TLS_DIR) -> tuple[Path, Path]:
+    """Obtain (or renew) a Tailscale-issued cert for `dns_name` into `directory`.
+
+    `tailscale cert` is idempotent and renews only when the existing pair is
+    near expiry, so calling it on every start IS the renewal story — there is
+    no cron to forget. Raises RuntimeError with the CLI's own stderr on
+    failure, because every likely cause is something only the operator can
+    fix (HTTPS not enabled for the tailnet, a tagged node without cert
+    permission, Tailscale logged out).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    cert = directory / f"{dns_name}.crt"
+    key = directory / f"{dns_name}.key"
+    last = "tailscale CLI not found"
+    for cmd in TAILSCALE_CANDIDATES:
+        try:
+            proc = subprocess.run(
+                [cmd, "cert", "--cert-file", str(cert), "--key-file", str(key), dns_name],
+                timeout=TAILSCALE_CERT_TIMEOUT, capture_output=True,
+            )
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            last = f"`{cmd} cert` timed out after {TAILSCALE_CERT_TIMEOUT}s"
+            continue
+        if proc.returncode == 0:
+            # Private key readable only by this user: it lives under a
+            # home-directory path the whole nth install already trusts, but
+            # the CLI's own umask is not something to rely on.
+            try:
+                key.chmod(0o600)
+            except OSError:
+                pass
+            return cert, key
+        last = (proc.stderr or proc.stdout or b"").decode(errors="replace").strip() \
+            or f"`{cmd} cert` exited {proc.returncode}"
+    raise RuntimeError(
+        f"could not obtain a Tailscale certificate for {dns_name}: {last}\n"
+        "Most likely HTTPS is not enabled for this tailnet — turn it on at\n"
+        "  https://login.tailscale.com/admin/dns  →  HTTPS Certificates."
+    )
+
+
+def build_ssl_context(cert: Path, key: Path) -> "ssl.SSLContext":
+    """A TLS-server context for `cert`/`key`, with the errors spelled out.
+
+    load_cert_chain's native message for a missing file is a bare ENOENT with
+    no filename attached, and for a mismatched pair it is an OpenSSL error
+    string. Both are things an operator can act on only if told which file.
+    """
+    for label, path in (("certificate", cert), ("private key", key)):
+        if not path.exists():
+            raise RuntimeError(f"TLS {label} not found: {path}")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    except ssl.SSLError as exc:
+        raise RuntimeError(
+            f"TLS certificate {cert} and key {key} could not be loaded "
+            f"together ({exc}). If these were issued separately, re-issue "
+            f"them as a pair.") from exc
+    return context
 
 
 def parse_mentions_json(raw: Optional[str]) -> List[str]:
@@ -9169,6 +9284,11 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         if isinstance(exc, (ConnectionResetError, BrokenPipeError,
                             ConnectionAbortedError)):
             return
+        # Under TLS these are routine, not faults: a stale `http://` bookmark,
+        # a port scanner, or a client that hangs up mid-handshake all land
+        # here. Logging a traceback per occurrence would bury real errors.
+        if isinstance(exc, ssl.SSLError):
+            return
         super().handle_error(request, client_address)
 
 
@@ -9403,6 +9523,19 @@ def main() -> int:
     ap.add_argument("--tailnet", action="store_true",
                     help="Shortcut for --host 0.0.0.0 (reachable from tailnet peers). "
                          "Only safe if your Tailscale ACL / host firewall gates the port.")
+    ap.add_argument("--tailscale-tls", action="store_true",
+                    help="Serve HTTPS using a certificate Tailscale issues for this "
+                         "machine's MagicDNS name, obtaining or renewing it at "
+                         "startup. Required for microphone access (dictation) from "
+                         "any device other than this one: browsers only expose the "
+                         "mic on https or localhost. Implies --tailnet unless --host "
+                         "is given, and requires HTTPS Certificates to be enabled "
+                         "for your tailnet.")
+    ap.add_argument("--tls-cert", default=None, metavar="PATH",
+                    help="Serve HTTPS with this certificate file. Use with --tls-key "
+                         "to supply your own pair instead of --tailscale-tls.")
+    ap.add_argument("--tls-key", default=None, metavar="PATH",
+                    help="Private key for --tls-cert.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help=f"Port to bind (default {DEFAULT_PORT}).")
     ap.add_argument("--strict-port", action="store_true",
@@ -9414,6 +9547,17 @@ def main() -> int:
     ap.add_argument("--db", default=str(DB_PATH),
                     help=f"Path to nth.db (default {DB_PATH}).")
     args = ap.parse_args()
+
+    # Flag-shape validation first: a bad combination should fail before this
+    # touches the database, the network, or a port.
+    if bool(args.tls_cert) != bool(args.tls_key):
+        sys.stderr.write("--tls-cert and --tls-key must be given together.\n")
+        return 1
+    if args.tls_cert and args.tailscale_tls:
+        sys.stderr.write(
+            "--tailscale-tls obtains its own certificate; drop it to use the "
+            "--tls-cert/--tls-key pair, or drop those to use Tailscale's.\n")
+        return 1
 
     db_path = Path(args.db)
     global ATTACH_DIR
@@ -9452,7 +9596,34 @@ def main() -> int:
 
     host = args.host
     if host is None:
-        host = "0.0.0.0" if args.tailnet else "127.0.0.1"
+        # --tailscale-tls exists to let OTHER devices reach this dashboard over
+        # https; binding it to loopback would defeat its only purpose.
+        host = "0.0.0.0" if (args.tailnet or args.tailscale_tls) else "127.0.0.1"
+
+    # TLS before the bind: obtaining a certificate can prompt Let's Encrypt and
+    # can fail for reasons only the operator can fix, and failing there while
+    # holding a port (or worse, after starting the hubs) helps no one.
+    tls_context = None
+    tls_dns_name = None
+    if args.tailscale_tls:
+        tls_dns_name = tailscale_dns_name()
+        if not tls_dns_name:
+            sys.stderr.write(
+                "--tailscale-tls: could not determine this machine's MagicDNS "
+                "name. Is Tailscale running and logged in? (`tailscale status`)\n")
+            return 1
+        try:
+            cert_path, key_path = ensure_tailscale_cert(tls_dns_name)
+            tls_context = build_ssl_context(cert_path, key_path)
+        except RuntimeError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+    elif args.tls_cert:
+        try:
+            tls_context = build_ssl_context(Path(args.tls_cert), Path(args.tls_key))
+        except RuntimeError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
 
     # Resolve the listening socket before starting ANY background work.  In
     # particular, --strict-port is used by service managers: if its one port is
@@ -9487,6 +9658,13 @@ def main() -> int:
             sys.stderr.write(
                 f"No free port found in {requested_port}..{requested_port + 49}\n")
         return 1
+    # Wrapping the LISTENING socket makes every accepted connection a TLS one,
+    # and leaves `client_address` as the peer's real address — which is the
+    # whole reason TLS terminates here and not in a front proxy, since
+    # tailscale_whois() needs that address to name the operator.
+    if tls_context is not None:
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+
     # Threaded server handles one SSE connection per thread; don't let them
     # keep the process alive on Ctrl-C.
     server.daemon_threads = True
@@ -9611,12 +9789,24 @@ def main() -> int:
     print(f"  db:          {db_path}")
     if port != requested_port:
         print(f"  note:        port {requested_port} was busy — using {port} instead")
-    print(f"  bound on:    http://{host}:{port}/")
-    print(f"  localhost:   http://127.0.0.1:{port}/")
-    if ts_ip and host in ("0.0.0.0",):
-        print(f"  tailnet:     http://{ts_ip}:{port}/   (visible to tailnet peers)")
+    scheme = "https" if tls_context is not None else "http"
+    print(f"  bound on:    {scheme}://{host}:{port}/")
+    print(f"  localhost:   {scheme}://127.0.0.1:{port}/")
+    if tls_dns_name:
+        # The ONLY URL the certificate is valid for. Reaching the same server
+        # by tailnet IP still works but throws a name-mismatch warning — and
+        # a browser that has been click-throughed past that warning is not a
+        # secure context, so dictation stays broken. Name the right URL.
+        print(f"  tailnet:     https://{tls_dns_name}:{port}/   "
+              f"(use this one — mic/dictation needs the certificate's name)")
+    elif ts_ip and host in ("0.0.0.0",):
+        print(f"  tailnet:     {scheme}://{ts_ip}:{port}/   (visible to tailnet peers)")
     elif ts_ip:
         print(f"  tailnet IP:  {ts_ip}   (pass --tailnet to bind)")
+    if tls_context is None and host in ("0.0.0.0",):
+        print("  note:        plain http — browsers block microphone access on "
+              "a non-localhost http origin, so dictation will not work from "
+              "other devices. Pass --tailscale-tls to fix.")
     print("  Ctrl-C to stop.")
     print()
 
