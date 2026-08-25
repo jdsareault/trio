@@ -32,6 +32,11 @@
   // async callback (e.g. browserDictation's metering getUserMedia) detect
   // it's stale — see LOTC/Aragorn's unmount-race finding below.
   let starting = false, dictationGen = 0;
+  // Sticky for the life of the composer: once the local Whisper engine has
+  // failed, retrying it on every subsequent tap just reproduces the same
+  // failure. Set on a post-recording transcription failure, read by
+  // toggleDictation to route later taps to the browser engine instead.
+  let localEngineFailed = false;
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   // The message box is a contenteditable div so @-mentions render as inline
@@ -411,7 +416,36 @@
     } finally { updateSendState(); }
   }
   function stopTracks() { stream?.getTracks?.().forEach(track => track.stop()); stream = null; }
-  function hasBrowserDictation() { return typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function'; }
+  // SpeechRecognition reports failures as a terse code on an error event.
+  // Unmapped, the user sees nothing useful; unhandled (as it was), the user
+  // sees NOTHING AT ALL, because onend fires straight after and quietly
+  // resets the button to idle. Every entry here is a state the operator can
+  // act on, so name the action rather than the code.
+  const SPEECH_ERRORS = {
+    'not-allowed': 'Microphone access was blocked. Allow it for this site in your browser settings.',
+    'service-not-allowed': 'This browser refused speech recognition. On an http:// page it always does — reload over https.',
+    'no-speech': 'No speech was detected.',
+    'audio-capture': 'No microphone was found.',
+    // Chrome's recognizer runs on Google's servers, not on the device, so a
+    // dead network breaks it even though the mic is working fine. Worth
+    // saying out loud — it is the least guessable failure in this list.
+    'network': 'Speech recognition needs a network connection (this browser transcribes on a server, not on the device).',
+    'aborted': '',   // user pressed stop; not a failure worth a toast
+    'language-not-supported': 'This browser cannot transcribe the configured language.',
+  };
+  function speechErrorMessage(code) {
+    if (code in SPEECH_ERRORS) return SPEECH_ERRORS[code];
+    return code ? `Browser speech recognition failed (${code}).`
+                : 'Browser speech recognition failed.';
+  }
+  // A secure context is REQUIRED, not merely preferred: on an insecure origin
+  // the constructor still exists (so an existence check passes happily) but
+  // start() is refused. Reporting "available" there is what let the composer
+  // promise a fallback it could never deliver, then fail silently.
+  function hasBrowserDictation() {
+    if (window.isSecureContext === false) return false;
+    return typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
+  }
   function hasLocalDictation() { return !!window.navigator?.mediaDevices?.getUserMedia && typeof window.MediaRecorder === 'function'; }
   // Simple 5-bar level meter driven by an AnalyserNode — enough to show
   // "yes, your voice is registering" without a full waveform canvas. Reuses
@@ -508,6 +542,16 @@
     let finalText = '';
     recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; inputValue((inputValue() + ' ' + finalText + interim).trim()); updateSendState(); };
     recognition.onend = () => { recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false); };
+    // Without this handler EVERY failure of this engine was silent: the error
+    // event went unhandled, onend fired immediately after and reset the button
+    // to idle, and the user was left looking at a mic that had apparently done
+    // nothing for no stated reason. onend still does the teardown — this only
+    // has to explain what happened, and only for the session it belongs to.
+    recognition.onerror = event => {
+      if (dictationGen !== myGen) return;
+      const message = speechErrorMessage(event?.error);
+      if (message) Trio.ui.toast(message);
+    };
     // LOTC/Aragorn: request the metering stream only once `onstart` confirms
     // SpeechRecognition's OWN mic permission already resolved, instead of
     // firing a second concurrent getUserMedia() request right away — on a
@@ -545,13 +589,6 @@
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
     recorder.onstop = async () => {
       setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
-      // LOTC/Sauron: the fallback below starts a NEW dictation session
-      // (browserDictation) without awaiting it, so this handler's own
-      // `finally` used to run right after and unconditionally strip the
-      // 'dictating' class / reset the button — wiping out the state the
-      // fallback had just set, even though its mic (`recognition`) was
-      // still live and listening. `fellBack` skips that stomp.
-      let fellBack = false;
       try {
         const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
         const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio });
@@ -559,19 +596,28 @@
         if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
         inputValue((inputValue() + ' ' + (data.text || '')).trim()); updateSendState();
       } catch (error) {
-        if (window.SpeechRecognition || window.webkitSpeechRecognition) {
-          fellBack = true;
-          Trio.ui.toast((error.message || 'Local transcription failed') + '. Falling back to browser speech recognition.');
-          // Not awaited — this function's own `finally` below runs first
-          // (synchronously, before this promise settles) and already skips
-          // its teardown because `fellBack` is true; if the fallback itself
-          // then fails, its OWN teardown has to happen here instead.
-          browserDictation().catch(fallback => { Trio.ui.toast(fallback.message); document.body.classList.remove('dictating'); setDictationButtonState(false); });
-        }
-        else Trio.ui.toast(error.message || 'Transcription failed');
+        // This runs AFTER the user has stopped speaking. The old code
+        // responded by starting browserDictation() right here — which
+        // discarded the clip they had just recorded and silently opened a
+        // fresh live mic, so the honest instruction was "say the whole thing
+        // again into a microphone you were not told is on", while the toast
+        // implied their existing words were being transcribed. Two separate
+        // reasons that could never work: a post-recording start is outside
+        // the user gesture Safari requires, and on an insecure origin the
+        // engine is refused outright.
+        //
+        // So: say what broke, and route the NEXT tap to the browser engine —
+        // which starts inside a real click, with the user knowing the mic is
+        // live and getting to speak on purpose.
+        const reason = error.message || 'Local transcription failed';
+        localEngineFailed = true;
+        Trio.ui.toast(hasBrowserDictation()
+          ? `${reason}. Tap the mic again to use your browser's speech recognition instead.`
+          : reason);
       } finally {
         stopTracks();
-        if (!fellBack) { document.body.classList.remove('dictating'); setDictationButtonState(false); }
+        document.body.classList.remove('dictating');
+        setDictationButtonState(false);
       }
     };
     // No statusText while actively recording (see browserDictation) — the
@@ -588,6 +634,11 @@
     if (recognition || recorder?.state === 'recording') return stopDictation();
     const mode = Trio.preferences?.read?.().sttMode || 'local';
     if (mode === 'web') return browserDictation();
+    // The local engine already failed once this session (see localDictation's
+    // onstop handler). Honour the "tap again" that toast promised, from
+    // inside this real click — which is also the only context Safari will
+    // start speech recognition from.
+    if (localEngineFailed && hasBrowserDictation()) return browserDictation();
     try { return await localDictation(); }
     catch (error) {
       if (!hasBrowserDictation()) throw error;
@@ -811,5 +862,10 @@
   // update — so the router hook alone would read stale state (Bug C).
   function refresh() { loadDraft(); loadComposerAux(); setInputState(input()); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
+  // speechErrorMessage / hasBrowserDictation are exported for the same reason
+  // dom-harness.js recommends extracting pure helpers: the dictation paths
+  // around them need a live MediaRecorder and SpeechRecognition, which the
+  // harness deliberately does not fake, but the decisions they encode are the
+  // part that regressed and they are testable on their own.
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation };
 })();
