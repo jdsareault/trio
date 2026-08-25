@@ -1297,6 +1297,12 @@ def nth_connect(
             reclaiming = False
             member_id = ""
 
+    # Set by the reclaim branch below, read at session-mint time — so it has to
+    # outlive the `if existing:` block it is decided in. A reclaim into a
+    # channel that does not exist yet cannot be re-attaching to anything, so
+    # False is the correct default for the create branch.
+    reclaimed_existing = False
+
     try:
         _reap_sessions(db)
         existing = _get_channel(db, channel)
@@ -1310,7 +1316,6 @@ def nth_connect(
             # the operator's member_id off the public roster and impersonate
             # them: mint a valid session token and read their DMs. Checked here,
             # before the capacity gate, because it is a refusal either way.
-            reclaimed_existing = False
             if reclaiming:
                 existing_row = db.execute(
                     "SELECT kind FROM members WHERE id = ? AND channel = ?",
@@ -1471,6 +1476,38 @@ def nth_connect(
         # so fingerprints were silently empty since v6.2.
         session_fingerprint = (os.environ.get("CLAUDE_CODE_SESSION_ID")
                                or os.environ.get("CLAUDE_SESSION_ID", ""))[:64]
+        # A successful reclaim DISPLACES the incumbent — it does not join it.
+        #
+        # Rotating reclaim_secret on every spawn guards the door: a secret from
+        # an old process cannot get in. It does nothing about whoever is already
+        # inside, because a session token, once minted, stays valid until
+        # _reap_sessions() expires it after a WEEK of silence. Nothing else in
+        # the send/poll path asks whether the holder is still the current
+        # occupant of the identity — only whether the token exists and is
+        # unrevoked.
+        #
+        # So two supervisors sharing one DB could each rotate the secret and
+        # spawn the same agent seconds apart, and BOTH ended up holding live
+        # primary sessions for one member_id. Observed: one agent answered every
+        # @mention twice for 18 hours, from two processes, under one name. The
+        # loser of the rotation race had already banked its token before the
+        # winner's UPDATE landed, and nothing ever took it away.
+        #
+        # Scoped to (member_id, channel) because that is what a session IS: an
+        # agent holding sessions in #room and in the agent inbox reclaims each
+        # separately, and re-attaching to one must not sever the other. Scoped
+        # to reclaims because an ordinary connect mints a brand-new member_id
+        # via _register_agent_identity() and so has no incumbent to displace.
+        # Scoped to primary because read_only tokens carry no authority to
+        # duplicate. The displaced session's next call gets "Invalid or revoked
+        # session_token" and the stale twin stops rather than lingering.
+        if reclaiming and reclaimed_existing:
+            db.execute(
+                "UPDATE sessions SET revoked_at = ? "
+                "WHERE member_id = ? AND channel = ? AND role = 'primary' "
+                "AND revoked_at IS NULL",
+                (now, member_id, channel),
+            )
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
