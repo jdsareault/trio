@@ -193,6 +193,79 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
     return True, "ambient"
 
 
+# Sentinel for "this tick could not read the sessions table" — distinct from
+# None, which legitimately means "no such row" and IS a revocation signal.
+_SESSION_CHECK_SKIP = object()
+
+
+def _sessions_table_present(db):
+    """Settle ONCE whether this database has a sessions table.
+
+    Deciding it per-tick from an OperationalError conflates a missing table
+    with `database is locked`, which is routine on a busy hub — and the old
+    code turned one transient lock into a permanently disabled check.
+    """
+    try:
+        cols = db.execute("PRAGMA table_info(sessions)").fetchall()
+    except sqlite3.OperationalError:
+        return False
+    return any((c["name"] if hasattr(c, "keys") else c[1]) == "revoked_at"
+               for c in cols)
+
+
+def _revocation_event(db, member_id, channel):
+    """Classify a revoked/absent token, then describe it honestly.
+
+    Revocation has several causes and they call for opposite actions, so the
+    message has to name the right one:
+
+      * archived — every session revoked, members deactivated. Reconnecting
+        would partially UNDO the archive: nth_connect has no archived_at gate,
+        so a reclaim re-inserts the inbox membership and flips active back to 1.
+        This case must be checked FIRST and must say "do not reconnect".
+      * a newer live primary session holds this identity — either a genuine twin
+        or this same process reconnecting. Those are indistinguishable at the DB
+        level (a same-session reconnect produces exactly the displaced state,
+        and fingerprint cannot discriminate them — two processes resuming one
+        Claude session id share it), but the required ACTION is the same: this
+        monitor must die. Only the wording has to admit both possibilities.
+      * neither — an idle reap, or a revoke with no successor. Reconnecting is
+        the correct recovery, so say so.
+    """
+    base = {"event": "session_revoked", "member_id": member_id,
+            "channel": channel}
+    try:
+        archived = db.execute(
+            "SELECT 1 FROM agents WHERE id = ? AND archived_at IS NOT NULL",
+            (member_id,)).fetchone()
+    except sqlite3.OperationalError:
+        archived = None            # pre-archive schema: cannot be archived.
+    if archived:
+        return {**base, "reason": "archived",
+                "msg": ("This agent was archived: every session was revoked "
+                        "and its placements deactivated. Stop working and do "
+                        "NOT reconnect — reconnecting would partially undo the "
+                        "archive.")}
+    try:
+        successor = db.execute(
+            "SELECT 1 FROM sessions WHERE member_id = ? AND channel = ? "
+            "AND role = 'primary' AND revoked_at IS NULL LIMIT 1",
+            (member_id, channel)).fetchone()
+    except sqlite3.OperationalError:
+        successor = None
+    if successor:
+        return {**base, "reason": "displaced",
+                "msg": ("This token is no longer valid — a newer session holds "
+                        "this identity in this channel. If that is you (you "
+                        "just reconnected), relaunch the monitor with the new "
+                        "token. If not, another process is this member now: "
+                        "stop working and do not reconnect.")}
+    return {**base, "reason": "invalidated",
+            "msg": ("This session token is no longer valid and nothing has "
+                    "replaced it — most likely an idle reap. If you are still "
+                    "this member, reconnect and relaunch the monitor.")}
+
+
 def monitor(channel, member_id, filter_mode="all", _db_path=None,
             session_token=""):
     local_hwm = None
@@ -226,6 +299,12 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None,
             for r in db.execute("PRAGMA table_info(members)").fetchall())
     except sqlite3.Error:
         have_requested_col = False
+
+    # Same reasoning for the displacement check: settle the table's existence
+    # once, here, so a lock inside the loop is a skipped tick rather than a
+    # permanently disabled safety check. No token means no opinion — see the
+    # check itself for why guessing which session is ours is unsafe.
+    have_sessions = bool(session_token) and _sessions_table_present(db)
 
     # The mode actually in force. Starts at the launch argument — a value
     # chosen deliberately by whoever launched this agent, which is strictly
@@ -305,7 +384,19 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None,
                 # A token absent from the table counts as revoked: rows are
                 # deleted only by _reap_sessions, a week after revocation, so an
                 # id that is not there cannot become valid again.
-                if session_token:
+                #
+                # This check stays BELOW the members lookup above on purpose: a
+                # culled or kicked member has no members row, and `culled` is
+                # the more specific answer. Falling through to here would
+                # mis-report a removal as a displacement.
+                #
+                # A transient failure must NOT be mistaken for a missing table.
+                # `database is locked` raises OperationalError too, and treating
+                # that as "old schema, no opinion" silently disabled this check
+                # for the life of the process on one busy moment. The table's
+                # existence is settled ONCE, before the loop; in here an
+                # OperationalError just skips the tick.
+                if have_sessions:
                     try:
                         sess = db.execute(
                             "SELECT revoked_at FROM sessions "
@@ -313,17 +404,17 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None,
                             (session_token, channel),
                         ).fetchone()
                     except sqlite3.OperationalError:
-                        sess = None       # pre-sessions schema: no opinion.
-                        session_token = ""
-                    if session_token and (
+                        sess = _SESSION_CHECK_SKIP   # locked; try again in a tick
+                    if sess is not _SESSION_CHECK_SKIP and (
                             sess is None or sess["revoked_at"] is not None):
-                        emit({"event": "session_revoked",
-                              "member_id": member_id,
-                              "channel": channel,
-                              "msg": ("This session was displaced by a newer "
-                                      "connect holding the same identity. "
-                                      "Another process is now this member; "
-                                      "stop working and do not reconnect.")})
+                        # Revoked is not a synonym for displaced. _reap_sessions
+                        # revokes anything idle a week, archive revokes every
+                        # session the agent has, and an agent's own mid-run
+                        # reconnect revokes its previous token. Telling all of
+                        # those "another process is you now, do not reconnect"
+                        # is wrong, and for two of them it is harmful advice.
+                        # So establish WHICH it is before speaking.
+                        emit(_revocation_event(db, member_id, channel))
                         return
 
                 # Spec beats status. filter_mode_requested is the operator's
