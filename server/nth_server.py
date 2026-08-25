@@ -1547,13 +1547,21 @@ def nth_connect(
         # guess hub-vs-spoke from filesystem heuristics (a box can be a trio
         # hub and a quartet spoke at once — hub-ness is per-server).
         is_sse = TOOL_PREFIX == "quartet"
+        # --session-token is what lets the monitor notice this session has been
+        # displaced by a later reclaim of the same identity, and exit — instead
+        # of waking a muted process forever. It does put the token on a command
+        # line, readable from `ps` by any local user: the same exposure the
+        # spawn preamble already accepts for reclaim_secret, on the same local
+        # trust model. The spoke monitor is left alone — it talks over SSE and
+        # never reads the sessions table, so the flag would be inert there.
         monitor_hint = (
             f"python3 ~/.claude/skills/nth/server/nth_spoke_monitor.py "
             f"{channel} {member_id} --filter about "
             f"--url <mcpServers.nth-qweb.url from ~/.claude.json>"
             if is_sse else
             f"python3 ~/.claude/skills/nth/server/nth_monitor.py "
-            f"{channel} {member_id} --filter about"
+            f"{channel} {member_id} --filter about "
+            f"--session-token {session_token}"
         )
         # Give every member presence in the hidden DM transport. DMs are
         # channel-less: you can be addressed by anyone who can see you in a

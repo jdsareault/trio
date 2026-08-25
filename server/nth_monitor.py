@@ -193,7 +193,8 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
     return True, "ambient"
 
 
-def monitor(channel, member_id, filter_mode="all", _db_path=None):
+def monitor(channel, member_id, filter_mode="all", _db_path=None,
+            session_token=""):
     local_hwm = None
     member_missing_streak = 0
     member_seen = False
@@ -285,6 +286,45 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                     time.sleep(10)
                     continue
                 member_missing_streak = 0
+
+                # Displacement. A reclaim revokes the incumbent's primary
+                # session (nth_server._mint_session_token's caller), which stops
+                # the displaced process from SPEAKING — but nothing here reads a
+                # session, so without this check the loser keeps waking on every
+                # mention forever, burning a billed turn per wake to discover it
+                # cannot answer. It cannot recover either: reconnecting needs a
+                # reclaim_secret the winner already rotated away.
+                #
+                # Only when launched WITH a token. Absent one we cannot tell
+                # which session is ours, and guessing (e.g. "a session newer
+                # than my start time exists") would kill a healthy agent that
+                # merely reconnected mid-run. No token, no opinion — the
+                # pre-existing behaviour, which is why old launch commands and
+                # legacy member_id-only clients are unaffected.
+                #
+                # A token absent from the table counts as revoked: rows are
+                # deleted only by _reap_sessions, a week after revocation, so an
+                # id that is not there cannot become valid again.
+                if session_token:
+                    try:
+                        sess = db.execute(
+                            "SELECT revoked_at FROM sessions "
+                            "WHERE session_token = ? AND channel = ?",
+                            (session_token, channel),
+                        ).fetchone()
+                    except sqlite3.OperationalError:
+                        sess = None       # pre-sessions schema: no opinion.
+                        session_token = ""
+                    if session_token and (
+                            sess is None or sess["revoked_at"] is not None):
+                        emit({"event": "session_revoked",
+                              "member_id": member_id,
+                              "channel": channel,
+                              "msg": ("This session was displaced by a newer "
+                                      "connect holding the same identity. "
+                                      "Another process is now this member; "
+                                      "stop working and do not reconnect.")})
+                        return
 
                 # Spec beats status. filter_mode_requested is the operator's
                 # override; NULL/blank means "no override, keep the launch
@@ -719,22 +759,42 @@ def parse_filter_arg(argv_tail):
     return "all"
 
 
+def parse_session_token_arg(argv_tail):
+    """Return the --session-token value, or "" when not supplied.
+
+    Optional on purpose: without it the monitor keeps its historical behaviour
+    of never exiting on session state. With it, the monitor stops when that
+    exact token is revoked — the displaced half of a duplicate identity.
+    """
+    i = 0
+    while i < len(argv_tail):
+        if argv_tail[i] == "--session-token":
+            if i + 1 >= len(argv_tail):
+                raise ValueError("--session-token requires a value")
+            return argv_tail[i + 1]
+        i += 1
+    return ""
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         emit({"event": "error",
               "msg": "Usage: nth_monitor.py <channel> <member_id> "
-                     "[--filter all|about|at | --mention-filter]"})
+                     "[--filter all|about|at | --mention-filter] "
+                     "[--session-token TOKEN]"})
         sys.exit(1)
 
     channel_arg = sys.argv[1]
     member_arg = sys.argv[2]
     try:
         filter_arg = parse_filter_arg(sys.argv[3:])
+        token_arg = parse_session_token_arg(sys.argv[3:])
     except ValueError as e:
         emit({"event": "error", "msg": str(e)})
         sys.exit(1)
 
     try:
-        monitor(channel_arg, member_arg, filter_mode=filter_arg)
+        monitor(channel_arg, member_arg, filter_mode=filter_arg,
+                session_token=token_arg)
     except KeyboardInterrupt:
         pass
