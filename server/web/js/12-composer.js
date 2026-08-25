@@ -32,11 +32,6 @@
   // async callback (e.g. browserDictation's metering getUserMedia) detect
   // it's stale — see LOTC/Aragorn's unmount-race finding below.
   let starting = false, dictationGen = 0;
-  // Sticky for the life of the composer: once the local Whisper engine has
-  // failed, retrying it on every subsequent tap just reproduces the same
-  // failure. Set on a post-recording transcription failure, read by
-  // toggleDictation to route later taps to the browser engine instead.
-  let localEngineFailed = false;
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   // The message box is a contenteditable div so @-mentions render as inline
@@ -423,8 +418,15 @@
   // act on, so name the action rather than the code.
   const SPEECH_ERRORS = {
     'not-allowed': 'Microphone access was blocked. Allow it for this site in your browser settings.',
-    'service-not-allowed': 'This browser refused speech recognition. On an http:// page it always does — reload over https.',
-    'no-speech': 'No speech was detected.',
+    // Conditional: now that hasBrowserDictation() refuses insecure origins,
+    // the http case barely fires and the live causes are system-level — a Mac
+    // or iPhone with Dictation switched off, or a policy block, both on https,
+    // where "reload over https" sends the user chasing a URL that is already
+    // correct. (LOTC/Frodo)
+    'service-not-allowed': () => window.isSecureContext === false
+      ? "Your browser won't allow the microphone here because this page is http. Open the dashboard's https address instead."
+      : 'Your browser refused speech recognition. On a Mac or iPhone, check that Dictation is turned on in System Settings → Keyboard, then try again.',
+    'no-speech': 'No speech was detected. Try again and start speaking right after you tap the mic.',
     'audio-capture': 'No microphone was found.',
     // This engine transcribes on a REMOTE server, not on the device, so a
     // dead network breaks it with the mic working fine. But `network` is also
@@ -435,7 +437,11 @@
     // connection sends someone to debug a network that is fine, so name the
     // likelier cause and the option that does work — the local engine runs on
     // the operator's own machine and has neither problem.
-    'network': "Speech recognition could not reach its server. Browsers built on Chromium but not Chrome (Dia, Brave, Vivaldi) usually cannot use it at all — switch dictation to Local (Whisper) in preferences.",
+    // Checkable cause first, permanent one second. On a phone over Tailscale
+    // a weak signal produces this too, and leading with a lecture about
+    // Chromium forks buries the thing the user can actually go fix.
+    // (LOTC/Frodo)
+    'network': "Speech recognition couldn't reach its speech server. Check your connection and try again. If you're on a Chromium browser that isn't Chrome (Dia, Brave, Vivaldi) it can never work — switch dictation to Local (Whisper) in Preferences.",
     'aborted': '',   // user pressed stop; not a failure worth a toast
     'language-not-supported': 'This browser cannot transcribe the configured language.',
   };
@@ -463,10 +469,55 @@
       return (baseline + ' ' + finalText + interim).trim();
     };
   }
+  // These messages run to ~200 characters and name an action. The 3500ms
+  // default is not long enough to read one on a phone, and there is no
+  // dismiss control to buy time with. (LOTC/Frodo)
+  const DICTATION_TOAST_MS = 9000;
+  // Why the mic cannot be used, in the user's terms rather than the API's.
+  // "Dictation is unavailable in this browser" was the old text and it was
+  // usually FALSE: on an http:// tailnet URL the browser is perfectly capable
+  // and the address is the problem. Naming the working address matters more
+  // than naming the cause — "use the https one" is unactionable if nobody
+  // says which. The server supplies it via /api/stt/health.secure_url,
+  // because the page cannot know it and the server can.
+  function unavailableReason() {
+    if (window.isSecureContext === false) {
+      const url = Trio.state?.secureUrl;
+      return url
+        ? `Dictation needs a secure (https) connection, and this page is http. Open ${url} instead.`
+        : 'Dictation needs a secure (https) connection, and this page is http. Reopen the dashboard at its https address — restart the hub with --tailscale-tls if it does not have one yet.';
+    }
+    return 'This browser has no dictation support. Chrome, Edge or Safari can dictate here.';
+  }
+  // The transcribe endpoint relays its own internal failures verbatim —
+  // "worker pipe broken", "worker exited mid-request", "worker sent malformed
+  // response". The operator does not know what a worker is, and none of those
+  // strings names an action. Translate the ones with a real answer; anything
+  // unrecognised passes through unchanged rather than being flattened into a
+  // vaguer message than the server bothered to send. (LOTC/Frodo)
+  function humanEngineError(raw) {
+    const message = String(raw || '');
+    if (/mlx_whisper\) not installed|not installed/i.test(message)) {
+      return "Local dictation isn't installed on this machine. Use browser dictation, or install it on the hub.";
+    }
+    if (/worker|pipe|malformed/i.test(message)) {
+      return 'Dictation stopped working on the server. Restarting the dashboard usually fixes it.';
+    }
+    if (/busy|try again/i.test(message)) {
+      return 'The dictation engine is busy right now. Try again in a moment.';
+    }
+    return message;
+  }
   function speechErrorMessage(code) {
-    if (code in SPEECH_ERRORS) return SPEECH_ERRORS[code];
-    return code ? `Browser speech recognition failed (${code}).`
-                : 'Browser speech recognition failed.';
+    if (code in SPEECH_ERRORS) {
+      const entry = SPEECH_ERRORS[code];
+      return typeof entry === 'function' ? entry() : entry;
+    }
+    // Name the code AND an action. A code alone is a fact, not a way out —
+    // and this default is precisely where an unfamiliar browser lands.
+    return code
+      ? `Browser speech recognition failed (${code}). Try again, or switch dictation engines in Preferences.`
+      : 'Browser speech recognition failed. Try again, or switch dictation engines in Preferences.';
   }
   // A secure context is REQUIRED, not merely preferred: on an insecure origin
   // the constructor still exists (so an existence check passes happily) but
@@ -582,7 +633,7 @@
     recognition.onerror = event => {
       if (dictationGen !== myGen) return;
       const message = speechErrorMessage(event?.error);
-      if (message) Trio.ui.toast(message);
+      if (message) Trio.ui.toast(message, DICTATION_TOAST_MS);
     };
     // LOTC/Aragorn: request the metering stream only once `onstart` confirms
     // SpeechRecognition's OWN mic permission already resolved, instead of
@@ -626,7 +677,18 @@
         const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio });
         const data = await result.json();
         if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
-        inputValue((inputValue() + ' ' + (data.text || '')).trim()); updateSendState();
+        const text = (data.text || '').trim();
+        // Success with nothing in it. The old code appended '' and said
+        // nothing at all — you watched "Transcribing…" and then got silence,
+        // the same invisible-failure class this whole feature keeps hitting.
+        // The server already distinguishes the two causes; use them.
+        // (LOTC/Frodo, critical)
+        if (!text) {
+          Trio.ui.toast(data.no_speech
+            ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
+            : 'That was too quiet to transcribe. Move closer to the mic and try again.',
+            DICTATION_TOAST_MS);
+        } else { inputValue((inputValue() + ' ' + text).trim()); updateSendState(); }
       } catch (error) {
         // This runs AFTER the user has stopped speaking. The old code
         // responded by starting browserDictation() right here — which
@@ -638,14 +700,22 @@
         // the user gesture Safari requires, and on an insecure origin the
         // engine is refused outright.
         //
-        // So: say what broke, and route the NEXT tap to the browser engine —
-        // which starts inside a real click, with the user knowing the mic is
-        // live and getting to speak on purpose.
-        const reason = error.message || 'Local transcription failed';
-        localEngineFailed = true;
-        Trio.ui.toast(hasBrowserDictation()
-          ? `${reason}. Tap the mic again to use your browser's speech recognition instead.`
-          : reason);
+        // So: say what broke and OFFER the browser engine as a button on the
+        // toast. The first version of this fix set a sticky flag that silently
+        // rerouted every later tap — which overrode the visible "Local
+        // (Whisper)" preference, fired on transient failures like a 503
+        // "busy, try again", and left no way back short of a reload. A setting
+        // that reads Local while doing Browser is the same lie this branch
+        // exists to delete. An explicit button makes the switch a thing the
+        // user chose, once, for this recording only. (LOTC/Frodo, critical)
+        const reason = humanEngineError(error.message) || 'Local transcription failed';
+        if (hasBrowserDictation()) {
+          Trio.ui.toast(reason, DICTATION_TOAST_MS, {
+            label: 'Use browser dictation',
+            onClick: () => browserDictation().catch(
+              fallback => Trio.ui.toast(fallback.message, DICTATION_TOAST_MS)),
+          });
+        } else Trio.ui.toast(reason, DICTATION_TOAST_MS);
       } finally {
         stopTracks();
         document.body.classList.remove('dictating');
@@ -666,15 +736,14 @@
     if (recognition || recorder?.state === 'recording') return stopDictation();
     const mode = Trio.preferences?.read?.().sttMode || 'local';
     if (mode === 'web') return browserDictation();
-    // The local engine already failed once this session (see localDictation's
-    // onstop handler). Honour the "tap again" that toast promised, from
-    // inside this real click — which is also the only context Safari will
-    // start speech recognition from.
-    if (localEngineFailed && hasBrowserDictation()) return browserDictation();
     try { return await localDictation(); }
     catch (error) {
       if (!hasBrowserDictation()) throw error;
-      Trio.ui.toast((error.message || 'Local dictation failed') + '. Falling back to browser speech recognition.');
+      // Unlike the post-recording case, this failure happens BEFORE anything
+      // was recorded and inside the click, so falling straight through to the
+      // browser engine loses no audio and keeps the user gesture Safari needs.
+      Trio.ui.toast((humanEngineError(error.message) || 'Local dictation failed')
+        + '. Falling back to browser speech recognition.', DICTATION_TOAST_MS);
       return browserDictation();
     }
   }
@@ -867,11 +936,25 @@
     if (dictateBtn) {
       dictateBtn.hidden = !dictation;
       dictateBtn.dataset.unavailable = String(dictation && !dictationAvailable);
-      dictateBtn.disabled = dictation && !dictationAvailable;
-      if (!dictationAvailable) dictateBtn.title = 'Dictation is unavailable in this browser';
+      // NOT `disabled`. A disabled button fires no click, and on a phone there
+      // is no hover, so `title` never renders either — tapping it did
+      // absolutely nothing and said absolutely nothing. That is the very
+      // failure this feature's whole history is about, just relocated from the
+      // engine to the button. aria-disabled keeps the state announced to
+      // assistive tech while leaving the control able to explain itself.
+      // (LOTC/Frodo, critical)
+      dictateBtn.disabled = false;
+      dictateBtn.setAttribute('aria-disabled', String(dictation && !dictationAvailable));
+      if (!dictationAvailable) dictateBtn.title = unavailableReason();
     }
-    const onDictate = () => toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed'));
-    if (dictation && dictationAvailable && dictateBtn) { dictateBtn.addEventListener('click', onDictate); domListeners.push([dictateBtn, 'click', onDictate]); }
+    const onDictate = () => {
+      // Unavailable: explain, don't no-op. The reason is almost never "this
+      // browser" — it is overwhelmingly an http:// address, which the user
+      // can actually fix if someone tells them the right one.
+      if (!dictationAvailable) { Trio.ui.toast(unavailableReason(), DICTATION_TOAST_MS); return; }
+      toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed', DICTATION_TOAST_MS));
+    };
+    if (dictation && dictateBtn) { dictateBtn.addEventListener('click', onDictate); domListeners.push([dictateBtn, 'click', onDictate]); }
     // Aux (targets/images) loading is driven by loadConversation → refresh(),
     // which runs after channel/dmKey are final; the router hook only needs the
     // text draft + input state (kept as-is to avoid touching existing flows).
@@ -899,5 +982,5 @@
   // around them need a live MediaRecorder and SpeechRecognition, which the
   // harness deliberately does not fake, but the decisions they encode are the
   // part that regressed and they are testable on their own.
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError };
 })();

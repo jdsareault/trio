@@ -45,12 +45,23 @@ const message = C.speechErrorMessage;
 // ── 1. every failure state says something actionable ──
 check('speechErrorMessage is exported', typeof message === 'function');
 
-// The insecure-origin case, which is the one that started all of this. The
-// message has to name https, because "service-not-allowed" is otherwise
-// completely opaque and the fix is a different URL, not a browser setting.
-const insecure = message('service-not-allowed');
-check('service-not-allowed explains the https requirement',
-      /https/.test(insecure));
+// `service-not-allowed` is CONDITIONAL. Now that hasBrowserDictation() refuses
+// insecure origins the http case barely fires, and the live causes are
+// system-level — a Mac with Dictation switched off, on https, where "reload
+// over https" sends the user chasing a URL that is already correct. So the
+// message has to read the context it is in. (LOTC/Frodo)
+const win = cx.window;
+const savedSecure = win.isSecureContext;
+win.isSecureContext = false;
+check('on an insecure page, service-not-allowed names the https requirement',
+      /https/.test(message('service-not-allowed')));
+win.isSecureContext = true;
+const secureRefusal = message('service-not-allowed');
+check('on a secure page, it does NOT tell you to reload over https',
+      !/reload over https|https address/i.test(secureRefusal));
+check('on a secure page, it points at the system dictation setting',
+      /system settings/i.test(secureRefusal));
+win.isSecureContext = savedSecure;
 
 // A blocked mic is a browser SETTING, not a page problem — pointing at the
 // wrong one costs an afternoon.
@@ -71,6 +82,11 @@ check('network names the not-Chrome-Chromium cause',
       /chromium/i.test(network));
 check('network points at the local engine as the way out',
       /local/i.test(network));
+// Order matters, not just content. A phone on a weak signal gets this too,
+// and leading with a lecture about Chromium forks buries the one thing that
+// user can actually go and check. (LOTC/Frodo)
+check('network leads with the checkable cause, not the permanent one',
+      network.toLowerCase().indexOf('connection') < network.toLowerCase().indexOf('chromium'));
 
 check('audio-capture names the missing microphone',
       /microphone/i.test(message('audio-capture')));
@@ -89,6 +105,12 @@ check('an unmapped code still yields a message',
       typeof unknown === 'string' && unknown.length > 0);
 check('an unmapped code includes the raw code for diagnosis',
       unknown.includes('some-future-code'));
+// ...and an action. A bare code is a fact, not a way out, and this default is
+// exactly where an unfamiliar browser lands. (LOTC/Frodo)
+check('an unmapped code still offers something to do',
+      /try again|preferences/i.test(unknown));
+check('no-speech tells you how to avoid it next time',
+      /try again/i.test(message('no-speech')));
 const missing = message(undefined);
 check('a missing code still yields a message',
       typeof missing === 'string' && missing.length > 0);
@@ -105,8 +127,6 @@ check('no mapped state returns a bare error code',
 // This is the check that decides whether to PROMISE a fallback. On the
 // insecure origin it used to say yes, which is how the composer came to
 // announce a recovery it could not perform.
-const win = cx.window;
-const savedSecure = win.isSecureContext;
 const savedSpeech = win.SpeechRecognition;
 const savedWebkit = win.webkitSpeechRecognition;
 
@@ -214,6 +234,63 @@ const results = [res('one', true), res('two', true)];
 absorb(results.slice(0, 1), 0);
 out = absorb(results, 1);
 check('resultIndex is honoured, not rescanned from zero', out === 'onetwo');
+
+// ── 4. why the mic button is dead ──
+// The button used to be `disabled` with title "Dictation is unavailable in
+// this browser". Disabled fires no click, and a phone has no hover, so tapping
+// it did nothing and said nothing — the exact silence this whole feature keeps
+// reinventing. The title was also usually FALSE: on an http tailnet URL the
+// browser is fine and the address is the problem. (LOTC/Frodo, critical)
+const why = Trio.composer.unavailableReason;
+check('unavailableReason is exported', typeof why === 'function');
+
+const savedSecureUrl = Trio.state.secureUrl;
+win.isSecureContext = false;
+Trio.state.secureUrl = '';
+let reason = why();
+check('on an insecure page it blames the connection, not the browser',
+      /https/i.test(reason) && !/no dictation support/i.test(reason));
+check('...and says how to get one when no URL is known',
+      /--tailscale-tls/.test(reason));
+
+// The server knows the address that would work; the page cannot. When it has
+// been told, it must name it — "use the https address" is unactionable
+// otherwise.
+Trio.state.secureUrl = 'https://macbook.tail63b486.ts.net:8765/';
+reason = why();
+check('when the server supplies the secure URL, the message names it',
+      reason.includes('https://macbook.tail63b486.ts.net:8765/'));
+
+// Genuinely unsupported browser on a secure page: now the browser IS the
+// problem, and saying so is correct.
+win.isSecureContext = true;
+reason = why();
+check('on a secure page it names the browser and suggests real ones',
+      /browser/i.test(reason) && /chrome|safari|edge/i.test(reason));
+win.isSecureContext = savedSecure;
+Trio.state.secureUrl = savedSecureUrl;
+
+// ── 5. server engine errors, translated ──
+// /api/stt/transcribe relays its internals verbatim. The operator does not
+// know what a worker is, and none of those strings names an action.
+const human = Trio.composer.humanEngineError;
+check('humanEngineError is exported', typeof human === 'function');
+check('the missing-engine case names install, not jargon',
+      /install/i.test(human('speech engine (mlx_whisper) not installed')));
+check('worker failures become something actionable',
+      /restart/i.test(human('worker pipe broken'))
+      && /restart/i.test(human('worker exited mid-request'))
+      && /restart/i.test(human('worker sent malformed response')));
+check('no translated message still says "worker"',
+      !/worker/i.test(human('worker pipe broken')));
+check('a busy engine reads as temporary',
+      /moment|try again/i.test(human('transcription busy — try again in a moment')));
+// Unrecognised text passes through rather than being flattened into something
+// vaguer than the server bothered to send.
+check('an unrecognised error is passed through unchanged',
+      human('disk full writing scratch file') === 'disk full writing scratch file');
+check('empty input does not become "undefined"',
+      human(undefined) === '' && human(null) === '');
 
 console.log('');
 if (failures.length) {

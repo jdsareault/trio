@@ -143,11 +143,18 @@ After=network-online.target quartet-hub.service
 Type=simple
 Environment=HOME=${HUB_HOME}
 WorkingDirectory=${HUB_DIR}
-ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/nth_web.py --tailnet --port 8765
+ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/nth_web.py --tailscale-tls --port 8765
 Restart=on-failure
 RestartSec=3
-# See quartet-hub.service: still root, hardened. --tailnet binds 0.0.0.0
+# See quartet-hub.service: still root, hardened. --tailscale-tls binds 0.0.0.0
 # with no authentication — the host firewall / Tailscale ACL is the gate.
+# It serves https rather than plain http because browsers grant microphone
+# access only on a secure context: under --tailnet this unit shipped a hub
+# whose dictation could never work from any device, and said so only in a
+# service log. Needs HTTPS Certificates enabled for the tailnet
+# (https://login.tailscale.com/admin/dns); the server falls back to an
+# existing certificate if a renewal fails, and refuses to start only when it
+# has none — deliberately, since silently serving http would restore the bug.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
