@@ -439,6 +439,30 @@
     'aborted': '',   // user pressed stop; not a failure worth a toast
     'language-not-supported': 'This browser cannot transcribe the configured language.',
   };
+  // Accumulates a SpeechRecognition session into composer text.
+  //
+  // The subtlety that bit us: each result event carries only the results from
+  // `resultIndex` onward, so `finalText` must accumulate across events — but
+  // the BOX must be rewritten from a fixed baseline every time, never appended
+  // to. The original read the box back with inputValue() and appended the
+  // running transcript to whatever was already there, so every event re-added
+  // the whole sentence so far: "today / today is / today is a / today is a
+  // beautiful"… concatenated, not replaced. Interim results make this fire on
+  // nearly every word, so the output grew quadratically with what you said.
+  //
+  // Baseline is captured once at session start, so text the operator had
+  // already typed is preserved and dictation appends after it exactly once.
+  function makeSpeechAccumulator(baseline) {
+    let finalText = '';
+    return function absorb(results, resultIndex) {
+      let interim = '';
+      for (let i = resultIndex; i < results.length; i++) {
+        const transcript = results[i][0].transcript;
+        if (results[i].isFinal) finalText += transcript; else interim += transcript;
+      }
+      return (baseline + ' ' + finalText + interim).trim();
+    };
+  }
   function speechErrorMessage(code) {
     if (code in SPEECH_ERRORS) return SPEECH_ERRORS[code];
     return code ? `Browser speech recognition failed (${code}).`
@@ -545,8 +569,10 @@
     // return French from /api/stt/transcribe and English from the browser,
     // decided by nothing but which dictation route the visitor's device took.
     recognition.lang = /*__STT_LANG__*/'en-US';
-    let finalText = '';
-    recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; inputValue((inputValue() + ' ' + finalText + interim).trim()); updateSendState(); };
+    // Baseline captured BEFORE start: every event rewrites the box from it
+    // rather than appending to the box's own contents (see the accumulator).
+    const absorb = makeSpeechAccumulator(inputValue());
+    recognition.onresult = event => { inputValue(absorb(event.results, event.resultIndex)); updateSendState(); };
     recognition.onend = () => { recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false); };
     // Without this handler EVERY failure of this engine was silent: the error
     // event went unhandled, onend fired immediately after and reset the button
@@ -873,5 +899,5 @@
   // around them need a live MediaRecorder and SpeechRecognition, which the
   // harness deliberately does not fake, but the decisions they encode are the
   // part that regressed and they are testable on their own.
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator };
 })();

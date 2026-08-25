@@ -149,6 +149,72 @@ check('an unknown secure-context state does not disable dictation',
 win.isSecureContext = savedSecure;
 win.SpeechRecognition = savedSpeech;
 
+// ── 3. the transcript accumulator ──
+// Reported live: saying "Today is a beautiful sunny day" produced "today today
+// is today is a today is a beautiful…". Each result event carries only the
+// results from resultIndex onward, so the running final text must accumulate
+// across events — but the BOX has to be rewritten from a fixed baseline, never
+// appended to. The original read the box back and appended the running
+// transcript to it, so every event re-added the whole sentence so far. Interim
+// results fire on nearly every word, so output grew quadratically with speech.
+const acc = Trio.composer.makeSpeechAccumulator;
+check('makeSpeechAccumulator is exported', typeof acc === 'function');
+
+// One word at a time, interim then final — how Chrome actually streams.
+function res(transcript, isFinal) { return { 0: { transcript }, isFinal }; }
+
+let absorb = acc('');
+let out;
+out = absorb([res('today', false)], 0);
+check('first interim shows the word once', out === 'today');
+out = absorb([res('today is', false)], 0);
+check('a revised interim REPLACES, never appends', out === 'today is');
+out = absorb([res('today is a beautiful sunny day', true)], 0);
+check('the final result replaces the interim',
+      out === 'today is a beautiful sunny day');
+
+// The reported failure, reproduced as a sequence: a growing interim followed
+// by a final. Anything that appends produces the doubled string.
+absorb = acc('');
+[['Today', false], ['Today is', false], ['Today is a beautiful', false],
+ ['Today is a beautiful sunny day', true]].forEach(([t, f]) => {
+  out = absorb([res(t, f)], 0);
+});
+check('a full dictation session yields the sentence exactly once',
+      out === 'Today is a beautiful sunny day');
+check('no word is duplicated', (out.match(/beautiful/g) || []).length === 1);
+
+// Multi-utterance: two finals in a row must BOTH survive. Rewriting from
+// baseline is the fix, but rewriting from baseline while forgetting to
+// accumulate finals would silently drop the first sentence.
+// `results` is cumulative across events and resultIndex points at the first
+// NEW entry, so the second event sees a two-element list starting at 1.
+absorb = acc('');
+const utterances = [res('First sentence.', true), res(' Second sentence.', true)];
+absorb(utterances.slice(0, 1), 0);
+out = absorb(utterances, 1);
+check('successive final results both accumulate',
+      out === 'First sentence. Second sentence.');
+
+// Text already typed must be preserved and dictation appended after it once.
+absorb = acc('existing note');
+out = absorb([res('dictated words', true)], 0);
+check('pre-existing composer text is kept exactly once',
+      out === 'existing note dictated words');
+
+// A baseline that is empty must not leave a leading space.
+absorb = acc('');
+out = absorb([res('hello', true)], 0);
+check('an empty baseline yields no leading whitespace', out === 'hello');
+
+// resultIndex is what makes events incremental — a handler that ignores it
+// and rescans from 0 re-adds every already-final result.
+absorb = acc('');
+const results = [res('one', true), res('two', true)];
+absorb(results.slice(0, 1), 0);
+out = absorb(results, 1);
+check('resultIndex is honoured, not rescanned from zero', out === 'onetwo');
+
 console.log('');
 if (failures.length) {
   console.log(failures.length + ' FAILED: ' + failures.join(', '));
