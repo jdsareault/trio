@@ -891,6 +891,21 @@ def get_tailscale_ip() -> Optional[str]:
 # the peer's actual tailnet IP, so `tailscale_whois` still names them.
 TLS_DIR = DB_PATH.parent / "tls"
 TAILSCALE_CERT_TIMEOUT = 120    # first issuance contacts Let's Encrypt
+# A laptop hub started at login races `tailscaled`: MagicDNS is unknown for the
+# first seconds after a boot or a wake. Exiting there means the dashboard the
+# operator reaches from their PHONE simply never appears, with the only
+# explanation on a terminal they are not looking at. Wait it out instead.
+TAILSCALE_DNS_RETRY_S = 60
+# The https address that WOULD grant this dashboard microphone access, handed
+# to the page via /api/stt/health. Set by main(). Empty when it cannot be named
+# honestly (no Tailscale, no MagicDNS) — the client then falls back to generic
+# wording rather than inventing a URL that does not resolve.
+SECURE_URL_HINT = ""
+TAILSCALE_DNS_RETRY_INTERVAL_S = 2
+# Ceiling on how long a TLS handshake may take before the connection is
+# dropped. See NthWebHandler-side note in QuietThreadingHTTPServer.get_request:
+# this bounds a stalled handshake, it does not serialise one.
+TLS_HANDSHAKE_TIMEOUT = 20
 
 
 def tailscale_dns_name() -> Optional[str]:
@@ -921,30 +936,52 @@ def ensure_tailscale_cert(dns_name: str, directory: Path = TLS_DIR) -> tuple[Pat
 
     `tailscale cert` is idempotent and renews only when the existing pair is
     near expiry, so calling it on every start IS the renewal story — there is
-    no cron to forget. Raises RuntimeError with the CLI's own stderr on
-    failure, because every likely cause is something only the operator can
-    fix (HTTPS not enabled for the tailnet, a tagged node without cert
-    permission, Tailscale logged out).
+    no cron to forget.
+
+    But that call can fail for reasons that have nothing to do with the
+    certificate on disk: `tailscaled` still coming up after a boot, a blip
+    reaching Let's Encrypt, a momentary auth hiccup. Hard-failing there would
+    refuse to start the dashboard while a perfectly valid pair sits in this
+    very directory — and the operator would discover it from a PHONE, with the
+    reason on a terminal they cannot see. So: if issuance fails but a loadable
+    pair already exists, serve with it and say so loudly. Raise only when there
+    is nothing usable, since silently falling back to http would recreate the
+    exact insecure-context bug this module exists to fix.
     """
-    directory.mkdir(parents=True, exist_ok=True)
+    # 0o700: the key lands here, and the parent (~/.claude/nth) is not
+    # guaranteed to be restrictive. mode= only applies on creation, so an
+    # existing directory is tightened explicitly.
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
     cert = directory / f"{dns_name}.crt"
     key = directory / f"{dns_name}.key"
     last = "tailscale CLI not found"
     for cmd in TAILSCALE_CANDIDATES:
         try:
-            proc = subprocess.run(
-                [cmd, "cert", "--cert-file", str(cert), "--key-file", str(key), dns_name],
-                timeout=TAILSCALE_CERT_TIMEOUT, capture_output=True,
-            )
+            # The CLI writes the key with its own umask, leaving a window in
+            # which a group/world-readable private key exists on disk before
+            # the chmod below. Clamp the umask across the call so the file is
+            # never created permissively in the first place.
+            previous_umask = os.umask(0o077)
+            try:
+                proc = subprocess.run(
+                    [cmd, "cert", "--cert-file", str(cert), "--key-file", str(key), dns_name],
+                    timeout=TAILSCALE_CERT_TIMEOUT, capture_output=True,
+                )
+            finally:
+                os.umask(previous_umask)
         except FileNotFoundError:
             continue
         except subprocess.TimeoutExpired:
             last = f"`{cmd} cert` timed out after {TAILSCALE_CERT_TIMEOUT}s"
             continue
         if proc.returncode == 0:
-            # Private key readable only by this user: it lives under a
-            # home-directory path the whole nth install already trusts, but
-            # the CLI's own umask is not something to rely on.
+            # Belt and braces alongside the umask above — and a no-op on
+            # Windows, where the umask trick does not apply either. The
+            # directory mode is the load-bearing protection there.
             try:
                 key.chmod(0o600)
             except OSError:
@@ -952,11 +989,49 @@ def ensure_tailscale_cert(dns_name: str, directory: Path = TLS_DIR) -> tuple[Pat
             return cert, key
         last = (proc.stderr or proc.stdout or b"").decode(errors="replace").strip() \
             or f"`{cmd} cert` exited {proc.returncode}"
+    # Issuance failed. Is what we already have good enough to serve with?
+    if cert.exists() and key.exists():
+        try:
+            build_ssl_context(cert, key)
+        except RuntimeError:
+            pass
+        else:
+            sys.stderr.write(
+                f"[nth_web] could not refresh the Tailscale certificate for "
+                f"{dns_name} ({last}); serving with the existing certificate in "
+                f"{directory} instead.\n"
+                "[nth_web] If that certificate expires this server will stop "
+                "being reachable over https — fix the cause above.\n")
+            return cert, key
     raise RuntimeError(
         f"could not obtain a Tailscale certificate for {dns_name}: {last}\n"
         "Most likely HTTPS is not enabled for this tailnet — turn it on at\n"
         "  https://login.tailscale.com/admin/dns  →  HTTPS Certificates."
     )
+
+
+def tailscale_dns_name_blocking(timeout_s: float = TAILSCALE_DNS_RETRY_S) -> Optional[str]:
+    """tailscale_dns_name(), but wait for `tailscaled` to come up.
+
+    A hub launched at login or resumed from sleep routinely asks before the
+    daemon is ready. One immediate miss is not evidence that Tailscale is
+    unavailable, and treating it as such turns a boot race into "the dashboard
+    never appeared".
+    """
+    deadline = time.monotonic() + timeout_s
+    announced = False
+    while True:
+        name = tailscale_dns_name()
+        if name:
+            return name
+        if time.monotonic() >= deadline:
+            return None
+        if not announced:
+            announced = True
+            sys.stderr.write(
+                "[nth_web] waiting for Tailscale to report this machine's name "
+                f"(up to {int(timeout_s)}s)…\n")
+        time.sleep(TAILSCALE_DNS_RETRY_INTERVAL_S)
 
 
 def build_ssl_context(cert: Path, key: Path) -> "ssl.SSLContext":
@@ -970,6 +1045,10 @@ def build_ssl_context(cert: Path, key: Path) -> "ssl.SSLContext":
         if not path.exists():
             raise RuntimeError(f"TLS {label} not found: {path}")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # Explicit rather than inherited: the OpenSSL default already excludes
+    # TLS 1.0/1.1 on every Python this repo runs on, but stating the floor
+    # means an older or differently-built OpenSSL cannot quietly lower it.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         context.load_cert_chain(certfile=str(cert), keyfile=str(key))
     except ssl.SSLError as exc:
@@ -3918,7 +3997,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if ident.source == IDENTITY_SOURCE_PENDING:
                 self._error(403, "pick a name to join this channel first")
                 return
-            self._json(STT.health())
+            # secure_url rides along because this is the endpoint the composer
+            # already consults about dictation. On an insecure origin the mic
+            # is unavailable and the ONLY useful thing to tell the operator is
+            # the address that would work — which the browser cannot know and
+            # the server can. Absent when there is nothing honest to name.
+            self._json({**STT.health(), "secure_url": SECURE_URL_HINT})
         elif path.startswith("/api/attachment/"):
             self._serve_attachment(path)
         else:
@@ -9278,6 +9362,46 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
     """Ignore expected disconnects from tab closes, refreshes, and SSE retries."""
 
     daemon_threads = True
+    # Set by main() when serving https. Never wrap the LISTENING socket for
+    # this: ThreadingMixIn spawns its worker thread only AFTER get_request()
+    # returns, so a handshake performed there runs inside the single-threaded
+    # accept loop. One peer that opens a connection and then stalls — a port
+    # scanner, a phone losing signal mid-connect — would block accept() and
+    # freeze the dashboard for everyone, the operator included. (LOTC/Aragorn)
+    tls_context: "Optional[ssl.SSLContext]" = None
+
+    def get_request(self):
+        """Accept, and hand back a socket whose handshake has NOT happened yet.
+
+        `do_handshake_on_connect=False` defers the negotiation to the first
+        read, which happens on the worker thread — so a stalled handshake costs
+        one thread instead of the whole accept loop. That is exactly the
+        exposure a plain-http connection already has, so https is no longer the
+        weaker case. The timeout bounds how long that one thread can be held;
+        it is cleared once the handshake completes so it cannot later expire an
+        idle SSE stream, which legitimately sits silent for minutes.
+        """
+        sock, addr = super().get_request()
+        if self.tls_context is None:
+            return sock, addr
+        sock.settimeout(TLS_HANDSHAKE_TIMEOUT)
+        return self.tls_context.wrap_socket(
+            sock, server_side=True, do_handshake_on_connect=False), addr
+
+    def process_request_thread(self, request, client_address):
+        # On the worker thread now. Drive the deferred handshake explicitly
+        # rather than letting the first rfile read trigger it, so a failure is
+        # a clean close here instead of a partially-initialised handler.
+        if self.tls_context is not None and isinstance(request, ssl.SSLSocket):
+            try:
+                request.do_handshake()
+            except (OSError, ssl.SSLError):
+                self.shutdown_request(request)
+                return
+            # Back to blocking: SSE connections hold the socket open, quiet,
+            # for as long as the tab is open.
+            request.settimeout(None)
+        super().process_request_thread(request, client_address)
 
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
@@ -9606,11 +9730,12 @@ def main() -> int:
     tls_context = None
     tls_dns_name = None
     if args.tailscale_tls:
-        tls_dns_name = tailscale_dns_name()
+        tls_dns_name = tailscale_dns_name_blocking()
         if not tls_dns_name:
             sys.stderr.write(
                 "--tailscale-tls: could not determine this machine's MagicDNS "
-                "name. Is Tailscale running and logged in? (`tailscale status`)\n")
+                f"name after {TAILSCALE_DNS_RETRY_S}s. Is Tailscale running and "
+                "logged in? (`tailscale status`)\n")
             return 1
         try:
             cert_path, key_path = ensure_tailscale_cert(tls_dns_name)
@@ -9658,12 +9783,12 @@ def main() -> int:
             sys.stderr.write(
                 f"No free port found in {requested_port}..{requested_port + 49}\n")
         return 1
-    # Wrapping the LISTENING socket makes every accepted connection a TLS one,
-    # and leaves `client_address` as the peer's real address — which is the
-    # whole reason TLS terminates here and not in a front proxy, since
-    # tailscale_whois() needs that address to name the operator.
-    if tls_context is not None:
-        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+    # Per-connection TLS, wrapped in get_request() on the accepted socket —
+    # NOT on the listening socket, which would put the handshake in the accept
+    # loop (see QuietThreadingHTTPServer.get_request). `client_address` is
+    # untouched either way, which is the whole reason TLS terminates here and
+    # not in a front proxy: tailscale_whois() needs the peer's real address.
+    server.tls_context = tls_context
 
     # Threaded server handles one SSE connection per thread; don't let them
     # keep the process alive on Ctrl-C.
@@ -9790,6 +9915,17 @@ def main() -> int:
     if port != requested_port:
         print(f"  note:        port {requested_port} was busy — using {port} instead")
     scheme = "https" if tls_context is not None else "http"
+    # Tell the page the address that grants it a microphone. When TLS is on
+    # that is simply where we are; when it is off, it is where the operator
+    # would have to restart us — worth naming, because "use the https address"
+    # is unactionable advice if nobody says what the https address is. Only
+    # ever set from a name we actually resolved.
+    global SECURE_URL_HINT
+    if tls_context is not None and tls_dns_name:
+        SECURE_URL_HINT = f"https://{tls_dns_name}:{port}/"
+    elif tls_context is None:
+        _would_be = tailscale_dns_name()
+        SECURE_URL_HINT = f"https://{_would_be}:{port}/" if _would_be else ""
     print(f"  bound on:    {scheme}://{host}:{port}/")
     print(f"  localhost:   {scheme}://127.0.0.1:{port}/")
     if tls_dns_name:
@@ -9799,14 +9935,28 @@ def main() -> int:
         # secure context, so dictation stays broken. Name the right URL.
         print(f"  tailnet:     https://{tls_dns_name}:{port}/   "
               f"(use this one — mic/dictation needs the certificate's name)")
+    elif tls_context is not None:
+        # An operator-supplied pair (--tls-cert): we do not know the name it
+        # was issued for, but reaching this server by IP throws a name mismatch
+        # — and a click-throughed warning page is NOT a secure context, so
+        # dictation stays broken with nothing saying why. Name the requirement.
+        print(f"  tailnet:     https://<the name your certificate was issued "
+              f"for>:{port}/")
+        print("               (the certificate's own name — an IP will throw a "
+              "mismatch, and clicking past that warning leaves the page "
+              "insecure, so the mic stays blocked)")
     elif ts_ip and host in ("0.0.0.0",):
         print(f"  tailnet:     {scheme}://{ts_ip}:{port}/   (visible to tailnet peers)")
     elif ts_ip:
         print(f"  tailnet IP:  {ts_ip}   (pass --tailnet to bind)")
-    if tls_context is None and host in ("0.0.0.0",):
+    # Any non-loopback bind, not just 0.0.0.0: `--host 100.x.y.z` is advertised
+    # in this module's own docstring and hits the identical problem. Loopback
+    # is the sole exemption, because browsers count localhost as secure.
+    if tls_context is None and host != "127.0.0.1":
         print("  note:        plain http — browsers block microphone access on "
               "a non-localhost http origin, so dictation will not work from "
-              "other devices. Pass --tailscale-tls to fix.")
+              "other devices (or this one, at this address). Pass "
+              "--tailscale-tls to fix.")
     print("  Ctrl-C to stop.")
     print()
 

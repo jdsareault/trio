@@ -27,6 +27,7 @@ Sections:
 Usage: python tests/test-tls-serving.py
 """
 import json
+import os
 import shutil
 import ssl
 import subprocess
@@ -249,6 +250,105 @@ with with_fake_tailscale(run=_cert_ok):
           (got_key.stat().st_mode & 0o077) == 0)
 
 
+# ───────── 4b. issuance failure with a usable cert already on disk ─────────
+# LOTC/Ent+Aragorn+Frodo all landed on this one. `tailscale cert` runs on EVERY
+# start, and it can fail for reasons that say nothing about the certificate
+# sitting in TLS_DIR: tailscaled still coming up after a boot, a blip reaching
+# Let's Encrypt. Hard-failing there refuses to start the dashboard while a
+# perfectly good pair is right there — and the operator finds out from a PHONE,
+# with the reason on a terminal they cannot see.
+if not openssl:
+    skip("stale-cert fallback", "openssl(1) not on PATH")
+else:
+    fallback_dir = _tmp / "fallback"
+    fallback_dir.mkdir()
+    name = "macbook.tail63b486.ts.net"
+    # A pre-existing, loadable pair under the exact names the code looks for.
+    shutil.copy(real_cert, fallback_dir / f"{name}.crt")
+    shutil.copy(real_key, fallback_dir / f"{name}.key")
+    with with_fake_tailscale(run=_cert_fail):
+        try:
+            got_cert, got_key = web.ensure_tailscale_cert(name, fallback_dir)
+            check("a failed refresh falls back to the cert on disk", True)
+            check("the fallback returns the existing pair",
+                  got_cert == fallback_dir / f"{name}.crt"
+                  and got_key == fallback_dir / f"{name}.key")
+        except RuntimeError:
+            check("a failed refresh falls back to the cert on disk", False)
+            check("the fallback returns the existing pair", False)
+
+    # But an UNUSABLE pair must not be served with — silently degrading to a
+    # broken listener is worse than refusing to start, and falling back to
+    # plain http would recreate the very insecure-context bug this exists for.
+    broken_dir = _tmp / "broken"
+    broken_dir.mkdir()
+    (broken_dir / f"{name}.crt").write_text("not a certificate")
+    (broken_dir / f"{name}.key").write_text("not a key")
+    with with_fake_tailscale(run=_cert_fail):
+        try:
+            web.ensure_tailscale_cert(name, broken_dir)
+            check("an unloadable on-disk pair is NOT used as a fallback", False)
+        except RuntimeError:
+            check("an unloadable on-disk pair is NOT used as a fallback", True)
+
+    # No cert at all and issuance fails: nothing to fall back to, so raise.
+    empty_dir = _tmp / "empty"
+    with with_fake_tailscale(run=_cert_fail):
+        try:
+            web.ensure_tailscale_cert(name, empty_dir)
+            check("with no cert at all, failure still raises", False)
+        except RuntimeError:
+            check("with no cert at all, failure still raises", True)
+
+    # The key must not be group/world readable even when the CLI is careless:
+    # ensure_tailscale_cert clamps the umask across the call, so a naive
+    # writer cannot leave a readable key on disk even momentarily.
+    umask_dir = _tmp / "umaskdir"
+
+    def _cert_careless(cmd, **k):
+        key_path = Path(cmd[cmd.index("--key-file") + 1])
+        Path(cmd[cmd.index("--cert-file") + 1]).write_text("cert")
+        # 0o666 requested; the clamped umask must strip the group/world bits.
+        fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT, 0o666)
+        os.close(fd)
+        return _FakeCompleted(returncode=0)
+
+    with with_fake_tailscale(run=_cert_careless):
+        _c, k_path = web.ensure_tailscale_cert(name, umask_dir)
+        check("a careless CLI cannot leave a readable private key",
+              (k_path.stat().st_mode & 0o077) == 0)
+        check("the TLS directory itself is not world-listable",
+              (umask_dir.stat().st_mode & 0o077) == 0)
+
+
+# ───────── 4c. waiting for tailscaled ─────────
+# A hub started at login asks before the daemon is up. One immediate miss is
+# not evidence Tailscale is unavailable, and treating it as such turns a boot
+# race into "the dashboard never appeared".
+calls = {"n": 0}
+
+
+def _late_status(*a, **k):
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise FileNotFoundError("tailscaled not up yet")
+    return json.dumps({"Self": {"DNSName": "macbook.tail63b486.ts.net."}}).encode()
+
+
+saved_interval = web.TAILSCALE_DNS_RETRY_INTERVAL_S
+web.TAILSCALE_DNS_RETRY_INTERVAL_S = 0.01
+try:
+    with with_fake_tailscale(check_output=_late_status):
+        check("the DNS name is picked up once tailscaled comes up",
+              web.tailscale_dns_name_blocking(timeout_s=2) == "macbook.tail63b486.ts.net")
+        check("it retried rather than giving up on the first miss", calls["n"] >= 3)
+    with with_fake_tailscale(check_output=_boom):
+        check("it still gives up eventually rather than hanging forever",
+              web.tailscale_dns_name_blocking(timeout_s=0.05) is None)
+finally:
+    web.TAILSCALE_DNS_RETRY_INTERVAL_S = saved_interval
+
+
 # ───────── 5. end-to-end https ─────────
 # The point of this section: after wrap_socket, `client_address` must still be
 # the peer's own address. That is the property that keeps tailscale_whois()
@@ -270,10 +370,13 @@ else:
 
         server = web.QuietThreadingHTTPServer(("127.0.0.1", 0), web.NthWebHandler)
         port = server.server_address[1]
-        # Exactly what main() does — wrap the LISTENING socket, so every
-        # accepted connection is TLS.
-        server.socket = web.build_ssl_context(real_cert, real_key).wrap_socket(
-            server.socket, server_side=True)
+        # Exactly what main() does. Assigning tls_context (rather than wrapping
+        # the LISTENING socket) is the point: get_request wraps each accepted
+        # connection with the handshake DEFERRED to the worker thread. Wrapping
+        # the listener would put the handshake in the single-threaded accept
+        # loop, where one stalled peer freezes the dashboard for everyone —
+        # which is what the stalled-connection check below exists to catch.
+        server.tls_context = web.build_ssl_context(real_cert, real_key)
         server.daemon_threads = True
 
         original_client_ip = web.NthWebHandler._client_ip
@@ -321,6 +424,28 @@ else:
         # THE claim: TLS termination here did not rewrite the peer address.
         check("client_address survives socket wrapping (identity intact)",
               bool(seen_peers) and all(p == "127.0.0.1" for p in seen_peers))
+
+        # LOTC/Aragorn: a peer that connects and then says NOTHING must not
+        # take the dashboard down with it. With the handshake on the accept
+        # loop (wrapping the listening socket) this hangs accept() and every
+        # other client — including the operator's own phone — waits forever.
+        # With it deferred to the worker thread, the stall costs one thread.
+        import socket as _socket
+        stalled = _socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            served_during_stall = False
+            try:
+                with urllib.request.urlopen(f"https://localhost:{port}/", timeout=10,
+                                            context=verify) as resp:
+                    served_during_stall = resp.status == 200
+            except urllib.error.HTTPError as e:
+                served_during_stall = e.code == 200
+            except Exception:
+                served_during_stall = False
+            check("a stalled TLS handshake does not block other clients",
+                  served_during_stall)
+        finally:
+            stalled.close()
     finally:
         if server is not None:
             server.shutdown()
