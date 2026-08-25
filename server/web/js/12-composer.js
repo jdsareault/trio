@@ -426,10 +426,16 @@
     'service-not-allowed': 'This browser refused speech recognition. On an http:// page it always does — reload over https.',
     'no-speech': 'No speech was detected.',
     'audio-capture': 'No microphone was found.',
-    // Chrome's recognizer runs on Google's servers, not on the device, so a
-    // dead network breaks it even though the mic is working fine. Worth
-    // saying out loud — it is the least guessable failure in this list.
-    'network': 'Speech recognition needs a network connection (this browser transcribes on a server, not on the device).',
+    // This engine transcribes on a REMOTE server, not on the device, so a
+    // dead network breaks it with the mic working fine. But `network` is also
+    // what a Chromium browser that is not Chrome reports permanently: the
+    // speech service needs Google API keys that only Chrome ships, so forks
+    // (Dia, Brave, Vivaldi, plain Chromium builds) expose a working-looking
+    // webkitSpeechRecognition that can never succeed. Naming only the
+    // connection sends someone to debug a network that is fine, so name the
+    // likelier cause and the option that does work — the local engine runs on
+    // the operator's own machine and has neither problem.
+    'network': "Speech recognition could not reach its server. Browsers built on Chromium but not Chrome (Dia, Brave, Vivaldi) usually cannot use it at all — switch dictation to Local (Whisper) in preferences.",
     'aborted': '',   // user pressed stop; not a failure worth a toast
     'language-not-supported': 'This browser cannot transcribe the configured language.',
   };

@@ -57,10 +57,20 @@ check('service-not-allowed explains the https requirement',
 check('not-allowed points at browser permissions',
       /(permission|allow|blocked)/i.test(message('not-allowed')));
 
-// Chrome transcribes on Google's servers, so a working mic plus a dead
-// network still fails. The least guessable state in the list.
-check('network names the connection requirement',
-      /network|connection/i.test(message('network')));
+// This engine transcribes on a remote server, so a working mic plus a dead
+// network still fails. But `network` is ALSO the permanent verdict in every
+// Chromium browser that is not Chrome — the speech service needs Google API
+// keys only Chrome ships, so the engine looks present and never works. Found
+// the hard way on Dia. Naming only the connection sends the operator off to
+// debug a network that is fine, so the message must name the browser cause
+// and point at the local engine, which has neither problem.
+const network = message('network');
+check('network names the server it could not reach',
+      /server|reach/i.test(network));
+check('network names the not-Chrome-Chromium cause',
+      /chromium/i.test(network));
+check('network points at the local engine as the way out',
+      /local/i.test(network));
 
 check('audio-capture names the missing microphone',
       /microphone/i.test(message('audio-capture')));
