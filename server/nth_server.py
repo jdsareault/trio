@@ -1499,9 +1499,24 @@ def nth_connect(
         # to reclaims because an ordinary connect mints a brand-new member_id
         # via _register_agent_identity() and so has no incumbent to displace.
         # Scoped to primary because read_only tokens carry no authority to
-        # duplicate. The displaced session's next call gets "Invalid or revoked
-        # session_token" and the stale twin stops rather than lingering.
-        if reclaiming and reclaimed_existing:
+        # duplicate, and supervisor telemetry anchors use role='anchor'. The
+        # displaced session's next call gets "Invalid or revoked session_token"
+        # and the stale twin stops rather than lingering.
+        #
+        # Gated on `reclaiming` ALONE, deliberately — NOT on reclaimed_existing.
+        # That flag means "a members row exists", and the invariant defended
+        # here is about SESSIONS rows. They come apart: nth_web's
+        # _remove_from_channel deletes the members row but revokes sessions only
+        # when no presence remains ANYWHERE, so a multi-channel agent removed
+        # from one room keeps a live primary token for it. Reclaiming back in
+        # then found no members row, skipped the revoke, and left two live
+        # tokens on one identity — the very state this exists to prevent, still
+        # reachable from a dashboard button. (nth_purge is a second instance: it
+        # drops members and channels rows and never touches sessions.) By this
+        # line the caller has already passed the reclaim_secret check above, so
+        # whether a members row happens to exist is irrelevant to whether the
+        # incumbent capability should die.
+        if reclaiming:
             db.execute(
                 "UPDATE sessions SET revoked_at = ? "
                 "WHERE member_id = ? AND channel = ? AND role = 'primary' "
@@ -1518,19 +1533,32 @@ def nth_connect(
         )
         db.commit()
 
-        # v7.3 fleet check-in: this process's own row, plus the caller's
-        # declared host when it names a different machine (an SSE spoke).
-        _checkin_self_node(db, force=True)
-        if node_host:
-            import socket
-            nh = node_host.strip()[:64]
-            if nh and nh != socket.gethostname():
-                try:
-                    upsert_node(db, nh, "spoke",
-                                nth_version=node_version.strip()[:32])
-                    db.commit()
-                except sqlite3.Error:
-                    pass
+        # PAST THE POINT OF NO RETURN. The commit above made the displacement
+        # durable: the incumbent's token is dead and its monitor is on its way
+        # out. Everything below is enrichment — fleet check-in, the objective,
+        # the inbox placement — and none of it is worth losing the token the
+        # caller just paid for. A busy-timeout OperationalError raised down here
+        # used to propagate out of the tool call, leaving the identity with the
+        # incumbent revoked, the replacement never told its token, and one live
+        # row nobody holds. Recoverable (the caller still has its
+        # reclaim_secret) but backwards, so the tail degrades instead of
+        # throwing.
+        try:
+            # v7.3 fleet check-in: this process's own row, plus the caller's
+            # declared host when it names a different machine (an SSE spoke).
+            _checkin_self_node(db, force=True)
+            if node_host:
+                import socket
+                nh = node_host.strip()[:64]
+                if nh and nh != socket.gethostname():
+                    try:
+                        upsert_node(db, nh, "spoke",
+                                    nth_version=node_version.strip()[:32])
+                        db.commit()
+                    except sqlite3.Error:
+                        pass
+        except sqlite3.Error:
+            pass
 
         # Fetch objective (pinned message) if any
         ch_row = _get_channel(db, channel)
@@ -1570,19 +1598,25 @@ def nth_connect(
         # authorises reading a DM addressed to you, so it cannot be created
         # lazily on first receipt without a window where the message exists and
         # its recipient cannot read it.
-        db.execute(
-            "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
-            "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
-        db.execute(
-            "INSERT OR IGNORE INTO members "
-            "(id, channel, name, summary, skills, last_seen, last_read, joined_at, active) "
-            "VALUES (?,?,?,?,'',?,0,?,1)",
-            (member_id, AGENT_INBOX_CHANNEL, name, summary, now, now))
-        db.execute(
-            "UPDATE members SET name = ?, summary = ?, last_seen = ?, active = 1 "
-            "WHERE id = ? AND channel = ?",
-            (name, summary, now, member_id, AGENT_INBOX_CHANNEL))
-        db.commit()
+        # Same degrade-don't-throw rule as the fleet check-in above: the token
+        # is already minted and the incumbent already revoked, so a late lock
+        # must not cost the caller its session.
+        try:
+            db.execute(
+                "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+                "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
+            db.execute(
+                "INSERT OR IGNORE INTO members "
+                "(id, channel, name, summary, skills, last_seen, last_read, joined_at, active) "
+                "VALUES (?,?,?,?,'',?,0,?,1)",
+                (member_id, AGENT_INBOX_CHANNEL, name, summary, now, now))
+            db.execute(
+                "UPDATE members SET name = ?, summary = ?, last_seen = ?, active = 1 "
+                "WHERE id = ? AND channel = ?",
+                (name, summary, now, member_id, AGENT_INBOX_CHANNEL))
+            db.commit()
+        except sqlite3.Error:
+            pass
 
         # Keep the GLOBAL identity in step with the channel presence, on EVERY
         # reclaim path. `agents.name` is otherwise frozen at whatever the

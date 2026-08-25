@@ -172,16 +172,62 @@ check("a reclaim in one channel does not revoke the agent's session in another",
       "error" not in cross)
 
 
+# ── displacement does NOT depend on a members row ───────────────────────────
+# The revoke is gated on `reclaiming` alone, not on "a members row exists".
+# Those come apart, and the gap was reachable from a dashboard button:
+# nth_web._remove_from_channel deletes the members row but revokes sessions only
+# when no presence remains ANYWHERE, so a multi-channel agent removed from one
+# room keeps a live primary token for it. Gating on the members row meant the
+# reclaim back in skipped the revoke and left two live tokens on one identity —
+# the exact state this whole change exists to prevent. (nth_purge is a second
+# instance: it drops members and channels rows and never touches sessions.)
+srv.nth_connect(summary="a", name="Ayla", channel="elsewhere",
+                resume_member_id="ag_ayla",
+                reclaim_secret="SECRET-AFTER-RESPAWN")
+orphan = json.loads(srv.nth_connect(summary="a", name="Ayla", channel="room",
+                                    resume_member_id="ag_ayla",
+                                    reclaim_secret="SECRET-AFTER-RESPAWN"))
+orphan_token = orphan["session_token"]
+
+# Exactly what _remove_from_channel does when presence remains elsewhere:
+# members row gone, session left live.
+c = sqlite3.connect(str(srv.DB_PATH))
+c.execute("DELETE FROM members WHERE id='ag_ayla' AND channel='room'")
+c.commit()
+c.close()
+
+back = json.loads(srv.nth_connect(summary="a", name="Ayla", channel="room",
+                                  resume_member_id="ag_ayla",
+                                  reclaim_secret="SECRET-AFTER-RESPAWN"))
+check("reclaiming into a channel whose members row was removed still works",
+      back.get("member_id") == "ag_ayla" and back.get("session_token"))
+stale = json.loads(srv.nth_send("room", "ag_ayla", "orphaned twin",
+                                session_token=orphan_token))
+check("...and STILL displaces the incumbent, members row or not",
+      "error" in stale and "session_token" in stale["error"])
+
+c = sqlite3.connect(str(srv.DB_PATH))
+live = c.execute(
+    "SELECT COUNT(*) FROM sessions WHERE member_id='ag_ayla' AND channel='room' "
+    "AND role='primary' AND revoked_at IS NULL").fetchone()[0]
+c.close()
+check("...leaving exactly one live primary session for the identity",
+      live == 1)
+
+
 # ── ordinary callers are unaffected ─────────────────────────────────────────
 plain = json.loads(srv.nth_connect(summary="p", name="Plain", channel="room"))
 check("a connect with no resume_member_id still mints an id",
       bool(plain.get("member_id")) and plain["member_id"] != "ag_ayla")
 
 # An ordinary connect mints a fresh member_id, so it has no incumbent to
-# displace — and must not touch anyone else's live session.
+# displace — and must not touch anyone else's live session. Uses the CURRENT
+# token: every reclaim above displaced the one before it, so `second_token` is
+# long dead by now and asserting on it would test the displacement sweep again
+# rather than this.
 srv.nth_connect(summary="p2", name="Plain2", channel="room")
 after_plain = json.loads(srv.nth_send("room", "ag_ayla", "unaffected",
-                                      session_token=second_token))
+                                      session_token=back["session_token"]))
 check("a non-reclaiming connect leaves other members' sessions alone",
       "error" not in after_plain)
 
