@@ -1,5 +1,59 @@
 # nth Changelog
 
+## Unreleased — saved working directories
+
+A directory book for the dashboard: the working directories you spawn agents
+into, saved once and offered wherever a working directory is asked for.
+
+**Why.** The create-agent dialog and the bulk attributes panel both ask for a
+path, and the browser has no filesystem — so the same three or four project
+paths were retyped by hand, every time, with nothing able to offer them.
+
+**What landed.**
+
+- **`POST /api/path/complete`** — child directories of a prefix. Directories
+  only: the question is "which working directory", and listing files would leak
+  strictly more than that needs. The trailing slash is load-bearing —
+  `~/Development/` asks what is INSIDE, `~/Development` asks what is NAMED
+  that — so answers keep the shape of the question and a `~`-form prefix gets
+  `~`-form paths back. Expanding server-side would freeze the hub's `$HOME`
+  into whatever the operator then saves, which is wrong the moment the same
+  list is read from a phone over the tailnet.
+- **`POST /api/path/inspect`** — existence plus a project/container guess, in
+  one round trip. Classified from what is on disk: a `.git` or a project marker
+  means project; no subdirectories means project; two or more children that are
+  themselves projects means container. `exists` here means IS A DIRECTORY,
+  narrower than the same word on `/api/path/validate`.
+- Both gated on `LOCAL_PATH_ALLOWED_SOURCES`, the same tier as `/api/path/
+  validate` and `/api/reveal` — `--tailnet` binds 0.0.0.0, so "reachable" is
+  not "trusted". Both inherit the cross-origin gate from `do_POST`.
+- **A Directories page** (account menu, between Preferences and Archive, at
+  `/directories`) and **a picker** on both working-directory fields. The picker
+  wraps an existing input in place without touching its name, so every
+  `FormData` read of that field is unaffected.
+- **Saved paths live in `trio.dirbook.v1`**, deliberately not in
+  `trio.preferences.v1`: that schema's `cast()` knows booleans, numbers and
+  enums, and this is operator data rather than a display setting.
+
+**The design decision worth recording.** An entry's `mode` is `auto`,
+`project` or `container` — three states, not a boolean. "Nobody has decided"
+and "someone decided project" are different facts, and collapsing them would
+let a re-classification silently reverse a choice the operator would only find
+by noticing. `applyGuesses` moves the cached guess and nothing else.
+
+**Reviewed** by a LOTC council (Sauron, Gandalf, Aragorn, Legolas, three
+Uruk-Hai) before merge. Security and XSS came back clean. The council's
+strongest finding was against the tests, not the feature: the first cut
+asserted that source strings appeared in the module — including one that
+asserted a comment existed — which could not fail except on a reformat and
+could not pass for any reason related to behaviour. Replaced with
+`tests/test-dirbook.js` against the DOM harness and direct calls to
+`classify_dir` over real temp trees; verified by mutation (flipping the
+container threshold, letting a guess write `mode`, and restoring prefix-only
+matching each now fail). Also fixed from that review: a favorite ranked fifth
+or later vanished from the picker entirely, and `close()` did not fence a
+completion that had already resolved, so Escape could be undone.
+
 ## v8.1.1-beta.1 — 2026-08-15 (known-gaps sprint)
 
 v8.1.0's release notes listed five known gaps rather than hiding them. This

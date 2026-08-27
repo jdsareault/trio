@@ -22,8 +22,10 @@ mode, or one channel's dashboard when given a channel code.
 
 **Browser source:** `server/web/` — the client is ordinary source, not a Python
 string. `index.html` is the skeleton; `css/00-tokens.css` … `css/40-responsive.css`
-are ordered cascade layers; `js/01-store.js` … `js/90-boot.js` are the client, 21
-modules each hanging a namespace off `window.Trio`. `nth_web.py` composes them
+are ordered cascade layers; `js/01-store.js` … `js/90-boot.js` are the client, 25
+modules each hanging a namespace off `window.Trio`. One module, one IIFE —
+`tests/test-web-bundle.py` asserts it, because a second IIFE inside a file can
+read the first at definition time and that edge is invisible to a file list. `nth_web.py` composes them
 into one inlined HTML response — no bundler, no build step, no generated artifact.
 
 ⚠️ **`server/web/` is read at IMPORT time, not per request.** `nth_web.py` raises
