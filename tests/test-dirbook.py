@@ -201,6 +201,23 @@ check("the nav entry sits between Preferences and Archive",
       < workspace.index("label: 'Directories'")
       < workspace.index("label: 'Archive'"))
 check("the Directories page has a URL", "dirs: '/directories'" in router)
+check("the topbar names the page rather than its route slug",
+      "dirs: 'Directories'" in workspace)
+# The first cut used the Preferences card language on a list page, which put
+# the heading and the content on two different left edges.
+check("the page uses the shared list-page idiom, not settings cards",
+      "page-head" in dirbook and "page-sub" in dirbook
+      and "className = 'pref-group" not in dirbook
+      and 'class="pref-group' not in dirbook)
+
+# Substring matching is the difference between the saved list answering "roam"
+# and appearing to be missing entirely.
+check("a bare name matches saved paths anywhere in them",
+      "lower.includes(q)" in dirbook)
+check("a non-path query skips the server round trip",
+      "!/^[~/]/.test(typed)" in dirbook)
+check("the page's field drops the redundant star",
+      "attachPathInput(input, { star: false })" in dirbook)
 check("navigateView knows the route", "dirs: 'dirs'" in workspace)
 
 # Two bugs that only ever appear under a live pointer, so they are pinned here.

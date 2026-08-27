@@ -105,14 +105,33 @@
     }
   }
 
-  // Favorites that match what has been typed so far, offered above the live
-  // filesystem results. A container favorite matches its own descendants too,
-  // so typing "~/Development/tr" still surfaces the saved "~/Development/".
+  // Favorites relevant to what has been typed, offered above the live
+  // filesystem results.
+  //
+  // Matching is SUBSTRING, not prefix. You save a directory to stop typing its
+  // path, so the thing you reach for is its NAME — "roam" should find both
+  // ~/Development/roam-gen2 and ~/Development/roam-app/mobile_app. Prefix-only
+  // matching meant the saved list went blank the moment you typed anything
+  // that was not the start of a path, which read as the feature being missing
+  // rather than as it being picky.
+  //
+  // Ranked so the more literal reading still wins: paths that START with the
+  // query, then containers the query has descended into, then anything that
+  // merely contains it. Array.sort is stable, so saved order breaks ties.
   function matchingFavorites(query) {
     const q = normalize(query).toLowerCase();
-    return state().favorites
-      .filter(path => !q || path.toLowerCase().startsWith(q) || (isContainer(path) && q.startsWith(path.toLowerCase())))
-      .map(path => ({ path, name: path, kind: 'saved' }));
+    const all = state().favorites;
+    if (!q) return all.map(path => ({ path, name: path, kind: 'saved' }));
+    const scored = [];
+    for (const path of all) {
+      const lower = path.toLowerCase();
+      let rank = -1;
+      if (lower.startsWith(q)) rank = 0;
+      else if (isContainer(path) && q.startsWith(lower)) rank = 1;
+      else if (lower.includes(q)) rank = 2;
+      if (rank >= 0) scored.push({ path, name: path, kind: 'saved', rank });
+    }
+    return scored.sort((a, b) => a.rank - b.rank).map(m => ({ path: m.path, name: m.name, kind: m.kind }));
   }
   Trio.dirbook = { KEY, MAX_FAVORITES, list, has, add, remove, move, complete, normalize, isContainer, matchingFavorites };
 })();
@@ -144,10 +163,14 @@
     input.parentNode.insertBefore(wrap, input);
     wrap.append(input);
 
+    // The star is the only way to save a path from a field that has no Save
+    // button of its own. Where one exists (the Directories page) it is a
+    // second control for the same job, so callers can turn it off.
+    const wantStar = options.star !== false;
     const star = document.createElement('button');
     star.type = 'button';                 // never submit the surrounding form
     star.className = 'dirbook-star';
-    wrap.append(star);
+    if (wantStar) { wrap.append(star); } else { wrap.classList.add('no-star'); }
 
     const pop = document.createElement('div');
     pop.className = 'dirbook-pop';
@@ -162,6 +185,7 @@
     let requestSeq = 0;
 
     function syncStar() {
+      if (!wantStar) return;
       const path = book.normalize(input.value);
       const saved = !!path && book.has(path);
       star.innerHTML = saved ? STAR_FILLED : STAR_OUTLINE;
@@ -171,7 +195,13 @@
         : saved ? 'Remove from saved directories' : 'Save this directory';
       star.setAttribute('aria-label', star.title);
     }
-    function focused() { return document.activeElement === input; }
+    // Track focus ourselves rather than reading document.activeElement. The
+    // guard below decides whether the dropdown may draw at all, so it must be
+    // something this module sets and can reason about — activeElement is a
+    // global the page can move out from under us (and which some DOM
+    // implementations never populate at all).
+    let hasFocus = false;
+    function focused() { return hasFocus; }
     function close() {
       clearTimeout(debounce); inflight?.abort();
       pop.hidden = true; pop.replaceChildren();
@@ -230,6 +260,7 @@
       const path = book.normalize(item.path);
       input.value = path.replace(/\/*$/, '/');
       input.dispatchEvent(new Event('input', { bubbles: true }));
+      hasFocus = true;
       input.focus();
       refresh();
     }
@@ -240,7 +271,12 @@
       const seq = ++requestSeq;
       const saved = book.matchingFavorites(typed)
         .filter(fav => fav.path !== typed);        // don't offer what is already there
-      if (!typed) { items = saved.slice(0, 8); index = items.length ? 0 : -1; render(); return; }
+      // A bare name like "roam" is not a path, so there is nothing for the
+      // server to complete — but the saved list can still answer it, and that
+      // is the whole point of saving one. Show those and skip the request.
+      if (!typed || !/^[~/]/.test(typed)) {
+        items = saved.slice(0, 8); index = items.length ? 0 : -1; render(); return;
+      }
       // Show saved matches immediately; the network result folds in when it
       // arrives, so the list never blanks out mid-type.
       items = saved.slice(0, 4); index = items.length ? 0 : -1; render();
@@ -260,11 +296,11 @@
     function scheduleRefresh() { clearTimeout(debounce); debounce = setTimeout(refresh, COMPLETE_DEBOUNCE_MS); }
 
     const onInput = () => { syncStar(); scheduleRefresh(); };
-    const onFocus = () => { refresh(); };
+    const onFocus = () => { hasFocus = true; refresh(); };
     // Clicking anywhere else dismisses it. close() also kills the pending
     // debounce and the in-flight completion, so nothing arrives later and
     // puts the list back on screen.
-    const onBlur = () => { close(); };
+    const onBlur = () => { hasFocus = false; close(); };
     const onKeyDown = event => {
       if (pop.hidden) {
         if (event.key === 'ArrowDown') { event.preventDefault(); refresh(); }
@@ -298,7 +334,7 @@
     star.addEventListener('click', onStar);
     Trio.events?.addEventListener?.('dirbook:changed', onBookChanged);
     syncStar();
-    if (options.openOnAttach) refresh();
+    if (options.openOnAttach) { hasFocus = true; refresh(); }
 
     return function detach() {
       clearTimeout(debounce); inflight?.abort(); close();
@@ -312,37 +348,41 @@
   }
 
   // ── the Directories page ─────────────────────────────────────────────────
-  // A page rather than a row in Settings: this is a working list the operator
-  // curates and browses, not a switch they flip once. Having its own surface
-  // buys room for the things a settings row cannot show — what each entry is
-  // for, and whether it still exists on disk.
+  // Built in the same idiom as Archive and Data — page-head, a full-width
+  // control, then flat sectioned rows. The first cut used the Preferences
+  // card language (.pref-group, centred at 720px inside a 1040px column),
+  // which put the heading and the cards on two different left edges and made
+  // the page read as bolted on. This is a LIST page, so it looks like the
+  // other list pages.
   function renderPage(panel) {
     panel.replaceChildren();
-    const hero = document.createElement('div');
-    hero.className = 'view-hero';
-    hero.innerHTML = '<h2>Directories</h2><p>The working directories you spawn agents into. '
+    const head = document.createElement('div');
+    head.className = 'page-head';
+    head.innerHTML = '<h2>Directories</h2>'
+      + '<p class="page-sub">The working directories you spawn agents into. '
       + 'Saved here, they are offered wherever a working directory is asked for.</p>';
 
-    const addGroup = document.createElement('section');
-    addGroup.className = 'pref-group dirbook-group';
-    addGroup.innerHTML = '<h3>Add a directory</h3>'
-      + '<p class="pref-note">Type a path to browse it — subdirectories appear as you go, '
-      + '<kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, <kbd>Enter</kbd> to step in. '
-      + 'End a path with <code>/</code> to save a <strong>container</strong>: picking it later '
-      + 'offers everything inside, so <code>~/Development/</code> covers every project at once.</p>';
     const form = document.createElement('form');
     form.className = 'dirbook-add';
-    form.innerHTML = '<input name="path" placeholder="~/Development/ or ~/Development/trio" aria-label="Directory to save">'
-      + '<button type="submit" class="btn">Save</button>';
+    form.innerHTML = '<input name="path" class="page-search" autocomplete="off" '
+      + 'placeholder="Type a path to browse, or a name to find one you saved" '
+      + 'aria-label="Directory to save">'
+      + '<button type="submit" class="dp-btn">Save</button>';
     const input = form.querySelector('input');
-    addGroup.append(form);
 
-    const listGroup = document.createElement('section');
-    listGroup.className = 'pref-group dirbook-group';
-    listGroup.innerHTML = '<h3>Saved</h3>';
+    const hint = document.createElement('p');
+    hint.className = 'dirbook-hint';
+    hint.innerHTML = 'Subdirectories appear as you type — <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, '
+      + '<kbd>Enter</kbd> to step in. End a path with <code>/</code> to save a '
+      + '<strong>container</strong>: picking it later offers everything inside, so '
+      + '<code>~/Development/</code> covers every project at once.';
+
+    const section = document.createElement('section');
+    section.className = 'dirbook-section';
+    section.innerHTML = '<h3>Saved</h3>';
     const listEl = document.createElement('ul');
     listEl.className = 'dirbook-list';
-    listGroup.append(listEl);
+    section.append(listEl);
 
     // Paths rot: a project gets renamed or moved and the saved entry silently
     // stops working, which you would otherwise only discover when an agent
@@ -369,10 +409,11 @@
         const container = isContainer(path);
         const gone = missing.has(path);
         return `<li class="dirbook-row${gone ? ' gone' : ''}" data-path="${esc(path)}">`
-          + `<span class="dirbook-icon">${container ? '\u{1F4C2}' : '\u{1F4C1}'}</span>`
+          + `<span class="dirbook-label">`
           + `<span class="dirbook-name">${esc(path)}</span>`
           + `<span class="dirbook-tag">${container ? 'container' : 'project'}</span>`
           + (gone ? '<span class="dirbook-tag warn" title="No directory at this path right now">missing</span>' : '')
+          + `</span>`
           + `<span class="dirbook-actions">`
           + `<button type="button" class="dirbook-act" data-act="up" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(path)} up">&uarr;</button>`
           + `<button type="button" class="dirbook-act" data-act="down" ${i === favorites.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(path)} down">&darr;</button>`
@@ -398,8 +439,10 @@
       checkExistence();
     });
     draw();
-    panel.append(hero, addGroup, listGroup);
-    attachPathInput(input);
+    panel.append(head, form, hint, section);
+    // No star here: this field has a Save button, and two controls for one job
+    // is one too many.
+    attachPathInput(input, { star: false });
     checkExistence();
     return panel;
   }

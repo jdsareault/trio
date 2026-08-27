@@ -1253,7 +1253,11 @@
     if (conn) conn.classList.add('hidden');
     const shell = document.querySelector('.conversation-shell');
     shell?.classList.add('workspace-page');
-    updateTopbar(view === 'home' ? 'nth' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
+    // The route slug is not always a word a person would use — 'dirs' showed
+    // up in the topbar as "Dirs". Name the ones that need naming; the rest
+    // still capitalise their slug.
+    const TITLES = { dirs: 'Directories', prefs: 'Preferences' };
+    updateTopbar(view === 'home' ? 'nth' : (TITLES[view] || view[0].toUpperCase() + view.slice(1)), view === 'home' ? 'Home' : `trio view · ${view}`);
     document.querySelectorAll('[data-trio-view]').forEach(n => n.hidden = true);
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
