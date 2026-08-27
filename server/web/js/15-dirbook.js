@@ -170,13 +170,28 @@
         : saved ? 'Remove from saved directories' : 'Save this directory';
       star.setAttribute('aria-label', star.title);
     }
+    function focused() { return document.activeElement === input; }
     function close() {
+      clearTimeout(debounce); inflight?.abort();
       pop.hidden = true; pop.replaceChildren();
       items = []; index = -1;
       input.setAttribute('aria-expanded', 'false');
     }
+    // Move the highlight without rebuilding the list. Rebuilding under the
+    // pointer is what lets a stale :hover and the keyboard selection both look
+    // active at once; there is exactly one highlight and this is what moves it.
+    function highlight(next) {
+      index = next;
+      pop.querySelectorAll('.dirbook-opt').forEach((button, i) => {
+        button.classList.toggle('hi', i === index);
+        button.setAttribute('aria-selected', String(i === index));
+      });
+    }
     function render() {
-      if (!items.length) { close(); return; }
+      // Never reopen behind the operator's back. A debounced keystroke or a
+      // slow completion can land AFTER a click-away, and reopening then is
+      // what made this feel impossible to dismiss with anything but Escape.
+      if (!items.length || !focused()) { close(); return; }
       pop.innerHTML = items.map((item, i) => {
         const label = item.kind === 'saved' ? item.path : item.name;
         const sub = item.kind === 'saved' ? 'saved' : (item.parent || '');
@@ -188,15 +203,21 @@
       // mousedown, not click: the input's blur would tear the popup down
       // before a click ever landed.
       pop.querySelectorAll('.dirbook-opt').forEach(button => {
-        button.addEventListener('mousedown', event => { event.preventDefault(); choose(Number(button.dataset.index)); });
+        const i = Number(button.dataset.index);
+        button.addEventListener('mousedown', event => { event.preventDefault(); choose(i); });
+        // Pointing at a row MOVES the one highlight rather than adding a
+        // second one, so arrowing away from a hovered row leaves nothing
+        // behind. The CSS deliberately has no :hover rule for this reason.
+        // mousemove, not mouseenter: the list rebuilds under a stationary
+        // pointer, and mouseenter would re-fire and yank the selection back.
+        button.addEventListener('mousemove', () => { if (index !== i) highlight(i); });
       });
       pop.hidden = false;
       input.setAttribute('aria-expanded', 'true');
     }
     function move(delta) {
       if (!items.length) return;
-      index = (index + delta + items.length) % items.length;
-      render();
+      highlight((index + delta + items.length) % items.length);
     }
     function choose(i) {
       const item = items[i];
@@ -214,6 +235,7 @@
     async function refresh() {
       const typed = book.normalize(input.value);
       syncStar();
+      if (!focused()) { close(); return; }
       const seq = ++requestSeq;
       const saved = book.matchingFavorites(typed)
         .filter(fav => fav.path !== typed);        // don't offer what is already there
@@ -238,7 +260,10 @@
 
     const onInput = () => { syncStar(); scheduleRefresh(); };
     const onFocus = () => { refresh(); };
-    const onBlur = () => { setTimeout(close, 0); };
+    // Clicking anywhere else dismisses it. close() also kills the pending
+    // debounce and the in-flight completion, so nothing arrives later and
+    // puts the list back on screen.
+    const onBlur = () => { close(); };
     const onKeyDown = event => {
       if (pop.hidden) {
         if (event.key === 'ArrowDown') { event.preventDefault(); refresh(); }

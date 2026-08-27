@@ -35,7 +35,10 @@
   display:flex; align-items:center; gap:8px; width:100%;
   padding:7px 9px; border-radius:10px; text-align:left;
 }
-.dirbook-opt:hover, .dirbook-opt.hi{ background:var(--surface-hover); }
+/* No :hover rule. The pointer and the keyboard drive the SAME `.hi` class
+   (see attachPathInput's highlight()), so there is never a hovered row and a
+   selected row lit at the same time. */
+.dirbook-opt.hi{ background:var(--surface-hover); }
 .dirbook-opt .dirbook-icon{ width:14px; text-align:center; color:var(--ink-3); flex:none; }
 .dirbook-opt .dirbook-name{
   font-size:13px; font-weight:600; font-family:var(--font-mono, ui-monospace, monospace);

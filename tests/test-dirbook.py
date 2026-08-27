@@ -189,6 +189,18 @@ check("both new layers reach the served page",
 agents = (WEB / "js" / "30-agents.js").read_text(encoding="utf-8")
 check("both working-directory inputs get the picker",
       agents.count("Trio.dirbook?.attachPathInput?.(") == 2)
+# Two bugs that only ever appear under a live pointer, so they are pinned here.
+check("a late completion cannot reopen a dismissed dropdown",
+      "if (!items.length || !focused()) { close(); return; }" in dirbook
+      and "if (!focused()) { close(); return; }" in dirbook)
+check("blur tears down the pending debounce and request",
+      "clearTimeout(debounce); inflight?.abort();" in dirbook)
+check("pointer and keyboard share one highlight",
+      "function highlight(" in dirbook and "button.addEventListener('mousemove'" in dirbook)
+css = (WEB / "css" / "32-dirbook.css").read_text(encoding="utf-8")
+check("no :hover rule competes with the keyboard highlight",
+      ".dirbook-opt:hover" not in css)
+
 prefs = (WEB / "js" / "40-preferences.js").read_text(encoding="utf-8")
 check("settings hosts the saved-directory editor",
       "Trio.dirbook?.renderSettingsSection?.(panel)" in prefs)
