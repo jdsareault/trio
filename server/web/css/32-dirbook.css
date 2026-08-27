@@ -1,0 +1,73 @@
+/* ============================================================
+   nth — saved directories (dirbook)
+   Two surfaces: the picker that wraps a working-directory input,
+   and the Settings > Saved directories editor.
+   ============================================================ */
+
+/* ── the picker ──────────────────────────────────────────── */
+/* The wrapper is inserted AROUND an existing <input> by
+   Trio.dirbook.attachPathInput, so it must not disturb the field's
+   own box: the input keeps its width and the star sits inside it. */
+.dirbook-field{ position:relative; display:block; }
+.dirbook-field > input{ width:100%; padding-right:34px; }
+
+.dirbook-star{
+  position:absolute; right:6px; top:50%; transform:translateY(-50%);
+  width:24px; height:24px; display:grid; place-items:center;
+  border-radius:var(--r-full); color:var(--ink-3); background:transparent;
+}
+.dirbook-star svg{ width:15px; height:15px; }
+.dirbook-star:hover:not(:disabled){ background:var(--surface-hover); color:var(--ink-1); }
+.dirbook-star.on{ color:var(--accent-strong); }
+.dirbook-star:disabled{ opacity:.35; cursor:default; }
+
+/* Opens DOWNWARD, unlike the composer's .ac-pop: these inputs live in
+   dialogs and settings panels that grow from the top, so there is room
+   below and often none above. */
+.dirbook-pop{
+  position:absolute; top:calc(100% + 6px); left:0; width:100%; z-index:40;
+  background:var(--surface-2); border:1px solid var(--line);
+  border-radius:14px; box-shadow:var(--shadow-lg);
+  padding:6px; max-height:260px; overflow-y:auto;
+}
+.dirbook-pop[hidden]{ display:none; }
+.dirbook-opt{
+  display:flex; align-items:center; gap:8px; width:100%;
+  padding:7px 9px; border-radius:10px; text-align:left;
+}
+.dirbook-opt:hover, .dirbook-opt.hi{ background:var(--surface-hover); }
+.dirbook-opt .dirbook-icon{ width:14px; text-align:center; color:var(--ink-3); flex:none; }
+.dirbook-opt .dirbook-name{
+  font-size:13px; font-weight:600; font-family:var(--font-mono, ui-monospace, monospace);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.dirbook-opt .dirbook-sub{ margin-left:auto; font-size:11px; color:var(--ink-3); flex:none; }
+
+/* ── Settings > Saved directories ────────────────────────── */
+.dirbook-group .pref-note{ font-size:12.5px; color:var(--ink-3); margin:0 0 var(--sp-3); }
+.dirbook-group .pref-note code{ font-size:12px; }
+
+.dirbook-list{ list-style:none; margin:0 0 var(--sp-3); padding:0; display:flex; flex-direction:column; gap:4px; }
+.dirbook-empty{ font-size:12.5px; color:var(--ink-3); padding:var(--sp-2) 0; }
+.dirbook-row{
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:7px 9px; border-radius:var(--r-xs); background:var(--surface-2);
+  border:1px solid var(--line);
+}
+.dirbook-row .dirbook-icon{ flex:none; font-size:13px; }
+.dirbook-row .dirbook-name{
+  font-family:var(--font-mono, ui-monospace, monospace); font-size:12.5px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.dirbook-actions{ margin-left:auto; display:flex; gap:2px; flex:none; }
+.dirbook-act{
+  width:24px; height:24px; display:grid; place-items:center;
+  border-radius:var(--r-xs); color:var(--ink-3); font-size:12px;
+}
+.dirbook-act:hover:not(:disabled){ background:var(--surface-hover); color:var(--ink-1); }
+.dirbook-act:disabled{ opacity:.3; cursor:default; }
+.dirbook-act.danger:hover{ color:var(--danger); }
+
+.dirbook-add{ display:flex; gap:var(--sp-2); align-items:center; }
+.dirbook-add .dirbook-field{ flex:1; }
+.dirbook-add button{ flex:none; }
