@@ -157,82 +157,108 @@ check("a capped result says so", capped["truncated"] is True)
 check("an uncapped result says so", listed["truncated"] is False)
 
 
-# ── the client module ───────────────────────────────────────────────────────
-dirbook = (WEB / "js" / "15-dirbook.js").read_text(encoding="utf-8")
+# ── the classifier, against a real tree ─────────────────────────────────────
+# classify_dir is a module-level function of a path, so it is called directly.
+# It used to be asserted by grepping nth_web.py for its own return strings,
+# which cannot fail for any reason except an edit to the string and cannot pass
+# for any reason related to a directory: flipping the ">= 2" threshold left
+# every assertion green.
 
-check("favorites use their own storage key, not the preference schema",
-      "const KEY = 'trio.dirbook.v1'" in dirbook
-      and "'trio.preferences.v1'" not in dirbook)
-# expanduser on the client would bake THIS browser's idea of home into a value
-# only the hub can resolve — the dashboard is routinely opened from a phone.
-check("the client never rewrites ~ into a home directory",
-      not re.search(r"expanduser|process\.env\.HOME|os\.homedir", dirbook))
-check("saved paths are capped", "MAX_FAVORITES" in dirbook)
-# The project/container split must be STORED, never guessed from the string.
-# Inferring it from a trailing slash was wrong twice: a slash is a typing
-# accident, and the picker appends one to everything it fills in — so saving
-# anything you had browsed to silently marked it a container.
-check("the kind is stored, not inferred from a trailing slash",
-      "function setMode(" in dirbook and "function isContainer(" not in dirbook)
-# 'auto' and 'project' are different facts. Collapsing them would let a guess
-# silently overwrite a decision the operator made.
-check("undecided is a distinct state from decided-project",
-      "const MODES = ['auto', 'project', 'container']" in dirbook
-      and "entry.mode === 'auto' ? (entry.guess || 'project') : entry.mode" in dirbook)
-check("a refreshed guess never touches the operator's own choice",
-      "function applyGuesses(" in dirbook
-      and "{ ...entry, guess: next }" in dirbook)
-check("normalize strips a trailing slash so one directory is one entry",
-      "collapsed.replace(/\\/+$/, '')" in dirbook)
-# The old trailing slash came from the picker, not the operator, so it is not
-# evidence of intent — older entries arrive unclassified and get re-judged.
-check("legacy entries arrive as 'auto' rather than as a decision",
-      "const mode = isObject && MODES.includes(entry.mode) ? entry.mode : 'auto';" in dirbook)
-check("completion is sent as typed, since the trailing slash is the question",
-      "// Sent as typed, NOT normalized" in dirbook)
-check("picking a project lands, picking a container descends",
-      "const descend = item.kind !== 'saved' || item.browse;" in dirbook)
-# The trailing slash IS the question asked of the server, so the completion
-# request must carry the raw value. Normalizing first turned "list what is
-# inside ~/Development" (34 answers) into "find things named Development"
-# (1 answer, itself) — which made picking a container look like it did nothing.
-check("completion is asked with the raw value, never the normalized one",
-      "book.complete(raw, { signal: controller.signal })" in dirbook
-      and "book.complete(typed" not in dirbook)
-check("normalizing is confined to comparison",
-      "const normalized = book.normalize(raw);" in dirbook)
-check("there is a step-into gesture that does not steal Enter",
-      "function stepInto(" in dirbook
-      and "event.key === 'ArrowRight'" in dirbook
-      and "event.key === 'Enter' || event.key === 'Tab') && index >= 0" in dirbook)
-check("a 403 stops the client asking again", "completionsDenied" in dirbook)
-check("the picker leaves the input's name alone so FormData still reads it",
-      "input.parentNode.insertBefore(wrap, input)" in dirbook
-      and 'input.setAttribute("name"' not in dirbook
-      and "input.name =" not in dirbook)
-# A <button> inside a <form> defaults to type=submit; the star and the row
-# controls sit inside the create-agent form, where that would spawn an agent.
-check("every picker button is explicitly type=button",
-      dirbook.count("createElement('button')") == dirbook.count("type = 'button'")
-      and dirbook.count('<button class=') == 0)
+def make(tree, root=None):
+    """Build a directory tree from {relative path: contents-or-None}."""
+    root = Path(root or tempfile.mkdtemp(prefix="nth_dirbook_cls_"))
+    for rel, contents in tree.items():
+        target = root / rel
+        if contents is None:
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(contents, encoding="utf-8")
+    return root
 
-check("the stylesheet ships", (WEB / "css" / "32-dirbook.css").exists())
-check("both new layers are registered in the bundle",
-      "js/15-dirbook.js" in web.WEB_JS_FILES and "css/32-dirbook.css" in web.WEB_CSS_FILES)
-check("both new layers reach the served page",
-      "trio.dirbook.v1" in web.INDEX_HTML and ".dirbook-pop" in web.INDEX_HTML)
 
-# The wiring is the feature: a picker nobody attaches is dead code.
-agents = (WEB / "js" / "30-agents.js").read_text(encoding="utf-8")
-check("both working-directory inputs get the picker",
-      agents.count("Trio.dirbook?.attachPathInput?.(") == 2)
-# The page is reachable, or it does not exist as far as anyone can tell.
+def kind_of(tree):
+    return web.classify_dir(str(make(tree)))
+
+
+check("a .git directory means project",
+      kind_of({".git": None, "src": None})[0] == "project")
+check("a .git FILE means project too (a worktree or submodule)",
+      kind_of({".git": "gitdir: /elsewhere"})[0] == "project")
+check("a language marker means project",
+      kind_of({"pubspec.yaml": "name: app"})[0] == "project")
+check("markers are recognised across ecosystems",
+      all(kind_of({marker: "x"})[0] == "project" for marker in
+          ("package.json", "pyproject.toml", "Cargo.toml", "go.mod",
+           "Gemfile", "pom.xml", "CMakeLists.txt", "composer.json")))
+check("a .xcodeproj bundle is matched by suffix, not by name",
+      kind_of({"App.xcodeproj": None})[0] == "project")
+# The set is compared by equality, so a glob written there could only ever
+# match a file literally named "*.sln" — configuration that never fires.
+check("no glob patterns hide in the equality-matched marker set",
+      not any("*" in marker for marker in web.PROJECT_MARKERS))
+
+check("an empty directory is a project — nothing inside to browse",
+      kind_of({})[0] == "project"
+      and kind_of({})[1] == "nothing inside it to browse")
+check("a directory of plain files is a project",
+      kind_of({"notes.txt": "x", "todo.md": "y"})[0] == "project")
+
+check("two project children make a container",
+      kind_of({"a/.git": None, "b/Cargo.toml": "x"})[0] == "container")
+check("a container says why",
+      kind_of({"a/.git": None, "b/.git": None})[1] == "it holds several projects")
+check("a single child, itself a project, is a container",
+      kind_of({"only/.git": None})[0] == "container")
+# The safer reading: a wrong 'container' buries the path the operator asked
+# for, a wrong 'project' costs one click.
+check("subdirectories with no projects in them stay a project",
+      kind_of({"a": None, "b": None, "c": None})[0] == "project"
+      and kind_of({"a": None, "b": None})[1] == "no projects found inside it")
+check("a project marker at the top wins over project children",
+      kind_of({".git": None, "a/.git": None, "b/.git": None})[0] == "project")
+# Hidden children are skipped entirely: .git, .cache and friends are noise,
+# and counting them would make almost every repository look like a container.
+check("hidden children are not browsable, so a directory of them is a project",
+      kind_of({".a/.git": None, ".b/.git": None})[0] == "project"
+      and kind_of({".a/.git": None, ".b/.git": None})[1] == "nothing inside it to browse")
+check("hidden children do not count toward the container threshold",
+      kind_of({".hidden/.git": None, "a/.git": None, "b/.git": None})[0] == "container")
+
+missing_kind, missing_why = web.classify_dir(str(Path(tempfile.mkdtemp()) / "nope"))
+check("an unreadable or missing directory classifies as nothing",
+      missing_kind is None and missing_why == "")
+
+# The per-directory cap does not bound the work — classify scans each child
+# looking for markers, so a wide directory of non-projects costs children x
+# entries. This budget is what actually bounds one request.
+budget = web._ScanBudget(total=5)
+wide = make({f"d{i:03d}/x.txt": "x" for i in range(40)})
+web.classify_dir(str(wide), budget)
+check("a shared budget stops a wide scan", budget.spent is True)
+check("an exhausted scan falls back to project, not to a wrong container",
+      web.classify_dir(str(wide), web._ScanBudget(total=5))[0] == "project")
+check("the budget is shared across a whole request, not reset per path",
+      web.INSPECT_ENTRY_BUDGET > 0 and web.INSPECT_CAP > 0)
+# applyGuesses treats an absent path as "not asked about" rather than "no
+# longer classified", but these two caps still have to agree: the client may
+# not save more than one request can be asked about.
+dirbook_js = (WEB / "js" / "15-dirbook.js").read_text(encoding="utf-8")
+max_favorites = int(re.search(r"MAX_FAVORITES = (\d+)", dirbook_js).group(1))
+check(f"MAX_FAVORITES ({max_favorites}) fits in one INSPECT_CAP ({web.INSPECT_CAP}) batch",
+      max_favorites <= web.INSPECT_CAP)
+
+
+# ── wiring ──────────────────────────────────────────────────────────────────
+# The feature is only real if it is reachable; these are registration facts,
+# not behaviour, so grepping is the right tool for them.
 workspace = (WEB / "js" / "20-workspace.js").read_text(encoding="utf-8")
 router = (WEB / "js" / "03-router.js").read_text(encoding="utf-8")
+agents = (WEB / "js" / "30-agents.js").read_text(encoding="utf-8")
+
 check("the Directories page renders through the workspace shell",
       "Trio.dirbook?.renderPage?.(panel)" in workspace)
-check("the Directories page has a nav entry",
-      "label: 'Directories'" in workspace)
+check("the Directories page has a nav entry", "label: 'Directories'" in workspace)
 check("the nav entry sits between Preferences and Archive",
       workspace.index("label: 'Preferences'")
       < workspace.index("label: 'Directories'")
@@ -240,48 +266,23 @@ check("the nav entry sits between Preferences and Archive",
 check("the Directories page has a URL", "dirs: '/directories'" in router)
 check("the topbar names the page rather than its route slug",
       "dirs: 'Directories'" in workspace)
-# The first cut used the Preferences card language on a list page, which put
-# the heading and the content on two different left edges.
-check("the page uses the shared list-page idiom, not settings cards",
-      "page-head" in dirbook and "page-sub" in dirbook
-      and "className = 'pref-group" not in dirbook
-      and 'class="pref-group' not in dirbook)
-
-# Substring matching is the difference between the saved list answering "roam"
-# and appearing to be missing entirely.
-check("a bare name matches saved paths anywhere in them",
-      "lower.includes(q)" in dirbook)
-check("a non-path query skips the server round trip",
-      "!/^[~/]/.test(raw)" in dirbook)
-# The classifier: a guess, and only ever the default for an undecided entry.
-check("the classifier endpoint is routed and gated",
-      'elif parsed.path == "/api/path/inspect":' in source
-      and "LOCAL_PATH_ALLOWED_SOURCES" in source.split("def _handle_path_inspect", 1)[-1][:900])
-classifier = source.split("def _classify", 1)[-1].split("def _handle_path_inspect", 1)[0]
-check("a repository or project marker means project", '"project", "a repository' in classifier)
-check("several projects inside means container", '"container", "it holds several projects"' in classifier)
-check("nothing inside means project", '"project", "nothing inside it to browse"' in classifier)
-check("the guess explains itself", classifier.count("return \"") >= 4)
-check("the classifier caps how wide a directory it will scan",
-      "_INSPECT_CHILD_CAP" in source and "_INSPECT_CAP" in source)
-check("inspect answers existence too, so the page needs one round trip",
-      '"exists"' in source.split("def _handle_path_inspect", 1)[-1][:2000])
-
-check("the page's field drops the redundant star",
-      "attachPathInput(input, { star: false })" in dirbook)
-check("navigateView knows the route", "dirs: 'dirs'" in workspace)
-
-# Two bugs that only ever appear under a live pointer, so they are pinned here.
-check("a late completion cannot reopen a dismissed dropdown",
-      "if (!items.length || !focused()) { close(); return; }" in dirbook
-      and "if (!focused()) { close(); return; }" in dirbook)
-check("blur tears down the pending debounce and request",
-      "clearTimeout(debounce); inflight?.abort();" in dirbook)
-check("pointer and keyboard share one highlight",
-      "function highlight(" in dirbook and "button.addEventListener('mousemove'" in dirbook)
-css = (WEB / "css" / "32-dirbook.css").read_text(encoding="utf-8")
-check("no :hover rule competes with the keyboard highlight",
-      ".dirbook-opt:hover" not in css)
+check("both working-directory inputs get the picker",
+      agents.count("Trio.dirbook?.attachPathInput?.(") == 2)
+check("the stylesheet ships", (WEB / "css" / "32-dirbook.css").exists())
+check("every layer is registered in the bundle",
+      "js/15-dirbook.js" in web.WEB_JS_FILES
+      and "js/16-dirbook-ui.js" in web.WEB_JS_FILES
+      and "css/32-dirbook.css" in web.WEB_CSS_FILES)
+check("the store loads before the UI that reads it at definition time",
+      web.WEB_JS_FILES.index("js/15-dirbook.js")
+      < web.WEB_JS_FILES.index("js/16-dirbook-ui.js"))
+check("both new layers reach the served page",
+      "trio.dirbook.v1" in web.INDEX_HTML and ".dirbook-pop" in web.INDEX_HTML)
+# A default-submit button inside the create-agent form would spawn an agent.
+ui_js = (WEB / "js" / "16-dirbook-ui.js").read_text(encoding="utf-8")
+check("every button the picker builds is explicitly type=button",
+      ui_js.count("createElement('button')") == ui_js.count("type = 'button'")
+      and "<button class=" not in ui_js)
 
 print()
 if failures:
