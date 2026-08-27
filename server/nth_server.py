@@ -1084,6 +1084,22 @@ def _mint_session_token(db, member_id: str, channel: str,
 
 SESSION_REAP_STALE_SECONDS = 7 * 24 * 60 * 60
 
+# How long a captured tool-argument detail may sit on disk.
+#
+# Only relevant when the activity hook runs with NTH_CAPTURE_TOOL_INPUT=1.
+# Redaction is best-effort and a deny-list, so some secret will eventually get
+# through it; this bounds how long that mistake lives rather than letting it
+# sit in a shared plaintext file indefinitely. The ring's 20-row-per-session
+# cap already churns a BUSY agent's rows out in minutes -- it is the quiet
+# session, the one that ran six tools and stopped, whose rows would otherwise
+# persist until its fingerprint is reaped a week later.
+#
+# Expiring blanks `detail` only. The row itself is what the panel's timeline is
+# made of, and a call's name and time are the summary-era data that was always
+# safe to keep, so an aged row degrades to that rather than vanishing.
+TOOL_DETAIL_TTL_SECONDS = int(
+    float(os.environ.get("NTH_TOOL_DETAIL_TTL_HOURS", "24")) * 3600)
+
 
 def _reap_sessions(db, now: datetime | None = None) -> None:
     """Bound accumulated reconnect sessions without expiring live work.
@@ -1115,6 +1131,17 @@ def _reap_sessions(db, now: datetime | None = None) -> None:
         "DELETE FROM tool_events WHERE fingerprint NOT IN "
         "(SELECT fingerprint FROM sessions WHERE revoked_at IS NULL)"
     )
+    # Age out captured argument details. Guarded on `detail != ''` so this is a
+    # no-op scan on the overwhelmingly common install where capture is off and
+    # every row's detail is already empty.
+    if TOOL_DETAIL_TTL_SECONDS > 0:
+        detail_cutoff = (
+            current - timedelta(seconds=TOOL_DETAIL_TTL_SECONDS)).isoformat()
+        db.execute(
+            "UPDATE tool_events SET detail = '' "
+            "WHERE detail != '' AND created_at < ?",
+            (detail_cutoff,),
+        )
 
 
 def _get_session(db, channel: str, session_token: str):

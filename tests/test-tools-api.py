@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -63,6 +64,9 @@ try:
 
     db = srv.get_db()
     now = srv.now_iso()
+    # Older than the 24h detail TTL, to prove the read path ages a captured
+    # argument out even when the reaper has not run in this process.
+    old_iso = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
     # `detail` is the opt-in redacted long form. Populated here on the Bash-like
     # row only, so the tests can tell "absent because the slice hides it" from
     # "absent because the row has none".
@@ -72,6 +76,7 @@ try:
         [
             ("fp-shared", "Task", "review auth", "", now),
             ("fp-shared", "Read", "secrets.txt", "/etc/secrets.txt", now),
+            ("fp-shared", "Bash", "curl", "curl https://x.dev?t=[redacted]", old_iso),
             ("fp-shared", "Agent", "sauron", "", now),
             ("fp-other", "Agent", "wrong channel", "", now),
             ("fp-orphan", "Agent", "no session", "", now),
@@ -115,8 +120,9 @@ try:
     # ring answers newest-first as Agent, Read, Task.
     st, data = http(port, f"/api/tools?channel=tools&member={current['member_id']}&kind=all")
     check("kind=all exposes every recorded call, newest first",
-          st == 200 and data.get("kind") == "all" and data.get("count") == 3
-          and [r["tool_name"] for r in data.get("events", [])] == ["Agent", "Read", "Task"])
+          st == 200 and data.get("kind") == "all" and data.get("count") == 4
+          and [r["tool_name"] for r in data.get("events", [])]
+          == ["Agent", "Bash", "Read", "Task"])
     check("kind=all still carries `subagents` for the existing drawer caller",
           data.get("subagents") == data.get("events"))
     check("kind=all reports every call's timestamp",
@@ -139,6 +145,16 @@ try:
           st == 200 and len(detailed) == 1 and detailed[0].get("detail") == "/etc/secrets.txt")
     check("a row without a long form omits the key rather than sending an empty one",
           all("detail" not in r for r in wide["events"] if r["tool_name"] != "Read"))
+    # Redaction is best-effort, so a secret will eventually get through it. The
+    # TTL bounds how long that mistake lives. Expiry blanks the DETAIL only --
+    # the row is what the timeline is made of, and its name and time were always
+    # safe to keep.
+    aged = [r for r in wide["events"] if r["tool_name"] == "Bash"]
+    check("a detail older than the TTL is not served",
+          len(aged) == 1 and "detail" not in aged[0])
+    check("the aged row itself survives, with its name and timestamp",
+          aged and aged[0]["target"] == "curl" and aged[0]["created_at"])
+
     # The subagent drawer never renders it, so it must not receive it: a field a
     # caller cannot show is a field that only widens what a response discloses.
     st, narrow = http(port, f"/api/tools?channel=tools&member={current['member_id']}")
@@ -146,13 +162,13 @@ try:
           all("detail" not in r for r in narrow.get("events", [])))
 
     # ── keyset pagination ─────────────────────────────────────────────────
-    st, page1 = http(port, f"/api/tools?channel=tools&member={current['member_id']}&kind=all&limit=2")
+    st, page1 = http(port, f"/api/tools?channel=tools&member={current['member_id']}&kind=all&limit=3")
     check("a full page advertises a cursor",
-          st == 200 and page1.get("count") == 2
+          st == 200 and page1.get("count") == 3
           and page1.get("next_before") == page1["events"][-1]["id"])
     st, page2 = http(port,
                      f"/api/tools?channel=tools&member={current['member_id']}"
-                     f"&kind=all&limit=2&before={page1.get('next_before')}")
+                     f"&kind=all&limit=3&before={page1.get('next_before')}")
     check("the cursor returns the next page with no overlap",
           st == 200 and page2.get("count") == 1
           and [r["tool_name"] for r in page2["events"]] == ["Task"]
@@ -162,7 +178,7 @@ try:
     check("a short page advertises no cursor", "next_before" not in page2)
     st, data = http(port, f"/api/tools?channel=tools&member={current['member_id']}&kind=all&before=bogus")
     check("a garbage cursor is page one, not an error",
-          st == 200 and data.get("count") == 3)
+          st == 200 and data.get("count") == 4)
 
     # Scoping is enforced for the wide slice too — widening WHAT is returned
     # must not widen WHO may read it.
@@ -171,6 +187,25 @@ try:
           st == 200 and data.get("events") == [])
     st, _ = http(port, f"/api/tools?channel=tools&member={other['member_id']}&kind=all")
     check("kind=all cannot enumerate a member from another channel", st == 404)
+
+    # ── the write side of the TTL ─────────────────────────────────────────
+    # The read gate above stops an expired detail being SERVED; the reaper is
+    # what stops it being STORED. Both matter: a gate alone leaves the secret on
+    # disk for anyone reading the file directly, which is exactly the audience
+    # the DM privacy note already concedes cannot be shut out.
+    rdb = srv.get_db()
+    srv._reap_sessions(rdb)
+    rdb.commit()
+    scrubbed = dict(rdb.execute(
+        "SELECT tool_name, detail FROM tool_events WHERE fingerprint='fp-shared'"
+    ).fetchall())
+    check("the reaper blanks a detail past the TTL on disk",
+          scrubbed.get("Bash") == "")
+    check("the reaper leaves a detail inside the TTL alone",
+          scrubbed.get("Read") == "/etc/secrets.txt")
+    check("the reaper blanks the detail, never the row",
+          len(scrubbed) == 4 and set(scrubbed) == {"Task", "Read", "Bash", "Agent"})
+    rdb.close()
 
     original = web.NthWebHandler._resolve_identity
 

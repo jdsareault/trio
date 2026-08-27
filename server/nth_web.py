@@ -227,6 +227,19 @@ ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
 # agent gets the same trio tools a hand-launched one does.
 NTH_SERVER_PATH = str(Path(__file__).resolve().parent / "nth_server.py")
 
+# Mirrors nth_server.TOOL_DETAIL_TTL_SECONDS. Read from the environment rather
+# than imported, because this module is deliberately stdlib-only and does not
+# depend on nth_server.
+#
+# The reaper does the actual scrubbing on disk; this is the read-side gate, and
+# it exists because the two failure modes are different. A reaper that has not
+# run yet -- a long-lived process between reap cadences, a hub that restarted --
+# would otherwise serve an expired detail as though it were current. Filtering
+# on read means the TTL holds from the moment it is configured, regardless of
+# when the write-side catches up.
+TOOL_DETAIL_TTL_SECONDS = int(
+    float(os.environ.get("NTH_TOOL_DETAIL_TTL_HOURS", "24")) * 3600)
+
 # The db_path the process is actually serving. Set once at startup; the agent
 # control plane needs it outside a request handler (background threads).
 _DB_PATH_GLOBAL: Path = DB_PATH
@@ -4819,6 +4832,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             before = int(qs.get("before", [""])[0])
         except (TypeError, ValueError, OverflowError):
             before = 0
+        # "" disables the age gate entirely (TTL turned off), which the query
+        # spells as a sentinel rather than branching the SQL in two.
+        detail_cutoff = ""
+        if TOOL_DETAIL_TTL_SECONDS > 0:
+            detail_cutoff = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=TOOL_DETAIL_TTL_SECONDS)).isoformat()
 
         db = None
         try:
@@ -4847,14 +4867,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "     LIMIT 1)"
                     ")"
                     " SELECT te.id, te.tool_name, te.target,"
-                    "        COALESCE(te.detail,'') AS detail, te.created_at"
+                    "        CASE WHEN ?='' OR te.created_at >= ?"
+                    "             THEN COALESCE(te.detail,'') ELSE '' END AS detail,"
+                    "        te.created_at"
                     " FROM tool_events te"
                     " JOIN current_fingerprints cf"
                     "   ON cf.fingerprint=te.fingerprint"
                     " WHERE (?='all' OR te.tool_name IN ('Task','Agent'))"
                     "   AND (?=0 OR te.id < ?)"
                     " ORDER BY te.id DESC LIMIT ?",
-                    (channel, member_id, kind, before, before, limit),
+                    (channel, member_id, detail_cutoff, detail_cutoff,
+                     kind, before, before, limit),
                 ).fetchall()
             except sqlite3.OperationalError as exc:
                 # A hook-less / not-yet-migrated install has no ring.  That is
