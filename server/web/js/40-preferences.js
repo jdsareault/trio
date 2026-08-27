@@ -224,6 +224,12 @@
     const attribution = document.createElement('div'); attribution.className = 'pref-attribution';
     attribution.innerHTML = 'Character and brand icons from <a href="https://www.svgrepo.com/" target="_blank" rel="noreferrer">SVG Repo</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>.';
     panel.append(hero, appearance, behavior, notifyGroup, diagnosticsGroup, attribution);
+    // Saved working directories live in their own module (and their own
+    // storage key — they are operator data, not a display setting), so this
+    // page only decides where the editor sits: with workspace behaviour,
+    // above the notification rules.
+    const dirbookGroup = Trio.dirbook?.renderSettingsSection?.(panel);
+    if (dirbookGroup) panel.insertBefore(dirbookGroup, notifyGroup);
     const layoutThemes = () => themeGroups.forEach(({ choices, count }) => {
       choices.style.setProperty('--theme-columns', themeGridColumns(count, choices.clientWidth));
     });

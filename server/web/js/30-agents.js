@@ -415,6 +415,11 @@
     const applyBox = panel?.querySelector('[name="cwd_apply"]');
     const cwdInput = panel?.querySelector('[name="cwd"]');
     applyBox?.addEventListener('change', () => { if (cwdInput) cwdInput.disabled = !applyBox.checked; });
+    // Saved directories + child-directory completion. attachPathInput wraps
+    // the field in place and leaves its name alone, so the FormData read above
+    // is unaffected. The modal owns the input's lifetime, so there is nothing
+    // to detach — it goes away with the node.
+    if (cwdInput) Trio.dirbook?.attachPathInput?.(cwdInput);
   }
   function showBulkChannels() {
     const n = selection.size;
@@ -966,7 +971,7 @@
       : '';
     let channelApi = null;
     const effortControl = `<div id="effort-control">${effortSlider(effortsForModel(defaultProvider, defaultModelId), initialEffort, { modelDefault: modelDefaultEffort(defaultProvider, defaultModelId) })}</div>`;
-    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label>${effortControl}<label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
+    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label>${effortControl}<label class="field">Working directory <input name="cwd" placeholder="~/Development/trio"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
       const name = (f.get('name') || '').trim();
@@ -996,6 +1001,11 @@
     const providerField = panel?.querySelector('select[name="provider"]');
     const modelField = panel?.querySelector('select[name="model"]');
     const effortHost = panel?.querySelector('#effort-control');
+    // The working directory is the field this dialog gets retyped for most —
+    // the same three or four project paths, by hand, every time. Offer the
+    // saved ones on focus and complete subdirectories as they type.
+    const createCwd = panel?.querySelector('input[name="cwd"]');
+    if (createCwd) Trio.dirbook?.attachPathInput?.(createCwd);
     // Provider/model changes swap the available effort steps — rebuild the
     // slider. Preserve the user's current pick if the new model still supports
     // it (so flipping models to compare doesn't silently discard their choice);
