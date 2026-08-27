@@ -408,6 +408,133 @@ MONITOR_FILTER_MODES = ("all", "about", "at")
 # questions about local disk, and the server can bind 0.0.0.0 under --tailnet.
 LOCAL_PATH_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 
+# ── project/container classification ────────────────────────────────────────
+# Pure functions of a path, kept at module level with the rest of the helpers
+# rather than inside the request handler: this is the part of the feature most
+# certain to be extended (more languages, more markers), and nobody should have
+# to reason about an HTTP handler to add one.
+
+# Files that mean "a project lives here". Deliberately a short, boring list of
+# the markers that sit at a repository root — enough to be right most of the
+# time, and cheap to extend when it is wrong.
+PROJECT_MARKERS = frozenset({
+    "pubspec.yaml",                                   # Dart / Flutter
+    "package.json", "deno.json",                      # JS / TS
+    "pyproject.toml", "setup.py", "requirements.txt", "Pipfile",   # Python
+    "Cargo.toml",                                     # Rust
+    "go.mod",                                         # Go
+    "pom.xml", "build.gradle", "build.gradle.kts",    # JVM
+    "Gemfile",                                        # Ruby
+    "composer.json",                                  # PHP
+    "CMakeLists.txt",                                 # C/C++
+    "Package.swift",                                  # Swift
+})
+# Matched by SUFFIX, not by name. These stay out of PROJECT_MARKERS above,
+# which is compared by equality: a glob written there would only ever match a
+# file literally named "*.sln", and would look like working configuration.
+PROJECT_MARKER_SUFFIXES = (".xcodeproj", ".xcworkspace", ".sln", ".csproj")
+
+INSPECT_CAP = 60                  # max paths per inspect request
+INSPECT_CHILD_CAP = 400           # max entries read from any one directory
+# Total entries a single inspect request may read across every directory it
+# touches. The per-directory cap alone does not bound the work: _classify scans
+# each child looking for markers, so a directory of many ordinary subfolders
+# (~/, ~/Downloads, a node_modules tree — an easy thing to save by accident)
+# costs children x entries. This is the budget that actually bounds it, and it
+# matters most on network filesystems, where a directory entry with no d_type
+# forces a real stat per name.
+INSPECT_ENTRY_BUDGET = 5000
+
+
+class _ScanBudget:
+    """A countdown shared by every scan in one request. Exhausted is a fact the
+    caller must be able to see, because a truncated scan can turn a container
+    into a project — so `spent` is reported rather than silently absorbed."""
+
+    __slots__ = ("left", "spent")
+
+    def __init__(self, total: int = INSPECT_ENTRY_BUDGET):
+        self.left = total
+        self.spent = False
+
+    def take(self, n: int) -> None:
+        self.left -= n
+        if self.left <= 0:
+            self.spent = True
+
+
+def scan_dir(path, budget: Optional["_ScanBudget"] = None):
+    """[(name, is_dir)] for one directory, or None if it cannot be read."""
+    if budget is not None and budget.spent:
+        return None
+    try:
+        with os.scandir(path) as it:
+            out = []
+            for entry in it:
+                try:
+                    out.append((entry.name, entry.is_dir()))
+                except OSError:
+                    continue                  # vanished mid-scan; skip it
+                if len(out) >= INSPECT_CHILD_CAP:
+                    break
+            if budget is not None:
+                budget.take(len(out))
+            return out
+    except (OSError, ValueError):
+        return None
+
+
+def looks_like_project(entries) -> bool:
+    """True if this directory's own contents say a project lives here."""
+    for name, is_dir in entries:
+        if name == ".git":                    # a dir, or a file in a worktree
+            return True
+        if name.endswith(PROJECT_MARKER_SUFFIXES):
+            return True
+        if not is_dir and name in PROJECT_MARKERS:
+            return True
+    return False
+
+
+def classify_dir(path, budget: Optional["_ScanBudget"] = None):
+    """Guess whether `path` is a PROJECT (work happens here) or a CONTAINER
+    (projects live inside it), with the reason.
+
+    A guess, and only ever a default the operator can override — so it is
+    ordered by how much each signal actually settles the question, and it says
+    WHY, because an unexplained 80%-accurate label is harder to trust than no
+    label at all.
+    """
+    entries = scan_dir(path, budget)
+    if entries is None:
+        return None, ""
+    if looks_like_project(entries):
+        return "project", "a repository or project file lives here"
+    child_dirs = [name for name, is_dir in entries
+                  if is_dir and not name.startswith(".")]
+    if not child_dirs:
+        return "project", "nothing inside it to browse"
+    # How many children are themselves projects? Two or more is the signature
+    # of a directory whose job is holding projects.
+    project_children = 0
+    for name in child_dirs:
+        child = scan_dir(os.path.join(path, name), budget)
+        if child is not None and looks_like_project(child):
+            project_children += 1
+            if project_children >= 2:
+                return "container", "it holds several projects"
+        if budget is not None and budget.spent:
+            break
+    if project_children == 1 and len(child_dirs) == 1:
+        return "container", "it holds a project"
+    # Subdirectories, but nothing in them that reads as a project. Most often
+    # that is a project whose layout we do not recognise, so default to the
+    # safer reading rather than inventing a container. A scan that ran out of
+    # budget lands here too, which is the right way to be wrong: it costs one
+    # click, where a wrong "container" buries the path the operator asked for.
+    return "project", "no projects found inside it"
+
+
 def _is_loopback_ip(remote_ip: str) -> bool:
     """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
     IPv4-mapped-IPv6 loopback like ::ffff:127.0.0.1). Uses the stdlib's
@@ -8349,14 +8476,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # dashboard process happened to be started, not against anything the
         # operator can see. Answer nothing rather than answer about the wrong
         # directory.
-        tilde = prefix.startswith("~")
-        if not (tilde or prefix.startswith("/")):
+        if not prefix.startswith(("~", "/")):
             self._json({"dirs": [], "truncated": False})
             return
         # "~/Development/" means list that directory; "~/Development/tr" means
-        # list its parent and keep the names starting with "tr".
+        # list its parent and keep the names starting with "tr". A prefix with
+        # no separator at all ("~") has no parent to list — rpartition would
+        # hand back "/", turning it into "what in the filesystem ROOT is named
+        # ~", which is a different question than the one asked.
         if prefix.endswith("/"):
             parent_raw, needle = prefix, ""
+        elif "/" not in prefix:
+            self._json({"dirs": [], "truncated": False})
+            return
         else:
             parent_raw, _, needle = prefix.rpartition("/")
             parent_raw = parent_raw + "/"
@@ -8365,7 +8497,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._json({"dirs": [], "truncated": False})
             return
         try:
-            entries = sorted(os.scandir(parent), key=lambda e: e.name.lower())
+            # `with`, so a large directory's iterator is closed promptly rather
+            # than left to the collector — this runs on every keystroke pause.
+            with os.scandir(parent) as it:
+                entries = sorted(it, key=lambda e: e.name.lower())
         except (OSError, ValueError):
             # Missing, unreadable, or not a directory. All three are ordinary
             # states while someone is still typing, so they are an empty list,
@@ -8395,96 +8530,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
             dirs.append({"path": parent_raw + name, "name": name, "parent": parent_raw})
         self._json({"dirs": dirs, "truncated": truncated})
 
-    # Files that mean "a project lives here". Deliberately a short, boring list
-    # of the markers that sit at a repository root — enough to be right most of
-    # the time, and cheap to extend when it is wrong.
-    _PROJECT_MARKERS = frozenset({
-        "pubspec.yaml",                                   # Dart / Flutter
-        "package.json",                                   # JS / TS
-        "pyproject.toml", "setup.py", "requirements.txt", "Pipfile",   # Python
-        "Cargo.toml",                                     # Rust
-        "go.mod",                                         # Go
-        "pom.xml", "build.gradle", "build.gradle.kts",    # JVM
-        "Gemfile",                                        # Ruby
-        "composer.json",                                  # PHP
-        "CMakeLists.txt",                                 # C/C++
-        "Package.swift",                                  # Swift
-        "*.sln", "*.xcodeproj",                           # matched by suffix below
-    })
-    _PROJECT_MARKER_SUFFIXES = (".xcodeproj", ".xcworkspace", ".sln", ".csproj")
-    _INSPECT_CAP = 60                 # max paths per inspect request
-    _INSPECT_CHILD_CAP = 400          # stop scanning a very wide directory
-
-    @classmethod
-    def _looks_like_project(cls, entries) -> bool:
-        """True if this directory's own contents say a project lives here."""
-        for name, is_dir in entries:
-            if name == ".git":                    # dir, or a file in a worktree
-                return True
-            if not is_dir and (name in cls._PROJECT_MARKERS
-                               or name.endswith(cls._PROJECT_MARKER_SUFFIXES)):
-                return True
-            if is_dir and name.endswith(cls._PROJECT_MARKER_SUFFIXES):
-                return True
-        return False
-
-    @staticmethod
-    def _scan(path):
-        """[(name, is_dir)] for one directory, or None if it cannot be read."""
-        try:
-            with os.scandir(path) as it:
-                out = []
-                for entry in it:
-                    try:
-                        out.append((entry.name, entry.is_dir()))
-                    except OSError:
-                        continue
-                    if len(out) >= NthWebHandler._INSPECT_CHILD_CAP:
-                        break
-                return out
-        except (OSError, ValueError):
-            return None
-
-    @classmethod
-    def _classify(cls, path):
-        """Guess whether `path` is a PROJECT (work happens here) or a CONTAINER
-        (projects live inside it), with the reason.
-
-        A guess, and only ever a default the operator can override — so it is
-        ordered by how much each signal actually settles the question, and it
-        says WHY, because an unexplained 80%-accurate label is harder to trust
-        than no label.
-        """
-        entries = cls._scan(path)
-        if entries is None:
-            return None, ""
-        if cls._looks_like_project(entries):
-            return "project", "a repository or project file lives here"
-        child_dirs = [name for name, is_dir in entries
-                      if is_dir and not name.startswith(".")]
-        if not child_dirs:
-            return "project", "nothing inside it to browse"
-        # How many children are themselves projects? Two or more is the
-        # signature of a directory whose job is holding projects.
-        project_children = 0
-        for name in child_dirs:
-            child = cls._scan(os.path.join(path, name))
-            if child is not None and cls._looks_like_project(child):
-                project_children += 1
-                if project_children >= 2:
-                    return "container", "it holds several projects"
-        if project_children == 1 and len(child_dirs) == 1:
-            return "container", "it holds a project"
-        # Subdirectories, but nothing in them that reads as a project. Most
-        # often this is a project whose layout we do not recognise, so default
-        # to the safer reading rather than inventing a container.
-        return "project", "no projects found inside it"
-
     def _handle_path_inspect(self) -> None:
         """POST /api/path/inspect — body {"paths": [...]}. Returns
         {"info": {path: {"exists", "kind", "why"}}} keyed by the original
         candidate, so the client can label saved directories without a second
         round trip for existence.
+
+        `exists` here means IS A DIRECTORY, which is narrower than the same
+        word on /api/path/validate (which answers "is there anything at all
+        here", counting files and broken symlinks). Both are right for what
+        they are asked: this endpoint only ever fields working directories.
 
         `kind` is a GUESS. It supplies the default for a directory the operator
         has not classified themselves, and nothing more — see the dirbook's
@@ -8504,8 +8559,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if not isinstance(paths, list):
             self._error(400, "paths must be a list")
             return
+        # One budget for the whole request, not one per path: the cost that
+        # matters is what this single POST makes the disk do.
+        budget = _ScanBudget()
         info: Dict[str, Any] = {}
-        for cand in paths[: self._INSPECT_CAP]:
+        for cand in paths[:INSPECT_CAP]:
             if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
                 continue
             if cand in info:
@@ -8514,9 +8572,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not expanded or not os.path.isdir(expanded):
                 info[cand] = {"exists": False, "kind": None, "why": ""}
                 continue
-            kind, why = self._classify(expanded)
+            kind, why = classify_dir(expanded, budget)
             info[cand] = {"exists": True, "kind": kind, "why": why}
-        self._json({"info": info})
+        self._json({"info": info, "truncated": budget.spent})
 
     @staticmethod
     def _reveal_linux_dbus(abspath: str):
