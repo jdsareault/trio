@@ -3873,6 +3873,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_path_validate()
         elif parsed.path == "/api/path/complete":
             self._handle_path_complete()
+        elif parsed.path == "/api/path/inspect":
+            self._handle_path_inspect()
         elif parsed.path == "/api/reveal":
             self._handle_reveal()
         elif parsed.path == "/api/upload":
@@ -8392,6 +8394,129 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 break
             dirs.append({"path": parent_raw + name, "name": name, "parent": parent_raw})
         self._json({"dirs": dirs, "truncated": truncated})
+
+    # Files that mean "a project lives here". Deliberately a short, boring list
+    # of the markers that sit at a repository root — enough to be right most of
+    # the time, and cheap to extend when it is wrong.
+    _PROJECT_MARKERS = frozenset({
+        "pubspec.yaml",                                   # Dart / Flutter
+        "package.json",                                   # JS / TS
+        "pyproject.toml", "setup.py", "requirements.txt", "Pipfile",   # Python
+        "Cargo.toml",                                     # Rust
+        "go.mod",                                         # Go
+        "pom.xml", "build.gradle", "build.gradle.kts",    # JVM
+        "Gemfile",                                        # Ruby
+        "composer.json",                                  # PHP
+        "CMakeLists.txt",                                 # C/C++
+        "Package.swift",                                  # Swift
+        "*.sln", "*.xcodeproj",                           # matched by suffix below
+    })
+    _PROJECT_MARKER_SUFFIXES = (".xcodeproj", ".xcworkspace", ".sln", ".csproj")
+    _INSPECT_CAP = 60                 # max paths per inspect request
+    _INSPECT_CHILD_CAP = 400          # stop scanning a very wide directory
+
+    @classmethod
+    def _looks_like_project(cls, entries) -> bool:
+        """True if this directory's own contents say a project lives here."""
+        for name, is_dir in entries:
+            if name == ".git":                    # dir, or a file in a worktree
+                return True
+            if not is_dir and (name in cls._PROJECT_MARKERS
+                               or name.endswith(cls._PROJECT_MARKER_SUFFIXES)):
+                return True
+            if is_dir and name.endswith(cls._PROJECT_MARKER_SUFFIXES):
+                return True
+        return False
+
+    @staticmethod
+    def _scan(path):
+        """[(name, is_dir)] for one directory, or None if it cannot be read."""
+        try:
+            with os.scandir(path) as it:
+                out = []
+                for entry in it:
+                    try:
+                        out.append((entry.name, entry.is_dir()))
+                    except OSError:
+                        continue
+                    if len(out) >= NthWebHandler._INSPECT_CHILD_CAP:
+                        break
+                return out
+        except (OSError, ValueError):
+            return None
+
+    @classmethod
+    def _classify(cls, path):
+        """Guess whether `path` is a PROJECT (work happens here) or a CONTAINER
+        (projects live inside it), with the reason.
+
+        A guess, and only ever a default the operator can override — so it is
+        ordered by how much each signal actually settles the question, and it
+        says WHY, because an unexplained 80%-accurate label is harder to trust
+        than no label.
+        """
+        entries = cls._scan(path)
+        if entries is None:
+            return None, ""
+        if cls._looks_like_project(entries):
+            return "project", "a repository or project file lives here"
+        child_dirs = [name for name, is_dir in entries
+                      if is_dir and not name.startswith(".")]
+        if not child_dirs:
+            return "project", "nothing inside it to browse"
+        # How many children are themselves projects? Two or more is the
+        # signature of a directory whose job is holding projects.
+        project_children = 0
+        for name in child_dirs:
+            child = cls._scan(os.path.join(path, name))
+            if child is not None and cls._looks_like_project(child):
+                project_children += 1
+                if project_children >= 2:
+                    return "container", "it holds several projects"
+        if project_children == 1 and len(child_dirs) == 1:
+            return "container", "it holds a project"
+        # Subdirectories, but nothing in them that reads as a project. Most
+        # often this is a project whose layout we do not recognise, so default
+        # to the safer reading rather than inventing a container.
+        return "project", "no projects found inside it"
+
+    def _handle_path_inspect(self) -> None:
+        """POST /api/path/inspect — body {"paths": [...]}. Returns
+        {"info": {path: {"exists", "kind", "why"}}} keyed by the original
+        candidate, so the client can label saved directories without a second
+        round trip for existence.
+
+        `kind` is a GUESS. It supplies the default for a directory the operator
+        has not classified themselves, and nothing more — see the dirbook's
+        `mode`, which distinguishes "not decided" from "decided".
+        """
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can inspect local paths")
+            return
+        body = self._read_json_body(max_bytes=64 * 1024)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            self._error(400, "paths must be a list")
+            return
+        info: Dict[str, Any] = {}
+        for cand in paths[: self._INSPECT_CAP]:
+            if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
+                continue
+            if cand in info:
+                continue
+            expanded = self._expand_path(cand)
+            if not expanded or not os.path.isdir(expanded):
+                info[cand] = {"exists": False, "kind": None, "why": ""}
+                continue
+            kind, why = self._classify(expanded)
+            info[cand] = {"exists": True, "kind": kind, "why": why}
+        self._json({"info": info})
 
     @staticmethod
     def _reveal_linux_dbus(abspath: str):

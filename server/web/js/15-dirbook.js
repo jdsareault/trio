@@ -11,26 +11,31 @@
   const MAX_FAVORITES = 50;
   const MAX_LEN = 4096;              // matches the server's _PATH_MAX_LEN
 
-  // An entry is { path, browse }.
+  // An entry is { path, mode, guess }.
   //
-  // `browse` is what separates a PROJECT from a CONTAINER, and it is stored
-  // because it cannot be derived. It used to be inferred from a trailing
-  // slash, which was wrong twice over: a slash is a typing accident, not a
-  // statement about the directory, and the picker appends one to everything it
-  // fills in — so saving anything you had browsed to marked it a container.
-  // Every entry ended up labelled the same way.
+  //   mode   'auto' | 'project' | 'container'  — the operator's decision, or
+  //          the absence of one. 'auto' means "nobody has said", which is a
+  //          different fact from "someone said project", and the two must not
+  //          collapse: a guess that overwrote a choice would be a bug the
+  //          operator could only fix by noticing it had happened.
+  //   guess  the server's classification, cached so the picker can act on it
+  //          without a round trip. Refreshed whenever the Directories page
+  //          loads; only consulted when mode is 'auto'.
   //
-  // What the flag actually decides is what happens when you PICK the entry:
-  //   browse: false (project)   fill the field and stop — you are there
-  //   browse: true  (container) fill it with a trailing / and keep listing,
-  //                             because the point of ~/Development is what is
-  //                             inside it, never itself
-  // Nothing infers it; you set it on the Directories page, and the default is
-  // project because that is what most saved paths are.
+  // The kind decides what picking the entry DOES:
+  //   project    fill the field and stop — you are there
+  //   container  fill it with a trailing / and keep listing, because the point
+  //              of ~/Development is what is inside it, never itself
+  //
+  // This used to be inferred from a trailing slash, which was wrong twice
+  // over: a slash is a typing accident, not a statement about a directory, and
+  // the picker appends one to everything it fills in — so saving anything you
+  // had browsed to marked it a container, and every entry wore the same label.
   //
   // Paths are stored EXACTLY as typed otherwise, `~` and all. Expanding one
   // here would bake this browser's idea of $HOME into a value only the hub can
   // resolve — the dashboard is routinely opened from a phone over the tailnet.
+  const MODES = ['auto', 'project', 'container'];
   function normalize(raw) {
     const path = String(raw ?? '').trim();
     if (!path || path.length > MAX_LEN) return '';
@@ -39,6 +44,13 @@
     // look identical on screen is how the old scheme let duplicates in.
     const collapsed = path.replace(/\/{2,}/g, '/');
     return collapsed.length > 1 ? collapsed.replace(/\/+$/, '') : collapsed;
+  }
+  // What this entry actually is, right now. An unclassified directory reads as
+  // a project: that is the commoner case, and being wrong that way costs one
+  // keystroke rather than burying the path you asked for under a listing.
+  function kindOf(entry) {
+    if (!entry) return 'project';
+    return entry.mode === 'auto' ? (entry.guess || 'project') : entry.mode;
   }
   function isAbsoluteish(path) { return /^[~/]/.test(path); }
 
@@ -49,17 +61,20 @@
       const seen = new Set();
       const favorites = [];
       for (const entry of stored) {
-        // v1 stored bare strings and encoded "container" as a trailing slash.
-        // Read that intent forward rather than discarding it: anyone who saved
-        // "~/Development/" meant it as something to browse into.
-        const rawPath = typeof entry === 'string' ? entry : entry?.path;
-        const browse = typeof entry === 'string'
-          ? /\/$/.test(String(entry).trim())
-          : !!entry?.browse;
-        const path = normalize(rawPath);
+        // Older shapes: v1 stored bare strings, v2 a `browse` boolean. Both
+        // encoded the kind as a trailing slash somewhere up the chain, and
+        // that slash came from the picker rather than from the operator — so
+        // it is not evidence of intent and is NOT read forward as a decision.
+        // Everything older arrives as 'auto' and gets classified on its
+        // merits, which is also what repairs the entries the old bug mislabelled.
+        const isObject = entry && typeof entry === 'object';
+        const path = normalize(isObject ? entry.path : entry);
+        const mode = isObject && MODES.includes(entry.mode) ? entry.mode : 'auto';
+        const guess = isObject && (entry.guess === 'project' || entry.guess === 'container')
+          ? entry.guess : null;
         if (!path || !isAbsoluteish(path) || seen.has(path)) continue;
         seen.add(path);
-        favorites.push({ path, browse });
+        favorites.push({ path, mode, guess });
         if (favorites.length >= MAX_FAVORITES) break;
       }
       return { favorites };
@@ -69,7 +84,7 @@
   function state() { return (cache ||= readFromStorage()); }
   function write(favorites) {
     cache = { favorites: favorites.slice(0, MAX_FAVORITES) };
-    try { localStorage.setItem(KEY, JSON.stringify({ v: 2, favorites: cache.favorites })); } catch { /* private mode / quota */ }
+    try { localStorage.setItem(KEY, JSON.stringify({ v: 3, favorites: cache.favorites })); } catch { /* private mode / quota */ }
     Trio.events?.dispatchEvent?.(new CustomEvent('dirbook:changed', { detail: { favorites: cache.favorites } }));
     return cache.favorites;
   }
@@ -87,7 +102,7 @@
     const favorites = state().favorites.slice();
     if (favorites.some(entry => entry.path === path)) return { ok: false, error: 'Already saved.' };
     if (favorites.length >= MAX_FAVORITES) return { ok: false, error: `At most ${MAX_FAVORITES} saved directories.` };
-    favorites.push({ path, browse: !!options.browse });
+    favorites.push({ path, mode: MODES.includes(options.mode) ? options.mode : 'auto', guess: null });
     write(favorites);
     return { ok: true, path };
   }
@@ -98,13 +113,26 @@
     write(favorites);
     return true;
   }
-  function setBrowse(rawPath, browse) {
+  function setMode(rawPath, mode) {
+    if (!MODES.includes(mode)) return false;
     const path = normalize(rawPath);
-    const favorites = state().favorites.map(entry =>
-      entry.path === path ? { ...entry, browse: !!browse } : entry);
-    if (!favorites.some(entry => entry.path === path)) return false;
-    write(favorites);
+    if (!state().favorites.some(entry => entry.path === path)) return false;
+    write(state().favorites.map(entry => entry.path === path ? { ...entry, mode } : entry));
     return true;
+  }
+  // Fold a fresh batch of server classifications into the cache. Only `guess`
+  // moves; an operator's own choice is never touched by a guess.
+  function applyGuesses(byPath) {
+    let changed = false;
+    const favorites = state().favorites.map(entry => {
+      const guess = byPath?.[entry.path];
+      const next = guess === 'project' || guess === 'container' ? guess : null;
+      if (next === entry.guess) return entry;
+      changed = true;
+      return { ...entry, guess: next };
+    });
+    if (changed) write(favorites);
+    return changed;
   }
   function move(rawPath, delta) {
     const path = normalize(rawPath);
@@ -144,6 +172,20 @@
     }
   }
 
+  // Existence + classification for saved paths, in one round trip. The kind is
+  // the server's GUESS: only the hub can see the disk, and only it can tell a
+  // repository from a folder of repositories.
+  async function inspect(pathList, options = {}) {
+    if (!Array.isArray(pathList) || !pathList.length) return {};
+    try {
+      const data = await Trio.api.post('/api/path/inspect', { paths: pathList }, false, options);
+      return data?.info && typeof data.info === 'object' ? data.info : {};
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
+      return {};                       // a guest gets no badges; not an error
+    }
+  }
+
   // Favorites relevant to what has been typed, offered above the live
   // filesystem results.
   //
@@ -161,7 +203,7 @@
     const typed = String(query ?? '').trim().toLowerCase();
     const q = normalize(query).toLowerCase();
     const all = state().favorites;
-    if (!q) return all.map(entry => ({ path: entry.path, name: entry.path, kind: 'saved', browse: entry.browse }));
+    if (!q) return all.map(entry => ({ path: entry.path, name: entry.path, kind: 'saved', browse: kindOf(entry) === 'container' }));
     const scored = [];
     for (const entry of all) {
       const lower = entry.path.toLowerCase();
@@ -169,19 +211,19 @@
       if (lower.startsWith(q)) rank = 0;
       else if (typed.startsWith(lower + '/')) rank = 1;
       else if (lower.includes(q)) rank = 2;
-      if (rank >= 0) scored.push({ path: entry.path, name: entry.path, kind: 'saved', browse: entry.browse, rank });
+      if (rank >= 0) scored.push({ path: entry.path, name: entry.path, kind: 'saved', browse: kindOf(entry) === 'container', rank });
     }
     return scored.sort((a, b) => a.rank - b.rank)
       .map(m => ({ path: m.path, name: m.name, kind: m.kind, browse: m.browse }));
   }
-  Trio.dirbook = { KEY, MAX_FAVORITES, list, paths, find, has, add, remove, setBrowse, move, complete, normalize, matchingFavorites };
+  Trio.dirbook = { KEY, MAX_FAVORITES, MODES, list, paths, find, has, add, remove, setMode, applyGuesses, move, kindOf, complete, inspect, normalize, matchingFavorites };
 })();
 
 (() => {
   'use strict';
   const Trio = window.Trio;
   const book = Trio.dirbook;
-  const { list, paths, add, remove, setBrowse, move } = book;
+  const { list, paths, add, remove, setMode, move, kindOf } = book;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const COMPLETE_DEBOUNCE_MS = 120;
 
@@ -419,10 +461,10 @@
     const hint = document.createElement('p');
     hint.className = 'dirbook-hint';
     hint.innerHTML = 'Subdirectories appear as you type — <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, '
-      + '<kbd>Enter</kbd> to step in. Each saved directory decides what picking it does: '
-      + '<strong>Use directly</strong> fills the field and stops, <strong>Browse inside</strong> '
-      + 'lists what is in it — which is what you want for a folder like <code>~/Development</code> '
-      + 'that holds projects rather than being one.';
+      + '<kbd>Enter</kbd> to step in. Each saved directory is a <strong>project</strong> '
+      + '(picking it fills the field and stops) or a <strong>container</strong> '
+      + '(picking it lists what is inside, which is what you want for <code>~/Development</code>). '
+      + 'That is detected from what is on disk — click the label to overrule it.';
 
     const section = document.createElement('section');
     section.className = 'dirbook-section';
@@ -436,13 +478,23 @@
     // fails to start. /api/path/validate already answers this, so the page
     // says so up front. A guest gets a 403 and simply no badges.
     let missing = new Set();
-    async function checkExistence() {
+    let why = {};
+    // One round trip answers both questions the page asks about a saved path:
+    // is it still there, and what does it look like. The kind only ever fills
+    // in for entries the operator has not classified themselves.
+    async function refreshInfo() {
       const saved = paths();
       if (!saved.length) return;
-      try {
-        const data = await Trio.api.post('/api/path/validate', { paths: saved }, false);
-        missing = new Set(saved.filter(path => data?.exists?.[path] === false));
-      } catch { missing = new Set(); }
+      const info = await book.inspect(saved);
+      if (!Object.keys(info).length) return;      // guest, or request failed
+      missing = new Set(saved.filter(path => info[path] && info[path].exists === false));
+      why = {};
+      const guesses = {};
+      for (const [path, entry] of Object.entries(info)) {
+        guesses[path] = entry?.kind || null;
+        if (entry?.why) why[path] = entry.why;
+      }
+      book.applyGuesses(guesses);
       draw();
     }
     function draw() {
@@ -452,22 +504,28 @@
           + 'or use the &#9733; beside any working-directory field.</li>';
         return;
       }
-      listEl.innerHTML = favorites.map(({ path, browse }, i) => {
+      listEl.innerHTML = favorites.map((entry, i) => {
+        const { path, mode } = entry;
+        const kind = kindOf(entry);
         const gone = missing.has(path);
-        // The behaviour is the label. Rather than tag each row with a noun the
-        // operator then has to decode, say what picking it will DO, as the
-        // control that changes it — one click, no dialog.
-        const modeLabel = browse ? 'Browse inside' : 'Use directly';
-        const modeTitle = browse
-          ? 'Picking this lists what is inside it. Click to use the directory itself instead.'
-          : 'Picking this fills the field with this directory. Click to browse inside it instead.';
+        const auto = mode === 'auto';
+        // The tag is the control. It states what the entry IS, says whether
+        // that was detected or chosen, and cycles auto → project → container
+        // on click — so an operator who disagrees with the guess fixes it
+        // where they read it, and can hand the decision back.
+        const next = auto ? 'project' : mode === 'project' ? 'container' : 'auto';
+        const detected = auto
+          ? (why[path] ? `Detected: ${kind} — ${why[path]}.` : `Detected: ${kind}.`)
+          : `Set to ${kind}.`;
+        const title = `${detected} Click to ${next === 'auto' ? 'go back to detecting it' : 'set ' + next}.`;
         return `<li class="dirbook-row${gone ? ' gone' : ''}" data-path="${esc(path)}">`
           + `<span class="dirbook-label">`
           + `<span class="dirbook-name">${esc(path)}</span>`
           + (gone ? '<span class="dirbook-tag warn" title="No directory at this path right now">missing</span>' : '')
           + `</span>`
           + `<span class="dirbook-actions">`
-          + `<button type="button" class="dirbook-mode${browse ? ' on' : ''}" data-act="mode" title="${esc(modeTitle)}" aria-pressed="${browse}">${esc(modeLabel)}</button>`
+          + `<button type="button" class="dirbook-kind ${esc(kind)}${auto ? ' auto' : ''}" data-act="mode" `
+          + `title="${esc(title)}" aria-label="${esc(path)}: ${esc(title)}">${esc(kind)}</button>`
           + `<button type="button" class="dirbook-act" data-act="up" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(path)} up">&uarr;</button>`
           + `<button type="button" class="dirbook-act" data-act="down" ${i === favorites.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(path)} down">&darr;</button>`
           + `<button type="button" class="dirbook-act danger" data-act="remove" aria-label="Remove ${esc(path)}">&#10005;</button>`
@@ -482,7 +540,10 @@
       if (!path) return;
       const act = button.dataset.act;
       if (act === 'remove') remove(path);
-      else if (act === 'mode') setBrowse(path, !book.find(path)?.browse);
+      else if (act === 'mode') {
+        const mode = book.find(path)?.mode || 'auto';
+        setMode(path, mode === 'auto' ? 'project' : mode === 'project' ? 'container' : 'auto');
+      }
       else move(path, act === 'up' ? -1 : 1);
       draw();
     });
@@ -492,14 +553,14 @@
       if (!result.ok) { Trio.ui?.toast?.(result.error); return; }
       input.value = '';
       draw();
-      checkExistence();
+      refreshInfo();
     });
     draw();
     panel.append(head, form, hint, section);
     // No star here: this field has a Save button, and two controls for one job
     // is one too many.
     attachPathInput(input, { star: false });
-    checkExistence();
+    refreshInfo();
     return panel;
   }
 

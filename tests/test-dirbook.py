@@ -172,14 +172,22 @@ check("saved paths are capped", "MAX_FAVORITES" in dirbook)
 # Inferring it from a trailing slash was wrong twice: a slash is a typing
 # accident, and the picker appends one to everything it fills in — so saving
 # anything you had browsed to silently marked it a container.
-check("browse intent is stored, not inferred from a trailing slash",
-      "browse: !!options.browse" in dirbook
-      and "function setBrowse(" in dirbook
-      and "function isContainer(" not in dirbook)
+check("the kind is stored, not inferred from a trailing slash",
+      "function setMode(" in dirbook and "function isContainer(" not in dirbook)
+# 'auto' and 'project' are different facts. Collapsing them would let a guess
+# silently overwrite a decision the operator made.
+check("undecided is a distinct state from decided-project",
+      "const MODES = ['auto', 'project', 'container']" in dirbook
+      and "entry.mode === 'auto' ? (entry.guess || 'project') : entry.mode" in dirbook)
+check("a refreshed guess never touches the operator's own choice",
+      "function applyGuesses(" in dirbook
+      and "{ ...entry, guess: next }" in dirbook)
 check("normalize strips a trailing slash so one directory is one entry",
       "collapsed.replace(/\\/+$/, '')" in dirbook)
-check("v1 string entries carry their trailing-slash intent forward",
-      "typeof entry === 'string'" in dirbook)
+# The old trailing slash came from the picker, not the operator, so it is not
+# evidence of intent — older entries arrive unclassified and get re-judged.
+check("legacy entries arrive as 'auto' rather than as a decision",
+      "const mode = isObject && MODES.includes(entry.mode) ? entry.mode : 'auto';" in dirbook)
 check("completion is sent as typed, since the trailing slash is the question",
       "// Sent as typed, NOT normalized" in dirbook)
 check("picking a project lands, picking a container descends",
@@ -232,6 +240,20 @@ check("a bare name matches saved paths anywhere in them",
       "lower.includes(q)" in dirbook)
 check("a non-path query skips the server round trip",
       "!/^[~/]/.test(typed)" in dirbook)
+# The classifier: a guess, and only ever the default for an undecided entry.
+check("the classifier endpoint is routed and gated",
+      'elif parsed.path == "/api/path/inspect":' in source
+      and "LOCAL_PATH_ALLOWED_SOURCES" in source.split("def _handle_path_inspect", 1)[-1][:900])
+classifier = source.split("def _classify", 1)[-1].split("def _handle_path_inspect", 1)[0]
+check("a repository or project marker means project", '"project", "a repository' in classifier)
+check("several projects inside means container", '"container", "it holds several projects"' in classifier)
+check("nothing inside means project", '"project", "nothing inside it to browse"' in classifier)
+check("the guess explains itself", classifier.count("return \"") >= 4)
+check("the classifier caps how wide a directory it will scan",
+      "_INSPECT_CHILD_CAP" in source and "_INSPECT_CAP" in source)
+check("inspect answers existence too, so the page needs one round trip",
+      '"exists"' in source.split("def _handle_path_inspect", 1)[-1][:2000])
+
 check("the page's field drops the redundant star",
       "attachPathInput(input, { star: false })" in dirbook)
 check("navigateView knows the route", "dirs: 'dirs'" in workspace)
