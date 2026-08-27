@@ -11,32 +11,55 @@
   const MAX_FAVORITES = 50;
   const MAX_LEN = 4096;              // matches the server's _PATH_MAX_LEN
 
-  // A path is stored EXACTLY as typed, `~` and all. Expanding it here would
-  // bake this browser's idea of $HOME into a value the hub is the only one
-  // qualified to resolve — and the dashboard is routinely opened from a phone
-  // over the tailnet, where the local $HOME is meaningless.
+  // An entry is { path, browse }.
+  //
+  // `browse` is what separates a PROJECT from a CONTAINER, and it is stored
+  // because it cannot be derived. It used to be inferred from a trailing
+  // slash, which was wrong twice over: a slash is a typing accident, not a
+  // statement about the directory, and the picker appends one to everything it
+  // fills in — so saving anything you had browsed to marked it a container.
+  // Every entry ended up labelled the same way.
+  //
+  // What the flag actually decides is what happens when you PICK the entry:
+  //   browse: false (project)   fill the field and stop — you are there
+  //   browse: true  (container) fill it with a trailing / and keep listing,
+  //                             because the point of ~/Development is what is
+  //                             inside it, never itself
+  // Nothing infers it; you set it on the Directories page, and the default is
+  // project because that is what most saved paths are.
+  //
+  // Paths are stored EXACTLY as typed otherwise, `~` and all. Expanding one
+  // here would bake this browser's idea of $HOME into a value only the hub can
+  // resolve — the dashboard is routinely opened from a phone over the tailnet.
   function normalize(raw) {
     const path = String(raw ?? '').trim();
     if (!path || path.length > MAX_LEN) return '';
-    // Collapse runs of slashes but keep a single meaningful trailing one: a
-    // trailing slash is how a CONTAINER ("~/Development/") is distinguished
-    // from a project ("~/Development/trio") in the picker.
-    return path.replace(/\/{2,}/g, '/');
+    // Collapse slash runs, then drop a trailing slash: "~/Development/" and
+    // "~/Development" are one directory, and storing them as two entries that
+    // look identical on screen is how the old scheme let duplicates in.
+    const collapsed = path.replace(/\/{2,}/g, '/');
+    return collapsed.length > 1 ? collapsed.replace(/\/+$/, '') : collapsed;
   }
-  function isContainer(path) { return /\/$/.test(path); }
   function isAbsoluteish(path) { return /^[~/]/.test(path); }
 
   function readFromStorage() {
     try {
       const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
-      const list = Array.isArray(raw.favorites) ? raw.favorites : [];
+      const stored = Array.isArray(raw.favorites) ? raw.favorites : [];
       const seen = new Set();
       const favorites = [];
-      for (const entry of list) {
-        const path = normalize(entry);
+      for (const entry of stored) {
+        // v1 stored bare strings and encoded "container" as a trailing slash.
+        // Read that intent forward rather than discarding it: anyone who saved
+        // "~/Development/" meant it as something to browse into.
+        const rawPath = typeof entry === 'string' ? entry : entry?.path;
+        const browse = typeof entry === 'string'
+          ? /\/$/.test(String(entry).trim())
+          : !!entry?.browse;
+        const path = normalize(rawPath);
         if (!path || !isAbsoluteish(path) || seen.has(path)) continue;
         seen.add(path);
-        favorites.push(path);
+        favorites.push({ path, browse });
         if (favorites.length >= MAX_FAVORITES) break;
       }
       return { favorites };
@@ -46,34 +69,47 @@
   function state() { return (cache ||= readFromStorage()); }
   function write(favorites) {
     cache = { favorites: favorites.slice(0, MAX_FAVORITES) };
-    try { localStorage.setItem(KEY, JSON.stringify({ v: 1, favorites: cache.favorites })); } catch { /* private mode / quota */ }
+    try { localStorage.setItem(KEY, JSON.stringify({ v: 2, favorites: cache.favorites })); } catch { /* private mode / quota */ }
     Trio.events?.dispatchEvent?.(new CustomEvent('dirbook:changed', { detail: { favorites: cache.favorites } }));
     return cache.favorites;
   }
 
-  function list() { return state().favorites.slice(); }
-  function has(path) { return state().favorites.includes(normalize(path)); }
-  function add(rawPath) {
+  function list() { return state().favorites.map(entry => ({ ...entry })); }
+  function paths() { return state().favorites.map(entry => entry.path); }
+  function find(rawPath) {
+    const path = normalize(rawPath);
+    return state().favorites.find(entry => entry.path === path) || null;
+  }
+  function has(rawPath) { return !!find(rawPath); }
+  function add(rawPath, options = {}) {
     const path = normalize(rawPath);
     if (!path || !isAbsoluteish(path)) return { ok: false, error: 'Give an absolute path or one starting with ~.' };
     const favorites = state().favorites.slice();
-    if (favorites.includes(path)) return { ok: false, error: 'Already saved.' };
+    if (favorites.some(entry => entry.path === path)) return { ok: false, error: 'Already saved.' };
     if (favorites.length >= MAX_FAVORITES) return { ok: false, error: `At most ${MAX_FAVORITES} saved directories.` };
-    favorites.push(path);
+    favorites.push({ path, browse: !!options.browse });
     write(favorites);
     return { ok: true, path };
   }
   function remove(rawPath) {
     const path = normalize(rawPath);
-    const favorites = state().favorites.filter(p => p !== path);
+    const favorites = state().favorites.filter(entry => entry.path !== path);
     if (favorites.length === state().favorites.length) return false;
+    write(favorites);
+    return true;
+  }
+  function setBrowse(rawPath, browse) {
+    const path = normalize(rawPath);
+    const favorites = state().favorites.map(entry =>
+      entry.path === path ? { ...entry, browse: !!browse } : entry);
+    if (!favorites.some(entry => entry.path === path)) return false;
     write(favorites);
     return true;
   }
   function move(rawPath, delta) {
     const path = normalize(rawPath);
     const favorites = state().favorites.slice();
-    const from = favorites.indexOf(path);
+    const from = favorites.findIndex(entry => entry.path === path);
     if (from < 0) return false;
     const to = from + delta;
     if (to < 0 || to >= favorites.length) return false;
@@ -83,15 +119,18 @@
   }
 
   // ── server-side child-directory completion ───────────────────────────────
-  // Only the hub can answer "what is inside ~/Development/" — the browser has
+  // Only the hub can answer "what is inside ~/Development" — the browser has
   // no filesystem. /api/path/complete is gated to the same trusted tiers as
   // /api/path/validate, so a guest simply gets no suggestions (a 403 here is
   // an expected outcome, not an error worth toasting).
   let completionsDenied = false;
   async function complete(prefix, options = {}) {
     if (completionsDenied) return [];
-    const value = normalize(prefix);
-    if (!value || !isAbsoluteish(value)) return [];
+    // Sent as typed, NOT normalized: the trailing slash is the difference
+    // between "list what is inside ~/Development" and "find things named
+    // Development", and normalize() strips it.
+    const value = String(prefix ?? '').trim();
+    if (!value || !isAbsoluteish(value) || value.length > MAX_LEN) return [];
     try {
       const data = await Trio.api.post('/api/path/complete', { prefix: value }, false, options);
       return Array.isArray(data?.dirs) ? data.dirs : [];
@@ -116,31 +155,33 @@
   // rather than as it being picky.
   //
   // Ranked so the more literal reading still wins: paths that START with the
-  // query, then containers the query has descended into, then anything that
-  // merely contains it. Array.sort is stable, so saved order breaks ties.
+  // query, then a saved directory the query has descended INTO, then anything
+  // that merely contains it. Array.sort is stable, so saved order breaks ties.
   function matchingFavorites(query) {
+    const typed = String(query ?? '').trim().toLowerCase();
     const q = normalize(query).toLowerCase();
     const all = state().favorites;
-    if (!q) return all.map(path => ({ path, name: path, kind: 'saved' }));
+    if (!q) return all.map(entry => ({ path: entry.path, name: entry.path, kind: 'saved', browse: entry.browse }));
     const scored = [];
-    for (const path of all) {
-      const lower = path.toLowerCase();
+    for (const entry of all) {
+      const lower = entry.path.toLowerCase();
       let rank = -1;
       if (lower.startsWith(q)) rank = 0;
-      else if (isContainer(path) && q.startsWith(lower)) rank = 1;
+      else if (typed.startsWith(lower + '/')) rank = 1;
       else if (lower.includes(q)) rank = 2;
-      if (rank >= 0) scored.push({ path, name: path, kind: 'saved', rank });
+      if (rank >= 0) scored.push({ path: entry.path, name: entry.path, kind: 'saved', browse: entry.browse, rank });
     }
-    return scored.sort((a, b) => a.rank - b.rank).map(m => ({ path: m.path, name: m.name, kind: m.kind }));
+    return scored.sort((a, b) => a.rank - b.rank)
+      .map(m => ({ path: m.path, name: m.name, kind: m.kind, browse: m.browse }));
   }
-  Trio.dirbook = { KEY, MAX_FAVORITES, list, has, add, remove, move, complete, normalize, isContainer, matchingFavorites };
+  Trio.dirbook = { KEY, MAX_FAVORITES, list, paths, find, has, add, remove, setBrowse, move, complete, normalize, matchingFavorites };
 })();
 
 (() => {
   'use strict';
   const Trio = window.Trio;
   const book = Trio.dirbook;
-  const { list, add, remove, move, isContainer } = book;
+  const { list, paths, add, remove, setBrowse, move } = book;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const COMPLETE_DEBOUNCE_MS = 120;
 
@@ -225,7 +266,7 @@
       if (!items.length || !focused()) { close(); return; }
       pop.innerHTML = items.map((item, i) => {
         const label = item.kind === 'saved' ? item.path : item.name;
-        const sub = item.kind === 'saved' ? 'saved' : (item.parent || '');
+        const sub = item.kind === 'saved' ? (item.browse ? 'saved · browse' : 'saved') : (item.parent || '');
         return `<button type="button" class="dirbook-opt${i === index ? ' hi' : ''}" data-index="${i}" role="option" aria-selected="${i === index}">`
           + `<span class="dirbook-icon">${item.kind === 'saved' ? '★' : '›'}</span>`
           + `<span class="dirbook-name">${esc(label)}</span>`
@@ -253,24 +294,29 @@
     function choose(i) {
       const item = items[i];
       if (!item) return;
-      // Always land on a trailing slash and re-query. That is shell-completion
-      // behaviour, and it is what makes a saved CONTAINER ("~/Development/")
-      // useful: pick it, and its children are immediately on offer. The
-      // trailing slash is inert on the server (Path.resolve strips it).
       const path = book.normalize(item.path);
-      input.value = path.replace(/\/*$/, '/');
+      // Whether picking this DESCENDS into it or LANDS on it:
+      //   • a live filesystem suggestion always descends — you are browsing,
+      //     and the next thing you want is what is inside
+      //   • a saved entry does what it was saved to do. A container is only
+      //     ever useful for its contents; a project is the destination, so
+      //     landing on it and closing is the whole point of having saved it.
+      const descend = item.kind !== 'saved' || item.browse;
+      input.value = descend ? path + '/' : path;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       hasFocus = true;
       input.focus();
-      refresh();
+      if (descend) refresh();
+      else close();
     }
     async function refresh() {
       const typed = book.normalize(input.value);
       syncStar();
       if (!focused()) { close(); return; }
       const seq = ++requestSeq;
+      const normalized = book.normalize(typed);
       const saved = book.matchingFavorites(typed)
-        .filter(fav => fav.path !== typed);        // don't offer what is already there
+        .filter(fav => fav.path !== normalized);   // don't offer what is already there
       // A bare name like "roam" is not a path, so there is nothing for the
       // server to complete — but the saved list can still answer it, and that
       // is the whole point of saving one. Show those and skip the request.
@@ -287,8 +333,8 @@
       try { dirs = await book.complete(typed, { signal: controller.signal }); }
       catch { return; }                            // aborted by a newer keystroke
       if (seq !== requestSeq) return;              // a newer request won
-      const savedPaths = new Set(saved.map(fav => fav.path.replace(/\/*$/, '/')));
-      const fresh = dirs.filter(dir => !savedPaths.has(String(dir.path || '').replace(/\/*$/, '/')));
+      const savedPaths = new Set(saved.map(fav => fav.path));
+      const fresh = dirs.filter(dir => !savedPaths.has(book.normalize(dir.path)));
       items = saved.slice(0, 4).concat(fresh.slice(0, 8));
       index = items.length ? 0 : -1;
       render();
@@ -373,9 +419,10 @@
     const hint = document.createElement('p');
     hint.className = 'dirbook-hint';
     hint.innerHTML = 'Subdirectories appear as you type — <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, '
-      + '<kbd>Enter</kbd> to step in. End a path with <code>/</code> to save a '
-      + '<strong>container</strong>: picking it later offers everything inside, so '
-      + '<code>~/Development/</code> covers every project at once.';
+      + '<kbd>Enter</kbd> to step in. Each saved directory decides what picking it does: '
+      + '<strong>Use directly</strong> fills the field and stops, <strong>Browse inside</strong> '
+      + 'lists what is in it — which is what you want for a folder like <code>~/Development</code> '
+      + 'that holds projects rather than being one.';
 
     const section = document.createElement('section');
     section.className = 'dirbook-section';
@@ -390,11 +437,11 @@
     // says so up front. A guest gets a 403 and simply no badges.
     let missing = new Set();
     async function checkExistence() {
-      const paths = list();
-      if (!paths.length) return;
+      const saved = paths();
+      if (!saved.length) return;
       try {
-        const data = await Trio.api.post('/api/path/validate', { paths }, false);
-        missing = new Set(paths.filter(path => data?.exists?.[path] === false));
+        const data = await Trio.api.post('/api/path/validate', { paths: saved }, false);
+        missing = new Set(saved.filter(path => data?.exists?.[path] === false));
       } catch { missing = new Set(); }
       draw();
     }
@@ -405,16 +452,22 @@
           + 'or use the &#9733; beside any working-directory field.</li>';
         return;
       }
-      listEl.innerHTML = favorites.map((path, i) => {
-        const container = isContainer(path);
+      listEl.innerHTML = favorites.map(({ path, browse }, i) => {
         const gone = missing.has(path);
+        // The behaviour is the label. Rather than tag each row with a noun the
+        // operator then has to decode, say what picking it will DO, as the
+        // control that changes it — one click, no dialog.
+        const modeLabel = browse ? 'Browse inside' : 'Use directly';
+        const modeTitle = browse
+          ? 'Picking this lists what is inside it. Click to use the directory itself instead.'
+          : 'Picking this fills the field with this directory. Click to browse inside it instead.';
         return `<li class="dirbook-row${gone ? ' gone' : ''}" data-path="${esc(path)}">`
           + `<span class="dirbook-label">`
           + `<span class="dirbook-name">${esc(path)}</span>`
-          + `<span class="dirbook-tag">${container ? 'container' : 'project'}</span>`
           + (gone ? '<span class="dirbook-tag warn" title="No directory at this path right now">missing</span>' : '')
           + `</span>`
           + `<span class="dirbook-actions">`
+          + `<button type="button" class="dirbook-mode${browse ? ' on' : ''}" data-act="mode" title="${esc(modeTitle)}" aria-pressed="${browse}">${esc(modeLabel)}</button>`
           + `<button type="button" class="dirbook-act" data-act="up" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(path)} up">&uarr;</button>`
           + `<button type="button" class="dirbook-act" data-act="down" ${i === favorites.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(path)} down">&darr;</button>`
           + `<button type="button" class="dirbook-act danger" data-act="remove" aria-label="Remove ${esc(path)}">&#10005;</button>`
@@ -422,12 +475,15 @@
       }).join('');
     }
     listEl.addEventListener('click', event => {
-      const button = event.target.closest('.dirbook-act');
+      const button = event.target.closest('[data-act]');
       if (!button) return;
-      const path = button.closest('.dirbook-row')?.dataset.path;
+      const row = button.closest('.dirbook-row');
+      const path = row?.dataset.path;
       if (!path) return;
-      if (button.dataset.act === 'remove') remove(path);
-      else move(path, button.dataset.act === 'up' ? -1 : 1);
+      const act = button.dataset.act;
+      if (act === 'remove') remove(path);
+      else if (act === 'mode') setBrowse(path, !book.find(path)?.browse);
+      else move(path, act === 'up' ? -1 : 1);
       draw();
     });
     form.addEventListener('submit', event => {

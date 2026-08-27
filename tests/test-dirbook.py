@@ -168,6 +168,22 @@ check("favorites use their own storage key, not the preference schema",
 check("the client never rewrites ~ into a home directory",
       not re.search(r"expanduser|process\.env\.HOME|os\.homedir", dirbook))
 check("saved paths are capped", "MAX_FAVORITES" in dirbook)
+# The project/container split must be STORED, never guessed from the string.
+# Inferring it from a trailing slash was wrong twice: a slash is a typing
+# accident, and the picker appends one to everything it fills in — so saving
+# anything you had browsed to silently marked it a container.
+check("browse intent is stored, not inferred from a trailing slash",
+      "browse: !!options.browse" in dirbook
+      and "function setBrowse(" in dirbook
+      and "function isContainer(" not in dirbook)
+check("normalize strips a trailing slash so one directory is one entry",
+      "collapsed.replace(/\\/+$/, '')" in dirbook)
+check("v1 string entries carry their trailing-slash intent forward",
+      "typeof entry === 'string'" in dirbook)
+check("completion is sent as typed, since the trailing slash is the question",
+      "// Sent as typed, NOT normalized" in dirbook)
+check("picking a project lands, picking a container descends",
+      "const descend = item.kind !== 'saved' || item.browse;" in dirbook)
 check("a 403 stops the client asking again", "completionsDenied" in dirbook)
 check("the picker leaves the input's name alone so FormData still reads it",
       "input.parentNode.insertBefore(wrap, input)" in dirbook
