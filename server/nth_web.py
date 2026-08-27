@@ -4767,9 +4767,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
         """Recent sub-agent starts for one member in the current channel.
 
         ``nth_activity_hook`` records a small, privacy-trimmed tool ring by
-        Claude session fingerprint.  The workspace drawer needs only Task /
-        Agent starts from that ring; returning every tool would expose file
-        basenames and grep patterns to a surface that never renders them.
+        Claude session fingerprint.  Two callers read it, and they want
+        different slices, so ``kind`` selects which:
+
+          * ``subagents`` (the DEFAULT) — Task / Agent starts only.  This is
+            the drawer's "Recent subagents" line, and it stays the default so
+            a caller that names no kind cannot accidentally widen what it
+            renders.
+          * ``all`` — every recorded call, for the per-agent activity panel
+            that exists precisely to answer "what tools is this agent
+            running, and how fast".
+
+        Widening the slice does NOT widen what was captured.  The hook stores
+        a summary and never raw ``tool_input`` (see its privacy contract):
+        Bash keeps a program name, file tools a basename, Glob/Grep a capped
+        pattern, and everything else the bare tool name.  ``all`` therefore
+        exposes file basenames and search patterns to a member of this
+        channel -- which is the same audience that already sees the live
+        ``last_tool_target`` chip on the roster row.
 
         A fingerprint can accumulate several non-revoked session rows when a
         Claude session reconnects.  Only its newest row in this channel owns
@@ -4794,6 +4809,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError, OverflowError):
             limit = 20
         limit = min(max(limit, 1), 50)
+        # Unrecognised kinds fall back to the narrow slice rather than the wide
+        # one: a typo should under-share, never over-share.
+        kind = "all" if (qs.get("kind", [""])[0] or "").strip() == "all" else "subagents"
+        # Keyset pagination.  The ring is ordered by the autoincrement id and
+        # capped per fingerprint, so "older than id N" is both stable under
+        # concurrent inserts and index-served.  Absent/garbage cursor = page 1.
+        try:
+            before = int(qs.get("before", [""])[0])
+        except (TypeError, ValueError, OverflowError):
+            before = 0
 
         db = None
         try:
@@ -4825,9 +4850,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     " FROM tool_events te"
                     " JOIN current_fingerprints cf"
                     "   ON cf.fingerprint=te.fingerprint"
-                    " WHERE te.tool_name IN ('Task','Agent')"
+                    " WHERE (?='all' OR te.tool_name IN ('Task','Agent'))"
+                    "   AND (?=0 OR te.id < ?)"
                     " ORDER BY te.id DESC LIMIT ?",
-                    (channel, member_id, limit),
+                    (channel, member_id, kind, before, before, limit),
                 ).fetchall()
             except sqlite3.OperationalError as exc:
                 # A hook-less / not-yet-migrated install has no ring.  That is
@@ -4846,13 +4872,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
 
-        subagents = [
+        events = [
             {"id": r["id"], "tool_name": r["tool_name"],
              "target": r["target"] or "", "created_at": r["created_at"]}
             for r in rows
         ]
-        self._json({"ok": True, "member_id": member_id,
-                    "count": len(subagents), "subagents": subagents})
+        # `subagents` is the pre-existing key and the drawer still reads it.
+        # `events` is the same list under a name that stays honest once kind=all
+        # can return a Read or a Bash -- calling those "subagents" would be a
+        # lie the next reader of this code would have to decode.
+        payload = {"ok": True, "member_id": member_id, "kind": kind,
+                   "count": len(events), "events": events,
+                   "subagents": events}
+        # Only advertise a cursor when the page came back full.  A short page is
+        # the end of the ring, and offering a cursor there would make the panel
+        # fetch one guaranteed-empty page on every scroll to the bottom.
+        if len(events) == limit:
+            payload["next_before"] = events[-1]["id"]
+        self._json(payload)
 
     def _handle_approvals(self) -> None:
         if self._require_operator() is None or not self._require_agent_control():
@@ -8776,6 +8813,7 @@ WEB_CSS_FILES = (
     "css/10-shell.css",         # sidebar, topbar, drawers, dialogs, toasts
     "css/20-conversation.css",  # message rows, ask cards, attachments
     "css/30-workspace.css",     # home/inbox/tasks/roster/prefs pages
+    "css/33-activity.css",      # per-agent tool activity panel
     "css/35-historic.css",      # Win98/3.1, Game Boy, and GeoCities component skins
     "css/40-responsive.css",    # @media overrides — must stay last
 )
@@ -8792,6 +8830,8 @@ WEB_CSS_FILES = (
 #   09-ui                      toasts, modals, confirmations
 #   10-markdown … 14-lightbox  rendering; read core, api and ui
 #   20-workspace … 46-data     features; read everything above
+#     21-activity              reads ui + api only; 20-workspace calls into it
+#                              at click time, so it may sit either side of 20
 #   90-boot                    runs last; mounts the features
 #
 # THE FILENAME PREFIXES ARE THE ORDER, and that is worth keeping true. This
@@ -8811,7 +8851,8 @@ WEB_JS_FILES = (
     "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
     "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
-    "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
+    "js/14-lightbox.js", "js/20-workspace.js", "js/21-activity.js",
+    "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
     "js/45-notifications.js", "js/46-data.js",
     "js/90-boot.js", "js/99-test-hook.js",
