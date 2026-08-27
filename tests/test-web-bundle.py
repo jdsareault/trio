@@ -158,6 +158,18 @@ check(f"WEB_JS_FILES declares every module on disk, in prefix order "
 # — stated so that renumbering a file to a "tidier" slot cannot quietly break
 # it, and so the sorted-order check above is grounded in why rather than in
 # convention alone.
+# One IIFE per file. CLAUDE.md states this as the rule the load order rests on,
+# and it is what makes the edge table below sufficient: a second IIFE inside a
+# file can read the first at definition time, and that edge is invisible to a
+# list of files — the only place it could be recorded is a comment.
+# Column 0 is what makes this a TOP-LEVEL form; the arrow and function spellings
+# both appear in this tree, so both count.
+_IIFE_OPEN = re.compile(r"^\((?:\(\) =>|function\s*\()", re.MULTILINE)
+for name in web.WEB_JS_FILES:
+    body = (WEB / name).read_text(encoding="utf-8")
+    found = len(_IIFE_OPEN.findall(body))
+    check(f"{name} is exactly one top-level IIFE (found {found})", found == 1)
+
 order = {name: i for i, name in enumerate(web.WEB_JS_FILES)}
 for earlier, later, why in (
     ("js/01-store.js", "js/06-core.js",
@@ -174,6 +186,8 @@ for earlier, later, why in (
      "the data page confirms through Trio.ui"),
     ("js/10-markdown.js", "js/11-conversation.js",
      "the conversation renders message bodies through the markdown module"),
+    ("js/15-dirbook.js", "js/16-dirbook-ui.js",
+     "the picker and Directories page read Trio.dirbook at definition time"),
     ("js/06-core.js", "js/90-boot.js", "boot calls Trio.boot()"),
     ("js/07-lifecycle.js", "js/90-boot.js",
      "boot mounts every feature through Trio.lifecycle"),

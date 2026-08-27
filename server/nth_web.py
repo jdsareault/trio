@@ -9063,7 +9063,8 @@ WEB_CSS_FILES = (
 #   07-lifecycle / 08-sidebar  mount machinery
 #   09-ui                      toasts, modals, confirmations
 #   10-markdown … 14-lightbox  rendering; read core, api and ui
-#   15-dirbook                 saved directories; reads api, ui and events
+#   15-dirbook                 the saved-directory store; reads api + events
+#   16-dirbook-ui              its picker + page; reads 15 at definition time
 #   20-workspace … 46-data     features; read everything above
 #   90-boot                    runs last; mounts the features
 #
@@ -9084,8 +9085,8 @@ WEB_JS_FILES = (
     "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
     "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
-    "js/14-lightbox.js", "js/15-dirbook.js", "js/20-workspace.js",
-    "js/30-agents.js",
+    "js/14-lightbox.js", "js/15-dirbook.js", "js/16-dirbook-ui.js",
+    "js/20-workspace.js", "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
     "js/45-notifications.js", "js/46-data.js",
     "js/90-boot.js", "js/99-test-hook.js",
