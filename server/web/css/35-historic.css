@@ -48,7 +48,10 @@
 :root[data-theme^="historic-"] .target-chip,
 :root[data-theme^="historic-"] .attachment-pill,
 :root[data-theme^="historic-"] .day-separator,
-:root[data-theme^="historic-"] .unread-divider {
+:root[data-theme^="historic-"] .unread-divider,
+:root[data-theme^="historic-"] .dirbook-tag,
+:root[data-theme^="historic-"] .dirbook-kind,
+:root[data-theme^="historic-"] .dirbook-star {
   border-radius: 0;
 }
 
@@ -254,7 +257,9 @@
 :root[data-theme="historic-win98"] .attention-actions button,
 :root[data-theme="historic-win98"] .agent-actions button,
 :root[data-theme="historic-win98"] .task-filters button,
-:root[data-theme="historic-win98"] .agent-filters button {
+:root[data-theme="historic-win98"] .agent-filters button ,
+:root[data-theme="historic-win98"] .dirbook-act,
+:root[data-theme="historic-win98"] .dirbook-kind {
   min-height: 24px;
   padding: 3px 9px;
   border: 2px solid;
@@ -362,7 +367,9 @@
 :root[data-theme="historic-win98"] .search-panel,
 :root[data-theme="historic-win98"] dialog,
 :root[data-theme="historic-win98"] .channel-menu,
-:root[data-theme="historic-win98"] .account-items {
+:root[data-theme="historic-win98"] .account-items,
+:root[data-theme="historic-win98"] .dirbook-pop,
+:root[data-theme="historic-win98"] .ac-pop {
   border: 2px solid;
   border-color: var(--win-hi) var(--win-dark) var(--win-dark) var(--win-hi);
   border-radius: 0;
@@ -462,7 +469,9 @@
 :root[data-theme="historic-gameboy"] .attention-actions button,
 :root[data-theme="historic-gameboy"] .agent-actions button,
 :root[data-theme="historic-gameboy"] .task-filters button,
-:root[data-theme="historic-gameboy"] .agent-filters button {
+:root[data-theme="historic-gameboy"] .agent-filters button ,
+:root[data-theme="historic-gameboy"] .dirbook-act,
+:root[data-theme="historic-gameboy"] .dirbook-kind {
   min-height:30px; padding:5px 10px; border:3px solid #303623; border-radius:0; background:#8b956d; color:#20251a;
   box-shadow:3px 3px 0 #303623; font-weight:700; text-transform:uppercase;
 }
@@ -504,7 +513,9 @@
 :root[data-theme="historic-gameboy"] .search-panel,
 :root[data-theme="historic-gameboy"] dialog,
 :root[data-theme="historic-gameboy"] .channel-menu,
-:root[data-theme="historic-gameboy"] .account-items {
+:root[data-theme="historic-gameboy"] .account-items,
+:root[data-theme="historic-gameboy"] .dirbook-pop,
+:root[data-theme="historic-gameboy"] .ac-pop {
   border:4px solid #303623; border-radius:0; background:#9ca66f; box-shadow:5px 5px 0 #303623;
 }
 :root[data-theme="historic-gameboy"] .pref-group h3,
@@ -763,7 +774,9 @@
 :root[data-theme="historic-geocities"] .attention-actions button,
 :root[data-theme="historic-geocities"] .agent-actions button,
 :root[data-theme="historic-geocities"] .task-filters button,
-:root[data-theme="historic-geocities"] .agent-filters button {
+:root[data-theme="historic-geocities"] .agent-filters button ,
+:root[data-theme="historic-geocities"] .dirbook-act,
+:root[data-theme="historic-geocities"] .dirbook-kind {
   min-height:28px; padding:4px 10px; border:4px outset #ddd; border-radius:0; background:#c0c0c0; color:#000;
   box-shadow:none; font-family:Arial,Helvetica,sans-serif; font-weight:700;
 }
@@ -803,7 +816,9 @@
 :root[data-theme="historic-geocities"] .search-panel,
 :root[data-theme="historic-geocities"] dialog,
 :root[data-theme="historic-geocities"] .channel-menu,
-:root[data-theme="historic-geocities"] .account-items {
+:root[data-theme="historic-geocities"] .account-items,
+:root[data-theme="historic-geocities"] .dirbook-pop,
+:root[data-theme="historic-geocities"] .ac-pop {
   border:6px ridge #0ff; border-radius:0; background:#000066; color:#fff; box-shadow:7px 7px 0 #f0f;
 }
 :root[data-theme="historic-geocities"] .pref-group h3,
@@ -1441,3 +1456,45 @@
 :root[data-theme="inspired-high-tide"] textarea,
 :root[data-theme="inspired-high-tide"] select,
 :root[data-theme="inspired-high-tide"] .pref-select { border:1px solid #88d5ee; border-radius:12px; background:#fff; color:#001e28; box-shadow:inset 0 1px 2px rgba(0,92,128,.07); }
+
+/* Saved-directory picker + the composer's autocomplete: the same popover
+   component, and neither was skinned before. Rows follow each theme's
+   selection grammar — a highlight that stays the modern wash inside a Win98
+   menu is the detail that gives a skin away. */
+:root[data-theme="historic-win98"] .dirbook-opt,
+:root[data-theme="historic-win98"] .ac-opt {
+  border-radius: 0; color: #000; font-size: 13px; padding: 3px 6px;
+}
+:root[data-theme="historic-win98"] .dirbook-opt.hi,
+:root[data-theme="historic-win98"] .ac-opt.hi {
+  background: #000080; color: #fff;
+}
+:root[data-theme="historic-win98"] .dirbook-opt.hi .dirbook-sub,
+:root[data-theme="historic-win98"] .ac-opt.hi .rl { color: #fff; }
+:root[data-theme="historic-win98"] .dirbook-row { border-bottom: 1px solid var(--win-shadow, #808080); }
+:root[data-theme="historic-win98"] .dirbook-hint kbd { border-radius: 0; border: 2px solid; border-color: var(--win-hi) var(--win-dark) var(--win-dark) var(--win-hi); }
+
+:root[data-theme="historic-gameboy"] .dirbook-opt,
+:root[data-theme="historic-gameboy"] .ac-opt {
+  border-radius: 0; color: #303623; padding: 4px 7px;
+}
+:root[data-theme="historic-gameboy"] .dirbook-opt.hi,
+:root[data-theme="historic-gameboy"] .ac-opt.hi { background: #303623; color: #c4cfa1; }
+:root[data-theme="historic-gameboy"] .dirbook-opt.hi .dirbook-sub,
+:root[data-theme="historic-gameboy"] .ac-opt.hi .rl { color: #9ca66f; }
+:root[data-theme="historic-gameboy"] .dirbook-row { border-bottom: 3px solid #303623; }
+:root[data-theme="historic-gameboy"] .dirbook-hint kbd { border-radius: 0; border: 3px solid #303623; background: #c4cfa1; }
+
+:root[data-theme="historic-geocities"] .dirbook-opt,
+:root[data-theme="historic-geocities"] .ac-opt {
+  border-radius: 0; color: #fff; padding: 4px 7px;
+}
+:root[data-theme="historic-geocities"] .dirbook-opt.hi,
+:root[data-theme="historic-geocities"] .ac-opt.hi { background: #800080; color: #ff0; }
+:root[data-theme="historic-geocities"] .dirbook-opt.hi .dirbook-sub,
+:root[data-theme="historic-geocities"] .ac-opt.hi .rl { color: #0ff; }
+:root[data-theme="historic-geocities"] .dirbook-row { border-bottom: 4px ridge #0ff; }
+:root[data-theme="historic-geocities"] .dirbook-tag { background: #000066; color: #0ff; }
+:root[data-theme="historic-geocities"] .dirbook-hint kbd { border-radius: 0; border: 3px ridge #ff0; background: #000; color: #0ff; }
+:root[data-theme="historic-geocities"] .dirbook-section h3,
+:root[data-theme="historic-geocities"] .dirbook-hint { color: #0ff; }

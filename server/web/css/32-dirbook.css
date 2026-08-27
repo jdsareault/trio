@@ -1,5 +1,10 @@
 /* ============================================================
    nth — saved directories (dirbook)
+   Radii and shadows come from the token scale, never literals, so the
+   eight novelty themes — which each redefine --r-* — reshape this
+   component for free. The three historic-* themes replace the component
+   GRAMMAR (border style, hard shadows, selection colour) rather than just
+   the tokens, so they skin it explicitly in 35-historic.css.
    Two surfaces: the picker that wraps any working-directory input,
    and the Directories page that curates the saved list.
    ============================================================ */
@@ -29,13 +34,13 @@
 .dirbook-pop{
   position:absolute; top:calc(100% + 6px); left:0; width:100%; z-index:40;
   background:var(--surface-2); border:1px solid var(--line);
-  border-radius:14px; box-shadow:var(--shadow-lg);
+  border-radius:var(--r-md); box-shadow:var(--shadow-lg);
   padding:6px; max-height:260px; overflow-y:auto;
 }
 .dirbook-pop[hidden]{ display:none; }
 .dirbook-opt{
   display:flex; align-items:center; gap:8px; width:100%;
-  padding:7px 9px; border-radius:10px; text-align:left;
+  padding:7px 9px; border-radius:var(--r-xs); text-align:left;
 }
 /* No :hover rule. The pointer and the keyboard drive the SAME `.hi` class
    (see attachPathInput's highlight()), so there is never a hovered row and a
@@ -72,7 +77,7 @@
 .workspace-view .dirbook-hint kbd{
   display:inline-block; padding:0 4px; margin:0 1px; min-width:16px; text-align:center;
   font-family:var(--font-mono, ui-monospace, monospace); font-size:11px;
-  border:1px solid var(--line); border-radius:4px; background:var(--surface-2);
+  border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface-2);
 }
 
 .workspace-view .dirbook-section{ margin-bottom:22px; }
