@@ -74,3 +74,19 @@
 .dirbook-add{ display:flex; gap:var(--sp-2); align-items:center; }
 .dirbook-add .dirbook-field{ flex:1; }
 .dirbook-add button{ flex:none; }
+
+/* ── the Directories page ────────────────────────────────── */
+.dirbook-group kbd{
+  display:inline-block; padding:0 4px; margin:0 1px; min-width:16px; text-align:center;
+  font-family:var(--font-mono, ui-monospace, monospace); font-size:11px;
+  border:1px solid var(--line); border-radius:4px; background:var(--surface-2);
+}
+.dirbook-tag{
+  flex:none; font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+  padding:2px 6px; border-radius:var(--r-full);
+  background:var(--surface-hover); color:var(--ink-3);
+}
+.dirbook-tag.warn{ color:var(--danger); background:color-mix(in oklab, var(--danger) 12%, transparent); }
+/* A saved path with nothing behind it still reads clearly — it is stale, not
+   broken, and the operator may well want to fix rather than delete it. */
+.dirbook-row.gone .dirbook-name{ text-decoration:line-through; color:var(--ink-3); }

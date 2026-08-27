@@ -189,6 +189,20 @@ check("both new layers reach the served page",
 agents = (WEB / "js" / "30-agents.js").read_text(encoding="utf-8")
 check("both working-directory inputs get the picker",
       agents.count("Trio.dirbook?.attachPathInput?.(") == 2)
+# The page is reachable, or it does not exist as far as anyone can tell.
+workspace = (WEB / "js" / "20-workspace.js").read_text(encoding="utf-8")
+router = (WEB / "js" / "03-router.js").read_text(encoding="utf-8")
+check("the Directories page renders through the workspace shell",
+      "Trio.dirbook?.renderPage?.(panel)" in workspace)
+check("the Directories page has a nav entry",
+      "label: 'Directories'" in workspace)
+check("the nav entry sits between Preferences and Archive",
+      workspace.index("label: 'Preferences'")
+      < workspace.index("label: 'Directories'")
+      < workspace.index("label: 'Archive'"))
+check("the Directories page has a URL", "dirs: '/directories'" in router)
+check("navigateView knows the route", "dirs: 'dirs'" in workspace)
+
 # Two bugs that only ever appear under a live pointer, so they are pinned here.
 check("a late completion cannot reopen a dismissed dropdown",
       "if (!items.length || !focused()) { close(); return; }" in dirbook
@@ -200,10 +214,6 @@ check("pointer and keyboard share one highlight",
 css = (WEB / "css" / "32-dirbook.css").read_text(encoding="utf-8")
 check("no :hover rule competes with the keyboard highlight",
       ".dirbook-opt:hover" not in css)
-
-prefs = (WEB / "js" / "40-preferences.js").read_text(encoding="utf-8")
-check("settings hosts the saved-directory editor",
-      "Trio.dirbook?.renderSettingsSection?.(panel)" in prefs)
 
 print()
 if failures:

@@ -24,6 +24,7 @@
     tasks: '/tasks',
     roster: '/agents',
     prefs: '/settings',
+    dirs: '/directories',
     archive: '/archive',
     data: '/data',
   };

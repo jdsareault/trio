@@ -46,9 +46,19 @@ check('open sets aria-expanded and reveals the items', () => {
   assert.strictEqual(trigger.getAttribute('aria-expanded'), 'true');
   assert.strictEqual(items.hasAttribute('inert'), false, 'items become interactive');
   assert.strictEqual(items.getAttribute('aria-hidden'), 'false');
-  // Trio.data is loaded in the harness, so the gated Data item is present.
-  const expected = Trio.data && Trio.data.renderPage ? 3 : 2;
-  assert.strictEqual(items.querySelectorAll('.account-item').length, expected);
+  // Two entries are gated on their owning module having loaded — Data
+  // (Trio.data) and Directories (Trio.dirbook). Both are present in the
+  // harness, so count what is actually gated rather than a bare number that
+  // has to be edited every time the menu grows.
+  const gated = [Trio.data && Trio.data.renderPage, Trio.dirbook && Trio.dirbook.renderPage];
+  const expected = 2 + gated.filter(Boolean).length;
+  const entries = [...items.querySelectorAll('.account-item')];
+  assert.strictEqual(entries.length, expected);
+  // Order is the thing a person actually sees, and it is what a careless
+  // insertion breaks. Settings first, then Directories, then Archive.
+  assert.deepStrictEqual(
+    entries.map(el => el.getAttribute('data-view')).filter(v => ['prefs', 'dirs', 'archive'].includes(v)),
+    ['prefs', 'dirs', 'archive']);
 });
 
 check('re-click closes via synchronous aria-expanded, not the deferred .open (Sauron)', () => {

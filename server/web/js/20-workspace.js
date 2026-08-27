@@ -402,6 +402,7 @@
       roster: '<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M16 6a3 3 0 0 1 0 6M21 20a5 5 0 0 0-4-4.9"/>',
       archive: '<path d="M3 8h18v3H3z"/><path d="M5 11v9h14v-9"/><path d="M10 15h4"/>',
       database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+      folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
       x: '<path d="M18 6 6 18M6 6l12 12"/>',
       settings: '<circle cx="12" cy="12" r="3"/><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/>'
@@ -547,7 +548,7 @@
   }
   function navigateView(view) {
     Trio.nav?.close?.();
-    const route = { home: 'home', attention: 'attention', messages: 'messages', tasks: 'tasks', roster: 'roster', prefs: 'prefs', archive: 'archive', data: 'data' }[view] || 'home';
+    const route = { home: 'home', attention: 'attention', messages: 'messages', tasks: 'tasks', roster: 'roster', prefs: 'prefs', dirs: 'dirs', archive: 'archive', data: 'data' }[view] || 'home';
     if (Trio.router?.navigate) Trio.router.navigate(route);
     else showView(view);
   }
@@ -1263,6 +1264,9 @@
     else if (view === 'messages') { renderMessages(panel); }
     else if (view === 'roster') { Trio.agents?.renderPage?.(panel); }
     else if (view === 'prefs') { Trio.preferences?.renderPage?.(panel); }
+    // Directories page is owned by js/15-dirbook.js, the same module that
+    // supplies the picker on every working-directory field.
+    else if (view === 'dirs') { Trio.dirbook?.renderPage?.(panel); }
     else if (view === 'archive') { renderArchive(panel); }
     // Data page is owned by a sibling module (js/45-data.js → Trio.data). The
     // hook keeps this shell decoupled from the storage/prune implementation.
@@ -1502,6 +1506,10 @@
     if (trigger?.getAttribute('aria-expanded') === 'true') { closeAccountMenu(); return; }
     const list = [
       { view: 'prefs', icon: 'settings', label: 'Preferences' },
+      // Only offer Directories once its module is loaded, for the same reason
+      // Data is conditional below: a menu entry pointing at a page that cannot
+      // render is worse than no entry.
+      ...(Trio.dirbook?.renderPage ? [{ view: 'dirs', icon: 'folder', label: 'Directories' }] : []),
       { view: 'archive', icon: 'archive', label: 'Archive' },
       // Data page ships in a sibling module (Trio.data). Only offer it once that
       // module is loaded, so the menu never points at a not-yet-available page.
@@ -1572,6 +1580,7 @@
     else if (route.name === 'tasks') showView('tasks');
     else if (route.name === 'roster') showView('roster');
     else if (route.name === 'prefs') showView('prefs');
+    else if (route.name === 'dirs') showView('dirs');
     else if (route.name === 'archive') showView('archive');
     else if (route.name === 'data') showView('data');
   }

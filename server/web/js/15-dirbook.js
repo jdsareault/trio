@@ -121,6 +121,7 @@
   'use strict';
   const Trio = window.Trio;
   const book = Trio.dirbook;
+  const { list, add, remove, move, isContainer } = book;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const COMPLETE_DEBOUNCE_MS = 120;
 
@@ -310,60 +311,98 @@
     };
   }
 
-  // ── Settings > Saved directories ─────────────────────────────────────────
-  function renderSettingsSection(panel) {
-    const section = document.createElement('section');
-    section.className = 'pref-group dirbook-group';
-    section.innerHTML = '<h3>Saved directories</h3>'
-      + '<p class="pref-note">Working directories offered when you spawn or reconfigure an agent. '
-      + 'End a path with <code>/</code> to save a container you browse into — <code>~/Development/</code> '
-      + 'offers everything inside it.</p>';
-    const listEl = document.createElement('ul');
-    listEl.className = 'dirbook-list';
+  // ── the Directories page ─────────────────────────────────────────────────
+  // A page rather than a row in Settings: this is a working list the operator
+  // curates and browses, not a switch they flip once. Having its own surface
+  // buys room for the things a settings row cannot show — what each entry is
+  // for, and whether it still exists on disk.
+  function renderPage(panel) {
+    panel.replaceChildren();
+    const hero = document.createElement('div');
+    hero.className = 'view-hero';
+    hero.innerHTML = '<h2>Directories</h2><p>The working directories you spawn agents into. '
+      + 'Saved here, they are offered wherever a working directory is asked for.</p>';
+
+    const addGroup = document.createElement('section');
+    addGroup.className = 'pref-group dirbook-group';
+    addGroup.innerHTML = '<h3>Add a directory</h3>'
+      + '<p class="pref-note">Type a path to browse it — subdirectories appear as you go, '
+      + '<kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, <kbd>Enter</kbd> to step in. '
+      + 'End a path with <code>/</code> to save a <strong>container</strong>: picking it later '
+      + 'offers everything inside, so <code>~/Development/</code> covers every project at once.</p>';
     const form = document.createElement('form');
     form.className = 'dirbook-add';
     form.innerHTML = '<input name="path" placeholder="~/Development/ or ~/Development/trio" aria-label="Directory to save">'
       + '<button type="submit" class="btn">Save</button>';
     const input = form.querySelector('input');
+    addGroup.append(form);
 
+    const listGroup = document.createElement('section');
+    listGroup.className = 'pref-group dirbook-group';
+    listGroup.innerHTML = '<h3>Saved</h3>';
+    const listEl = document.createElement('ul');
+    listEl.className = 'dirbook-list';
+    listGroup.append(listEl);
+
+    // Paths rot: a project gets renamed or moved and the saved entry silently
+    // stops working, which you would otherwise only discover when an agent
+    // fails to start. /api/path/validate already answers this, so the page
+    // says so up front. A guest gets a 403 and simply no badges.
+    let missing = new Set();
+    async function checkExistence() {
+      const paths = list();
+      if (!paths.length) return;
+      try {
+        const data = await Trio.api.post('/api/path/validate', { paths }, false);
+        missing = new Set(paths.filter(path => data?.exists?.[path] === false));
+      } catch { missing = new Set(); }
+      draw();
+    }
     function draw() {
-      const favorites = book.list();
+      const favorites = list();
       if (!favorites.length) {
-        listEl.innerHTML = '<li class="dirbook-empty">Nothing saved yet.</li>';
+        listEl.innerHTML = '<li class="dirbook-empty">Nothing saved yet. Add one above, '
+          + 'or use the &#9733; beside any working-directory field.</li>';
         return;
       }
-      listEl.innerHTML = favorites.map((path, i) => `<li class="dirbook-row" data-path="${esc(path)}">`
-        + `<span class="dirbook-icon">${book.isContainer(path) ? '📂' : '📁'}</span>`
-        + `<span class="dirbook-name">${esc(path)}</span>`
-        + `<span class="dirbook-actions">`
-        + `<button type="button" class="dirbook-act" data-act="up" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(path)} up">↑</button>`
-        + `<button type="button" class="dirbook-act" data-act="down" ${i === favorites.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(path)} down">↓</button>`
-        + `<button type="button" class="dirbook-act danger" data-act="remove" aria-label="Remove ${esc(path)}">✕</button>`
-        + `</span></li>`).join('');
+      listEl.innerHTML = favorites.map((path, i) => {
+        const container = isContainer(path);
+        const gone = missing.has(path);
+        return `<li class="dirbook-row${gone ? ' gone' : ''}" data-path="${esc(path)}">`
+          + `<span class="dirbook-icon">${container ? '\u{1F4C2}' : '\u{1F4C1}'}</span>`
+          + `<span class="dirbook-name">${esc(path)}</span>`
+          + `<span class="dirbook-tag">${container ? 'container' : 'project'}</span>`
+          + (gone ? '<span class="dirbook-tag warn" title="No directory at this path right now">missing</span>' : '')
+          + `<span class="dirbook-actions">`
+          + `<button type="button" class="dirbook-act" data-act="up" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(path)} up">&uarr;</button>`
+          + `<button type="button" class="dirbook-act" data-act="down" ${i === favorites.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(path)} down">&darr;</button>`
+          + `<button type="button" class="dirbook-act danger" data-act="remove" aria-label="Remove ${esc(path)}">&#10005;</button>`
+          + `</span></li>`;
+      }).join('');
     }
     listEl.addEventListener('click', event => {
       const button = event.target.closest('.dirbook-act');
       if (!button) return;
       const path = button.closest('.dirbook-row')?.dataset.path;
       if (!path) return;
-      if (button.dataset.act === 'remove') book.remove(path);
-      else book.move(path, button.dataset.act === 'up' ? -1 : 1);
+      if (button.dataset.act === 'remove') remove(path);
+      else move(path, button.dataset.act === 'up' ? -1 : 1);
       draw();
     });
     form.addEventListener('submit', event => {
       event.preventDefault();
-      const result = book.add(input.value);
+      const result = add(input.value);
       if (!result.ok) { Trio.ui?.toast?.(result.error); return; }
       input.value = '';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
       draw();
+      checkExistence();
     });
     draw();
-    section.append(listEl, form);
-    panel.append(section);
+    panel.append(hero, addGroup, listGroup);
     attachPathInput(input);
-    return section;
+    checkExistence();
+    return panel;
   }
 
-  Object.assign(Trio.dirbook, { attachPathInput, renderSettingsSection });
+  Object.assign(Trio.dirbook, { attachPathInput, renderPage });
 })();
