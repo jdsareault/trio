@@ -3871,6 +3871,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_member_filter(parsed)
         elif parsed.path == "/api/path/validate":
             self._handle_path_validate()
+        elif parsed.path == "/api/path/complete":
+            self._handle_path_complete()
         elif parsed.path == "/api/reveal":
             self._handle_reveal()
         elif parsed.path == "/api/upload":
@@ -8304,6 +8306,92 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 continue
             exists[cand] = self._resolve_existing(cand) is not None
         self._json({"exists": exists})
+
+    _PATH_COMPLETE_CAP = 40           # max child directories per completion
+
+    def _handle_path_complete(self) -> None:
+        """POST /api/path/complete — body {"prefix": "~/Dev"}. Returns
+        {"dirs": [{"path", "name", "parent"}], "truncated": bool}: the child
+        DIRECTORIES of the prefix's parent whose names extend it.
+
+        This is what makes a saved container ("~/Development/") worth saving —
+        the browser has no filesystem, so only the hub can say what is inside
+        one. Directories only: the operator is choosing a working directory,
+        and listing files would leak strictly more than the question needs.
+
+        Paths come back in the SHAPE they were asked for. A prefix written with
+        a leading ~ gets ~-form answers, because that is what the operator
+        typed, what gets saved, and what stays correct if $HOME ever moves —
+        expanding it here would silently freeze this hub's home directory into
+        the saved list."""
+        # Same trust tier as /api/path/validate and /api/reveal: this answers
+        # questions about the operator's own disk, and the server can bind
+        # 0.0.0.0 under --tailnet, where ungated would mean any reachable peer
+        # could walk the filesystem a directory at a time.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can inspect local paths")
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        prefix = body.get("prefix")
+        if not isinstance(prefix, str) or not prefix or len(prefix) > self._PATH_MAX_LEN:
+            self._json({"dirs": [], "truncated": False})
+            return
+        # A relative prefix has no agreed meaning here for the same reason
+        # _expand_path refuses one: it would resolve against wherever the
+        # dashboard process happened to be started, not against anything the
+        # operator can see. Answer nothing rather than answer about the wrong
+        # directory.
+        tilde = prefix.startswith("~")
+        if not (tilde or prefix.startswith("/")):
+            self._json({"dirs": [], "truncated": False})
+            return
+        # "~/Development/" means list that directory; "~/Development/tr" means
+        # list its parent and keep the names starting with "tr".
+        if prefix.endswith("/"):
+            parent_raw, needle = prefix, ""
+        else:
+            parent_raw, _, needle = prefix.rpartition("/")
+            parent_raw = parent_raw + "/"
+        parent = self._expand_path(parent_raw)
+        if not parent:
+            self._json({"dirs": [], "truncated": False})
+            return
+        try:
+            entries = sorted(os.scandir(parent), key=lambda e: e.name.lower())
+        except (OSError, ValueError):
+            # Missing, unreadable, or not a directory. All three are ordinary
+            # states while someone is still typing, so they are an empty list,
+            # not an error the UI has to explain.
+            self._json({"dirs": [], "truncated": False})
+            return
+        # Hidden directories stay hidden until the operator asks for one by
+        # typing the dot — .git and friends are noise in a project picker.
+        want_hidden = needle.startswith(".")
+        needle_cf = needle.lower()
+        dirs = []
+        truncated = False
+        for entry in entries:
+            name = entry.name
+            if not want_hidden and name.startswith("."):
+                continue
+            if needle_cf and not name.lower().startswith(needle_cf):
+                continue
+            try:
+                if not entry.is_dir():        # follows symlinks: a link to a dir is a dir
+                    continue
+            except OSError:
+                continue
+            if len(dirs) >= self._PATH_COMPLETE_CAP:
+                truncated = True
+                break
+            dirs.append({"path": parent_raw + name, "name": name, "parent": parent_raw})
+        self._json({"dirs": dirs, "truncated": truncated})
 
     @staticmethod
     def _reveal_linux_dbus(abspath: str):
