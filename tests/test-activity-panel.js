@@ -37,7 +37,7 @@ const cx = baseContext();
 let failures = 0;
 function check(name, cond) { console.log((cond ? 'PASS: ' : 'FAIL: ') + name); if (!cond) failures++; }
 const { Trio } = cx;
-const { callText, gapLabel, clockOf, listHtml, parseAt } = Trio.activity;
+const { callText, gapLabel, clockOf, listHtml, parseAt, anyDetail } = Trio.activity;
 const { detailMember } = Trio.workspace;
 
 // --- the avatar is the trigger --------------------------------------------
@@ -125,6 +125,26 @@ check('a hostile target is escaped',
     .includes('&lt;img src=x') === true);
 check('a row with a broken timestamp still renders, with a dash for the time',
   listHtml([{ id: 1, tool_name: 'Bash', target: 'git', created_at: 'nonsense' }]).includes('—'));
+
+// --- the opt-in redacted long form ---------------------------------------
+// With NTH_CAPTURE_TOOL_INPUT=1 rows carry `detail`: the arguments, redacted.
+// It is strictly more specific than the summary, so it wins.
+check('a redacted long form is preferred over the summary',
+  callText({ tool_name: 'Bash', target: 'curl', detail: 'curl https://x.dev?api_key=[redacted]' })
+    === 'Bash · curl https://x.dev?api_key=[redacted]');
+check('a row with no long form still falls back to the summary',
+  callText({ tool_name: 'Bash', target: 'git', detail: '' }) === 'Bash · git');
+// The redaction marker is literal text from the server, not markup.
+check('a long form is escaped like any other untrusted string',
+  listHtml([{ id: 1, tool_name: 'Bash', detail: 'curl "<script>x</script>"', created_at: iso(t0) }])
+    .includes('&lt;script&gt;'));
+// The two footnotes make different promises — "the arguments are not here" vs
+// "a secret may have slipped through" — so the panel has to pick by what is
+// actually on screen, including a page that only just gained its first row.
+check('any row with a long form flips the panel to the redaction caveat',
+  anyDetail([{ id: 1 }, { id: 2, detail: 'x' }]) === true);
+check('a page of summaries keeps the not-recorded caveat',
+  anyDetail([{ id: 1 }, { id: 2, detail: '' }]) === false && anyDetail([]) === false);
 
 console.log();
 console.log((failures ? 'FAILED' : 'OK') + ` — ${failures} failure(s)`);

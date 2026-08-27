@@ -597,6 +597,7 @@ def get_db() -> sqlite3.Connection:
             fingerprint TEXT NOT NULL,
             tool_name   TEXT NOT NULL DEFAULT '',
             target      TEXT NOT NULL DEFAULT '',
+            detail      TEXT NOT NULL DEFAULT '',
             created_at  TEXT NOT NULL
         )
     """)
@@ -620,7 +621,14 @@ def get_db() -> sqlite3.Connection:
     # is never stamped, so the roster reports a working agent as idle forever.
     # Fresh installs got the canonical table from the CREATE above and were
     # unaffected, which is why this only ever reproduced after an upgrade.
-    _TE_CANON = ("id", "fingerprint", "tool_name", "target", "created_at")
+    # `detail` (the opt-in redacted long form, written only when the activity
+    # hook runs with NTH_CAPTURE_TOOL_INPUT=1) is part of the canonical shape
+    # even on installs that never enable capture -- the column exists and stays
+    # empty. It MUST be listed here: this tuple is what the rebuild below
+    # compares against, so omitting a real column would make every install read
+    # as non-canonical and rebuild the table on every single get_db().
+    _TE_CANON = ("id", "fingerprint", "tool_name", "target", "detail",
+                 "created_at")
     _te_cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_events)")}
     if _te_cols and _te_cols != set(_TE_CANON):
         # Carry the fingerprint across from whichever column held it. Both may
@@ -641,10 +649,15 @@ def get_db() -> sqlite3.Connection:
                     fingerprint TEXT NOT NULL,
                     tool_name   TEXT NOT NULL DEFAULT '',
                     target      TEXT NOT NULL DEFAULT '',
+                    detail      TEXT NOT NULL DEFAULT '',
                     created_at  TEXT NOT NULL
                 )
             """)
-            _te_carry = [c for c in ("id", "tool_name", "target", "created_at")
+            # Carry only the columns the OLD table actually has -- an install
+            # predating `detail` has rows worth keeping, and they simply arrive
+            # with the column's default.
+            _te_carry = [c for c in ("id", "tool_name", "target", "detail",
+                                     "created_at")
                          if c in _te_cols]
             conn.execute(
                 "INSERT INTO tool_events_rebuild "

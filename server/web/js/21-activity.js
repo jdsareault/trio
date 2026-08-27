@@ -20,6 +20,13 @@
 // row reading `Bash · gh` must not be mistaken for the whole command line —
 // silently presenting a summary as if it were the full call would make the
 // panel actively misleading about the one thing it exists to show.
+//
+// With NTH_CAPTURE_TOOL_INPUT=1 the hook additionally stores `detail`: the
+// arguments, run through a best-effort redactor. When a row has one we render
+// it instead of the summary, and the footnote changes to match — because the
+// honest caveat for a redacted line ("a secret may have slipped through") is a
+// different caveat from the one for a summary ("the arguments are not here"),
+// and showing the wrong one is its own way of misleading.
 (() => {
   'use strict';
   const Trio = window.Trio;
@@ -90,8 +97,15 @@
   // than shown empty when the hook stored nothing for it.
   function callText(ev) {
     const name = ev.tool_name || 'tool';
-    return ev.target ? `${name} · ${ev.target}` : name;
+    // The redacted long form wins when present: it is strictly more specific
+    // than the summary, which is a truncation of the same call.
+    const arg = ev.detail || ev.target;
+    return arg ? `${name} · ${arg}` : name;
   }
+  // True once any row on screen carries a redacted long form. Drives which
+  // footnote the panel shows; a mixed page (capture switched on mid-session)
+  // gets the redaction caveat, which is the one that can actually bite.
+  function anyDetail(events) { return events.some(e => e && e.detail); }
   function rowHtml(ev, prevOlder) {
     // Events arrive newest-first, so the gap for row i is measured against
     // i+1 — the call that came BEFORE it.
@@ -121,8 +135,11 @@
       + `<span class="act-live" id="act-live">live</span></div>`
       + `<div class="act-list" id="act-list">${listHtml(st.events)}</div>${more}`
       // Not a disclaimer for its own sake: without it a reader takes `Bash · gh`
-      // for the whole command. Say what the row is.
-      + `<p class="act-note">Arguments are not recorded. The hook stores a privacy-trimmed summary — a program name for Bash, a filename for file tools — never the full input.</p>`
+      // for the whole command, or takes a redacted line for a scrubbed-clean
+      // one. Say which of the two this page is.
+      + `<p class="act-note">${anyDetail(st.events)
+          ? 'Arguments are shown with secrets redacted, best effort. Redaction is pattern-based — a credential with no recognisable key, flag or marker can slip through.'
+          : 'Arguments are not recorded. The hook stores a privacy-trimmed summary — a program name for Bash, a filename for file tools — never the full input. Set <code>NTH_CAPTURE_TOOL_INPUT=1</code> to capture redacted arguments.'}</p>`
       + `</div>`;
   }
 
@@ -141,6 +158,10 @@
     if (list) list.innerHTML = listHtml(open.events);
     const count = document.getElementById('act-count');
     if (count) count.textContent = `${open.events.length} call${open.events.length === 1 ? '' : 's'}`;
+    const note = document.querySelector('.act-panel .act-note');
+    if (note && anyDetail(open.events)) {
+      note.textContent = 'Arguments are shown with secrets redacted, best effort. Redaction is pattern-based — a credential with no recognisable key, flag or marker can slip through.';
+    }
     const more = document.getElementById('act-more');
     // The button is only ever removed, never re-added: paging goes one way, so
     // once the ring is exhausted there is nothing to restore it for.
@@ -228,5 +249,5 @@
     open.tick = setInterval(pollNew, TICK_MS);
   }
 
-  Trio.activity = { open: openFor, callText, gapLabel, clockOf, listHtml, parseAt };
+  Trio.activity = { open: openFor, callText, gapLabel, clockOf, listHtml, parseAt, anyDetail };
 })();

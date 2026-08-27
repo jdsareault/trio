@@ -63,14 +63,18 @@ try:
 
     db = srv.get_db()
     now = srv.now_iso()
+    # `detail` is the opt-in redacted long form. Populated here on the Bash-like
+    # row only, so the tests can tell "absent because the slice hides it" from
+    # "absent because the row has none".
     db.executemany(
-        "INSERT INTO tool_events (fingerprint,tool_name,target,created_at) VALUES (?,?,?,?)",
+        "INSERT INTO tool_events (fingerprint,tool_name,target,detail,created_at) "
+        "VALUES (?,?,?,?,?)",
         [
-            ("fp-shared", "Task", "review auth", now),
-            ("fp-shared", "Read", "secrets.txt", now),
-            ("fp-shared", "Agent", "sauron", now),
-            ("fp-other", "Agent", "wrong channel", now),
-            ("fp-orphan", "Agent", "no session", now),
+            ("fp-shared", "Task", "review auth", "", now),
+            ("fp-shared", "Read", "secrets.txt", "/etc/secrets.txt", now),
+            ("fp-shared", "Agent", "sauron", "", now),
+            ("fp-other", "Agent", "wrong channel", "", now),
+            ("fp-orphan", "Agent", "no session", "", now),
         ],
     )
     db.commit()
@@ -127,6 +131,19 @@ try:
     check("an unrecognised kind under-shares rather than over-shares",
           data.get("kind") == "subagents" and data.get("count") == 2
           and all("secrets.txt" not in str(r) for r in data.get("events", [])))
+
+    # ── the redacted long form ────────────────────────────────────────────
+    st, wide = http(port, f"/api/tools?channel=tools&member={current['member_id']}&kind=all")
+    detailed = [r for r in wide["events"] if r["tool_name"] == "Read"]
+    check("kind=all carries the long form when a row has one",
+          st == 200 and len(detailed) == 1 and detailed[0].get("detail") == "/etc/secrets.txt")
+    check("a row without a long form omits the key rather than sending an empty one",
+          all("detail" not in r for r in wide["events"] if r["tool_name"] != "Read"))
+    # The subagent drawer never renders it, so it must not receive it: a field a
+    # caller cannot show is a field that only widens what a response discloses.
+    st, narrow = http(port, f"/api/tools?channel=tools&member={current['member_id']}")
+    check("the narrow subagent slice never carries the long form",
+          all("detail" not in r for r in narrow.get("events", [])))
 
     # ── keyset pagination ─────────────────────────────────────────────────
     st, page1 = http(port, f"/api/tools?channel=tools&member={current['member_id']}&kind=all&limit=2")

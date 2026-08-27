@@ -4846,7 +4846,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "     ORDER BY s2.connected_at DESC, s2.session_token DESC"
                     "     LIMIT 1)"
                     ")"
-                    " SELECT te.id, te.tool_name, te.target, te.created_at"
+                    " SELECT te.id, te.tool_name, te.target,"
+                    "        COALESCE(te.detail,'') AS detail, te.created_at"
                     " FROM tool_events te"
                     " JOIN current_fingerprints cf"
                     "   ON cf.fingerprint=te.fingerprint"
@@ -4872,9 +4873,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
 
+        # `detail` is empty unless the activity hook ran with
+        # NTH_CAPTURE_TOOL_INPUT=1, and it is only ever the REDACTED long form
+        # -- the hook has no path that stores a raw tool_input.  It is served
+        # only for kind=all: the subagent drawer has no use for it, and a field
+        # a caller does not render is a field it should not receive.
         events = [
             {"id": r["id"], "tool_name": r["tool_name"],
-             "target": r["target"] or "", "created_at": r["created_at"]}
+             "target": r["target"] or "", "created_at": r["created_at"],
+             **({"detail": r["detail"]} if kind == "all" and r["detail"] else {})}
             for r in rows
         ]
         # `subagents` is the pre-existing key and the drawer still reads it.

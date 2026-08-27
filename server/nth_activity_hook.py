@@ -112,6 +112,7 @@ CLAUDE_CODE_SESSION_ID stored in sessions.fingerprint, so we update
 WHERE fingerprint = session_id.
 """
 import json
+import math
 import os
 import re
 import shlex
@@ -139,6 +140,242 @@ _PROGRAM_NAME_RE = re.compile(r"^[A-Za-z0-9._+-]+$")
 # fragment of the substituted command. There is no safe summary of a command
 # whose real program is computed at runtime, so we store nothing.
 _SHELL_SUBSTITUTION = ("$(", "`", "${", "<(", ">(")
+
+# ── Opt-in full-input capture (NTH_CAPTURE_TOOL_INPUT=1) ──────────────────────
+#
+# OFF by default, and it must stay that way: turning it on reverses the privacy
+# contract above, so it has to be a decision someone made rather than something
+# an upgrade hands them. When on, `tool_events.detail` gains a REDACTED
+# rendering of the actual arguments, because the summary alone cannot answer
+# "what is this agent doing" -- `Bash · git` does not distinguish `git log`
+# from `git push --force`.
+#
+# Why redaction and not a classifier
+# ----------------------------------
+# Fine-tuned LLMs reach F1 ~0.985 at secret detection, and none of that is
+# reachable from here. This runs on PreToolUse, on the critical path of EVERY
+# tool call, against a 50ms budget (see HOOK_DB_TIMEOUT_S and the performance
+# contract above). Model load alone exceeds it by orders of magnitude; even
+# importing numpy would. So: regex and entropy, no dependencies, microseconds.
+#
+# The error budget also points the other way from the usual benchmark. Those
+# F1 numbers optimise FALSE POSITIVES. Here a false positive costs a little
+# readability (`curl [redacted]`) while a false negative writes a live
+# credential to a shared plaintext file that every local agent can read, where
+# it survives the session that made it. So every rule below is tuned for
+# RECALL, and over-redaction is the intended failure direction.
+#
+# This is best-effort and the UI says so. It is a deny-list, which the module
+# docstring above correctly calls a losing game -- the difference is that here
+# a miss degrades an optional field rather than widening the default capture.
+# Known blind spot: a secret passed as a bare positional argument
+# (`deploy-tool sk_live_x`) has no key, flag or marker to match on, and is
+# caught only if it trips the entropy gate.
+_CAPTURE_TOOL_INPUT = os.environ.get("NTH_CAPTURE_TOOL_INPUT", "") == "1"
+
+_DETAIL_MAX = 400            # a command line, not a file
+# How much input the redactor will even look at. The stored value is capped at
+# _DETAIL_MAX anyway, so scanning a 100KB heredoc to throw away 99.6% of it is
+# pure critical-path cost. The window is cut back to a whitespace boundary so
+# no token straddles it: a secret split across the cut would otherwise have its
+# prefix stored as ordinary text, unmatched by every rule.
+_DETAIL_SCAN_MAX = 2000
+_REDACTED = "[redacted]"
+
+# Stage 1 — known credential shapes. Near-100% precision: these prefixes do not
+# occur by accident, so matching them on sight costs nothing in false positives.
+_SECRET_MARKER_RE = re.compile(r"""(
+      sk-[A-Za-z0-9_-]{16,}                                        # OpenAI-style
+    | gh[pousr]_[A-Za-z0-9]{16,}                                   # GitHub
+    | github_pat_[A-Za-z0-9_]{20,}
+    | (?:AKIA|ASIA)[A-Z0-9]{12,}                                   # AWS key id
+    | xox[abposr]-[A-Za-z0-9-]{10,}                                # Slack
+    | xapp-[A-Za-z0-9-]{10,}
+    | AIza[A-Za-z0-9_-]{30,}                                       # Google API
+    | ya29\.[A-Za-z0-9_.\-]{20,}                                   # Google OAuth
+    | eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}    # JWT
+    | -----BEGIN[A-Z ]*PRIVATE[ ]KEY-----
+)""", re.X)
+
+# Stage 1b — credentials inline in a URL authority (`scheme://user:pass@host`).
+# Caught separately because this shape defeats every other stage: there is no
+# key name, no flag, and a human-chosen password is usually too short and too
+# word-like to trip the entropy gate. Connection strings are exactly where it
+# shows up.
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)([^\s:/@]+):([^\s/@]+)@")
+
+# Stage 2 — key names whose VALUE is sensitive, wherever the pair appears:
+# a shell env assignment, a URL query parameter, a header. Substring match on
+# purpose (`api_key`, `X-Auth-Token`, `db_password` all hit).
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(pass|pwd|secret|token|key|auth|credential|cred|cookie|session|"
+    r"bearer|signature|sig|salt|private|access)")
+# `KEY=value` / `KEY: value` / `KEY value` inside a quoted header string.
+#
+# BOTH quantifiers are bounded, and that is a correctness property rather than
+# tidiness. Unbounded, the key prefix matched greedily to end-of-string, failed
+# to find `[=:]`, and backtracked one character per start position -- quadratic.
+# Measured on a 1000-char argument with no `=` in it at all: 17ms in this one
+# substitution, against a 50ms budget for the whole hook, and rising with the
+# square. A key name over 64 chars is not a real one, so the bound costs
+# nothing and makes the scan linear.
+_KV_RE = re.compile(
+    r"""([A-Za-z_][A-Za-z0-9_.\-]{0,63})\s*([=:])\s*("[^"]*"|'[^']*'|[^\s&"';|]{1,256})""")
+
+# Stage 3 — flags whose FOLLOWING token is the secret, even when the token
+# itself carries no key name. This is what catches `-H 'Authorization: ...'`
+# and `--password hunter2`.
+_SENSITIVE_FLAGS = frozenset({
+    "-H", "--header", "-p", "--password", "--pass", "-u", "--user",
+    "--token", "--api-key", "--apikey", "--secret", "--auth", "-d", "--data",
+    "--data-raw", "--data-binary", "-e", "--env", "-k", "--key", "--cert",
+    "--private-key", "--credential", "--credentials",
+})
+_FLAG_VALUE_RE = re.compile(
+    r"""(?<!\S)(--?[A-Za-z][A-Za-z0-9-]*)(\s+)("[^"]*"|'[^']*'|[^\s|;&]+)""")
+
+# Stage 4 — entropy, for the unprefixed random string the rules above cannot
+# name. Deliberately conservative about what it will even consider, because the
+# alternative is redacting every long filename.
+_ENTROPY_MIN_LEN = 20
+_ENTROPY_BITS = 3.6
+_TOKENISH_RE = re.compile(r"[A-Za-z0-9+/_-]{%d,}={0,2}" % _ENTROPY_MIN_LEN)
+
+
+def _shannon(s: str) -> float:
+    """Bits per character. A random 20+ char credential sits well above 3.6;
+    English words, hex digests and repetitive identifiers sit below it."""
+    if not s:
+        return 0.0
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = float(len(s))
+    total = 0.0
+    for c in counts.values():
+        pr = c / n
+        total -= pr * math.log2(pr)
+    return total
+
+
+def _looks_like_path(tok: str) -> bool:
+    """Paths are long, mixed-case and common; redacting them would gut the
+    feature. A credential rarely starts with a path anchor or ends in an
+    extension, so anchoring is a cheap way to keep them."""
+    return (tok.startswith(("/", "./", "../", "~/"))
+            or "/" in tok and "." in tok.rsplit("/", 1)[-1])
+
+
+def _redact(text: str) -> str:
+    """Scrub a command line / URL / argument blob. Best-effort, recall-first.
+
+    Order matters: the precise markers run before the positional rules, so a
+    recognised token is replaced whole rather than half-caught by a later,
+    blunter rule."""
+    if not text:
+        return ""
+    if len(text) > _DETAIL_SCAN_MAX:
+        text = text[:_DETAIL_SCAN_MAX]
+        cut = text.rfind(" ")
+        if cut > 0:
+            text = text[:cut]       # never leave a half-token at the boundary
+    out = _SECRET_MARKER_RE.sub(_REDACTED, text)
+    out = _URL_USERINFO_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:{_REDACTED}@", out)
+
+    def _kv(m):
+        key, sep, val = m.group(1), m.group(2), m.group(3)
+        if not _SENSITIVE_KEY_RE.search(key):
+            return m.group(0)
+        return f"{key}{sep}{_REDACTED}"
+    out = _KV_RE.sub(_kv, out)
+
+    def _flag(m):
+        flag, gap, val = m.group(1), m.group(2), m.group(3)
+        if flag not in _SENSITIVE_FLAGS:
+            return m.group(0)
+        return f"{flag}{gap}{_REDACTED}"
+    out = _FLAG_VALUE_RE.sub(_flag, out)
+
+    def _ent(m):
+        tok = m.group(0)
+        if tok == _REDACTED.strip("[]") or _looks_like_path(tok):
+            return tok
+        # Entropy alone redacted `anthropics/claude-code` off a `gh --repo`
+        # flag: a 22-char lowercase slug scores as high as a credential, and
+        # scrubbing ordinary arguments is how this feature becomes useless
+        # rather than merely cautious. Nearly every real credential carries at
+        # least one digit, and the ones that do not (an all-alpha random) are
+        # long, so require one or the other before the entropy gate applies.
+        if not any(c.isdigit() for c in tok) and len(tok) < 32:
+            return tok
+        return _REDACTED if _shannon(tok) >= _ENTROPY_BITS else tok
+    out = _TOKENISH_RE.sub(_ent, out)
+    return out
+
+
+# Keys whose values are file/message CONTENT rather than arguments. Excluded
+# from the generic fallback: this feature is about what an agent is doing, and
+# dumping a message body or an edit's replacement text into a shared ring is
+# sprawl, not detail -- regardless of whether it holds a credential.
+_CONTENT_KEYS = frozenset({
+    "content", "body", "message", "text", "prompt", "old_string", "new_string",
+    "new_source", "data", "input", "instructions", "system",
+})
+
+
+def _detail(tool_name: str, tool_input) -> str:
+    """The redacted long form for `tool_events.detail`. "" when capture is off
+    or there is nothing worth rendering -- the panel then falls back to the
+    summary target, so an empty detail is a soft degrade, never a blank row."""
+    if not _CAPTURE_TOOL_INPUT or not isinstance(tool_input, dict):
+        return ""
+    try:
+        if tool_name == "Bash":
+            # No _SHELL_SUBSTITUTION bail-out here, unlike _summarize_target.
+            # That guard exists because a substitution makes the PROGRAM NAME
+            # unknowable, and the summary is a program name. The literal text
+            # `$(cat ~/.netrc)` contains no credential -- the interpolation
+            # happens in the shell, long after this row is written -- so the
+            # long form can safely keep it.
+            return _cap(_redact(tool_input.get("command") or ""), _DETAIL_MAX)
+        if tool_name in ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit"):
+            fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+            span = ""
+            if tool_input.get("offset") is not None:
+                span = f":{tool_input.get('offset')}"
+                if tool_input.get("limit") is not None:
+                    span += f"+{tool_input.get('limit')}"
+            return _cap(_redact(str(fp)) + span, _DETAIL_MAX)
+        if tool_name in ("Glob", "Grep"):
+            bits = [str(tool_input.get("pattern") or "")]
+            for k in ("path", "glob", "output_mode"):
+                if tool_input.get(k):
+                    bits.append(f"{k}={tool_input.get(k)}")
+            return _cap(_redact(" ".join(b for b in bits if b)), _DETAIL_MAX)
+        if tool_name in ("Task", "Agent"):
+            st = tool_input.get("subagent_type") or ""
+            desc = tool_input.get("description") or ""
+            return _cap(_redact(f"{st}: {desc}".strip(": ").strip()), _DETAIL_MAX)
+        if tool_name == "WebFetch":
+            return _cap(_redact(str(tool_input.get("url") or "")), _DETAIL_MAX)
+        if tool_name == "WebSearch":
+            return _cap(_redact(str(tool_input.get("query") or "")), _DETAIL_MAX)
+        # Generic fallback, which is what makes this useful for MCP tools --
+        # they are most of what an agent calls and none of them are named here.
+        # Scalars only: a nested structure is a payload, not an argument.
+        bits = []
+        for k, v in tool_input.items():
+            if k in _CONTENT_KEYS or not isinstance(v, (str, int, float, bool)):
+                continue
+            bits.append(f"{k}={v}")
+            if len(bits) >= 8:
+                break
+        return _cap(_redact(" ".join(bits)), _DETAIL_MAX)
+    except Exception:
+        # Same contract as _summarize_target: this must never raise on the
+        # host's critical path. An empty detail loses a field, not the turn.
+        return ""
+
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
 HOOK_DB_TIMEOUT_S = 0.05
@@ -285,15 +522,22 @@ def _migrate(conn) -> None:
         " fingerprint TEXT NOT NULL,"
         " tool_name TEXT NOT NULL DEFAULT '',"
         " target TEXT NOT NULL DEFAULT '',"
+        " detail TEXT NOT NULL DEFAULT '',"
         " created_at TEXT NOT NULL)"
     )
+    # CREATE TABLE IF NOT EXISTS does nothing for a table that already exists,
+    # so an install upgrading into this needs the column added explicitly.
+    try:
+        conn.execute("ALTER TABLE tool_events ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # already there
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tool_events_fingerprint "
         "ON tool_events (fingerprint, id)"
     )
 
 
-def _apply(conn, event, session_id, tool_name, target, now) -> None:
+def _apply(conn, event, session_id, tool_name, target, detail, now) -> None:
     """One short transaction — a SINGLE write-lock acquisition covering the
     UPDATE plus, only for a tracked session on PreToolUse, the capped
     tool_events insert + prune. Taking the lock once and holding it briefly is
@@ -375,11 +619,24 @@ def _apply(conn, event, session_id, tool_name, target, now) -> None:
         # smaller harm than losing the status.
         conn.execute("SAVEPOINT ring")
         try:
-            conn.execute(
-                "INSERT INTO tool_events (fingerprint, tool_name, target, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (fp, tool_name[:_NAME_MAX], target, now),
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO tool_events "
+                    "(fingerprint, tool_name, target, detail, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (fp, tool_name[:_NAME_MAX], target, detail, now),
+                )
+            except sqlite3.OperationalError:
+                # `detail` is newer than the table on an install whose server
+                # has not restarted since the upgrade. Losing the long form is
+                # a degraded panel; losing the row would be a blank one, so
+                # fall back to the shape that has always existed.
+                conn.execute(
+                    "INSERT INTO tool_events "
+                    "(fingerprint, tool_name, target, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (fp, tool_name[:_NAME_MAX], target, now),
+                )
             # Bounded prune: keep only the newest N rows for THIS fingerprint.
             conn.execute(
                 "DELETE FROM tool_events WHERE fingerprint = ? AND id NOT IN "
@@ -431,6 +688,7 @@ def main() -> int:
     # tool just finished.
     tool_name = ""
     target = ""
+    detail = ""
     if event in ("PreToolUse", "PostToolUse"):
         tn = payload.get("tool_name")
         tool_name = tn if isinstance(tn, str) else ""
@@ -438,6 +696,9 @@ def main() -> int:
         # Only PreToolUse summarises the input — PostToolUse carries a result,
         # which we never read.
         target = _summarize_target(tool_name, payload.get("tool_input"))
+        # Off unless NTH_CAPTURE_TOOL_INPUT=1, in which case this is the
+        # redacted long form. "" otherwise, and "" is a valid stored value.
+        detail = _detail(tool_name, payload.get("tool_input"))
 
     # A pure-telemetry hook must not materialise a database. sqlite3.connect
     # creates the file, so without this a stray NTH_DB_PATH (or a hook running
@@ -457,7 +718,7 @@ def main() -> int:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(f"PRAGMA busy_timeout={int(HOOK_DB_TIMEOUT_S * 1000)}")
         try:
-            _apply(conn, event, session_id, tool_name, target, now)
+            _apply(conn, event, session_id, tool_name, target, detail, now)
         except sqlite3.OperationalError as e:
             # Distinguish a SCHEMA mismatch (missing column/table — the
             # transitional case _migrate handles) from a LOCK/BUSY timeout,
@@ -474,7 +735,7 @@ def main() -> int:
             except Exception:
                 pass
             _migrate(conn)
-            _apply(conn, event, session_id, tool_name, target, now)
+            _apply(conn, event, session_id, tool_name, target, detail, now)
     except Exception:
         return 0  # best-effort: never disturb the host session
     finally:
