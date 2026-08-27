@@ -308,7 +308,7 @@
       if (!items.length || !focused()) { close(); return; }
       pop.innerHTML = items.map((item, i) => {
         const label = item.kind === 'saved' ? item.path : item.name;
-        const sub = item.kind === 'saved' ? (item.browse ? 'saved · browse' : 'saved') : (item.parent || '');
+        const sub = item.kind === 'saved' ? (item.browse ? 'container' : 'project') : (item.parent || '');
         return `<button type="button" class="dirbook-opt${i === index ? ' hi' : ''}" data-index="${i}" role="option" aria-selected="${i === index}">`
           + `<span class="dirbook-icon">${item.kind === 'saved' ? '★' : '›'}</span>`
           + `<span class="dirbook-name">${esc(label)}</span>`
@@ -352,17 +352,23 @@
       else close();
     }
     async function refresh() {
-      const typed = book.normalize(input.value);
+      // Ask with the RAW value, trailing slash and all. That slash is the
+      // whole question: "~/Projects/" means list what is INSIDE it, while
+      // "~/Projects" means find things NAMED that. normalize() strips it —
+      // so normalizing here and then asking the server is exactly why picking
+      // a container stopped listing anything. Normalize only where paths are
+      // COMPARED, never where the question is asked.
+      const raw = String(input.value ?? '').trim();
+      const normalized = book.normalize(raw);
       syncStar();
       if (!focused()) { close(); return; }
       const seq = ++requestSeq;
-      const normalized = book.normalize(typed);
-      const saved = book.matchingFavorites(typed)
+      const saved = book.matchingFavorites(raw)
         .filter(fav => fav.path !== normalized);   // don't offer what is already there
       // A bare name like "roam" is not a path, so there is nothing for the
       // server to complete — but the saved list can still answer it, and that
       // is the whole point of saving one. Show those and skip the request.
-      if (!typed || !/^[~/]/.test(typed)) {
+      if (!raw || !/^[~/]/.test(raw)) {
         items = saved.slice(0, 8); index = items.length ? 0 : -1; render(); return;
       }
       // Show saved matches immediately; the network result folds in when it
@@ -372,7 +378,7 @@
       const controller = new AbortController();
       inflight = controller;
       let dirs = [];
-      try { dirs = await book.complete(typed, { signal: controller.signal }); }
+      try { dirs = await book.complete(raw, { signal: controller.signal }); }
       catch { return; }                            // aborted by a newer keystroke
       if (seq !== requestSeq) return;              // a newer request won
       const savedPaths = new Set(saved.map(fav => fav.path));
@@ -389,7 +395,26 @@
     // debounce and the in-flight completion, so nothing arrives later and
     // puts the list back on screen.
     const onBlur = () => { hasFocus = false; close(); };
+    // "Step into what is in the field" — the gesture you want after landing on
+    // a directory and deciding you meant something inside it. Typing / already
+    // does this (it is the same question, and refresh() now asks it correctly);
+    // ArrowRight at the end of the value is the same move without reaching for
+    // punctuation. Enter is deliberately NOT bound to it: these fields sit in
+    // forms whose Enter means Save or Create, and quietly stealing that to
+    // walk a directory would be a worse surprise than an extra keystroke.
+    function stepInto() {
+      const value = String(input.value ?? '').trim();
+      if (!value || !/^[~/]/.test(value) || value.endsWith('/')) return false;
+      input.value = value + '/';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      hasFocus = true;
+      refresh();
+      return true;
+    }
     const onKeyDown = event => {
+      const atEnd = input.selectionStart === input.value.length
+        && input.selectionEnd === input.value.length;
+      if (event.key === 'ArrowRight' && atEnd && stepInto()) { event.preventDefault(); return; }
       if (pop.hidden) {
         if (event.key === 'ArrowDown') { event.preventDefault(); refresh(); }
         return;
@@ -461,7 +486,8 @@
     const hint = document.createElement('p');
     hint.className = 'dirbook-hint';
     hint.innerHTML = 'Subdirectories appear as you type — <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, '
-      + '<kbd>Enter</kbd> to step in. Each saved directory is a <strong>project</strong> '
+      + '<kbd>Enter</kbd> to pick. To go deeper into whatever is in the field, type <code>/</code> '
+      + 'or press <kbd>&rarr;</kbd>. Each saved directory is a <strong>project</strong> '
       + '(picking it fills the field and stops) or a <strong>container</strong> '
       + '(picking it lists what is inside, which is what you want for <code>~/Development</code>). '
       + 'That is detected from what is on disk — click the label to overrule it.';

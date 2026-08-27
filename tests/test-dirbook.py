@@ -192,6 +192,19 @@ check("completion is sent as typed, since the trailing slash is the question",
       "// Sent as typed, NOT normalized" in dirbook)
 check("picking a project lands, picking a container descends",
       "const descend = item.kind !== 'saved' || item.browse;" in dirbook)
+# The trailing slash IS the question asked of the server, so the completion
+# request must carry the raw value. Normalizing first turned "list what is
+# inside ~/Development" (34 answers) into "find things named Development"
+# (1 answer, itself) — which made picking a container look like it did nothing.
+check("completion is asked with the raw value, never the normalized one",
+      "book.complete(raw, { signal: controller.signal })" in dirbook
+      and "book.complete(typed" not in dirbook)
+check("normalizing is confined to comparison",
+      "const normalized = book.normalize(raw);" in dirbook)
+check("there is a step-into gesture that does not steal Enter",
+      "function stepInto(" in dirbook
+      and "event.key === 'ArrowRight'" in dirbook
+      and "event.key === 'Enter' || event.key === 'Tab') && index >= 0" in dirbook)
 check("a 403 stops the client asking again", "completionsDenied" in dirbook)
 check("the picker leaves the input's name alone so FormData still reads it",
       "input.parentNode.insertBefore(wrap, input)" in dirbook
@@ -239,7 +252,7 @@ check("the page uses the shared list-page idiom, not settings cards",
 check("a bare name matches saved paths anywhere in them",
       "lower.includes(q)" in dirbook)
 check("a non-path query skips the server round trip",
-      "!/^[~/]/.test(typed)" in dirbook)
+      "!/^[~/]/.test(raw)" in dirbook)
 # The classifier: a guess, and only ever the default for an undecided entry.
 check("the classifier endpoint is routed and gated",
       'elif parsed.path == "/api/path/inspect":' in source
