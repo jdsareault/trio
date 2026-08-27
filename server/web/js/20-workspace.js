@@ -1790,7 +1790,14 @@
     const opId = state.operator?.id || state.meta?.operator?.id;
     const isAgent = member.kind !== 'human' && member.id !== opId;
     const subagents = isAgent ? `<div class="channel-member-subagents" data-subagents-for="${esc(member.id)}"></div>` : '';
-    return `<div class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}</div>`;
+    // An agent's avatar is the handle for its tool-activity panel (21-activity.js).
+    // A human's is not — nothing writes tool_events for them, so a button there
+    // would only ever open an empty panel. Humans keep the plain avatar.
+    const face = avatarFor(member, status);
+    const avatarNode = isAgent
+      ? `<button type="button" class="member-activity-btn" data-activity-for="${esc(member.id)}" data-activity-name="${esc(name)}" aria-label="Tool activity for ${esc(name)}" title="Tool activity">${face}</button>`
+      : face;
+    return `<div class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarNode}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}</div>`;
   }
   // Subagent list under an agent's drawer row. "Recent spawns" — tool_events
   // records Task/Agent starts only (no completion), so this is honestly labelled
@@ -2029,6 +2036,12 @@
     $('add-member-btn')?.addEventListener('click', openAddMember);
     // Delegated so it survives refreshDrawerMembers() repaints of the list.
     $('channel-drawer-members')?.addEventListener('click', event => {
+      const face = event.target.closest('[data-activity-for]');
+      if (face) {
+        Trio.activity?.open?.({ id: face.getAttribute('data-activity-for'),
+                                name: face.getAttribute('data-activity-name') || 'Agent' });
+        return;
+      }
       const btn = event.target.closest('[data-remove-member]');
       if (!btn) return;
       requestRemoveMember(btn.getAttribute('data-remove-member'), btn.getAttribute('data-member-name') || 'member');

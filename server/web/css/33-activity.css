@@ -1,0 +1,51 @@
+/* 33-activity.css — the per-agent tool activity panel (js/21-activity.js).
+   Rendered inside the shared control modal, so it only styles its own
+   .act-* subtree and inherits the dialog chrome from 10-shell.css. */
+
+.act-panel{ display:flex; flex-direction:column; gap:var(--sp-2); min-width:0; }
+
+.act-meta{ display:flex; align-items:center; gap:var(--sp-2); color:var(--ink-3); font-size:12px; }
+.act-live{ margin-left:auto; display:inline-flex; align-items:center; gap:5px; }
+.act-live::before{ content:''; width:6px; height:6px; border-radius:var(--r-full); background:var(--ok, #5f8f5f); animation:act-pulse var(--pulse-busy) var(--ease) infinite; }
+@keyframes act-pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.25; } }
+
+/* Fixed height, not max-height: the list refreshes itself every few seconds,
+   and a box that resizes as rows arrive would shove the content under the
+   pointer mid-read. */
+.act-list{ height:min(46vh, 380px); overflow-y:auto; overscroll-behavior:contain;
+  background:var(--bg-sink); border:1px solid var(--line-soft); border-radius:var(--r-sm); padding:var(--sp-2); }
+
+.act-day{ position:sticky; top:calc(var(--sp-2) * -1); z-index:1; margin:var(--sp-2) 0 var(--sp-1);
+  padding:2px var(--sp-1); background:var(--bg-sink); color:var(--ink-3);
+  font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+.act-day:first-child{ margin-top:0; }
+
+.act-row{ display:flex; align-items:baseline; gap:var(--sp-2); padding:3px var(--sp-1); border-radius:var(--r-xs); min-width:0; }
+.act-row:hover{ background:var(--surface-hover); }
+
+/* Tabular numerals keep the time column from shimmying as digits change —
+   it is read as a column, so it has to align like one. */
+.act-time{ flex:none; color:var(--ink-3); font-size:11.5px;
+  font-variant-numeric:tabular-nums; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* The call is the payload: monospace, and allowed to wrap rather than being
+   ellipsed. A truncated command is exactly the failure this panel exists to
+   fix, so length costs vertical space instead of information. */
+.act-call{ flex:1 1 auto; min-width:0; color:var(--ink); font-size:12px;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap:anywhere; word-break:break-word; }
+
+.act-gap{ flex:none; color:var(--ink-3); font-size:11px; font-variant-numeric:tabular-nums; }
+
+.act-more{ align-self:flex-start; }
+.act-empty{ padding:var(--sp-4) var(--sp-2); color:var(--ink-3); font-size:13px; text-align:center; }
+.act-empty small{ display:inline-block; margin-top:var(--sp-2); font-size:11.5px; line-height:1.5; }
+
+.act-note{ margin:0; color:var(--ink-3); font-size:11.5px; line-height:1.5; }
+
+/* The drawer avatar becomes the panel's trigger. It must read as pressable
+   without becoming a second visual element next to the name. */
+.channel-member .member-activity-btn{ flex:none; padding:0; border:0; background:none; cursor:pointer;
+  border-radius:var(--r-full); line-height:0; }
+.channel-member .member-activity-btn:hover{ filter:brightness(1.06); }
+.channel-member .member-activity-btn:focus-visible{ outline:2px solid var(--accent, #8a6f4e); outline-offset:2px; }
