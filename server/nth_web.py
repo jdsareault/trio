@@ -2337,7 +2337,7 @@ class EventHub:
                     self._change_scan = scan_now
 
                     members = self._fetch_roster(db)
-                    snapshot = json.dumps(members, sort_keys=True)
+                    snapshot = _roster_change_key(members)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
                         # Stamped with the channel for the same reason as the
@@ -2448,6 +2448,50 @@ def _ctx_change_key(sessions: List[Dict[str, Any]]) -> str:
         [{k: v for k, v in s.items() if k not in _CTX_VOLATILE} for s in sessions],
         sort_keys=True,
     )
+
+
+# Same problem as _CTX_VOLATILE, one broadcast over: the roster carries
+# timestamps that advance on their own, with nothing about the room having
+# changed. nth_monitor.py rewrites last_seen (and the two heartbeats it is
+# reconciled from) every 10s FOR EVERY MEMBER, so in a 50-member room the
+# raw snapshot differs every second or two, forever, on an idle channel.
+# Measured on this repo's own hub: the 52-member agent-inbox re-broadcast a
+# 23KB roster 10x in 45s, and diffing consecutive emits showed exactly one
+# changed field — one member's last_seen.
+#
+# Dropping it from the COMPARISON costs no fidelity, because the payload
+# still carries it and no client reads it: what the UI paints is `status`,
+# the coarse member_status() bucket (dead/stale/blocked/idle/working/active),
+# which is recomputed from the fresh timestamp on every 0.5s tick and is
+# itself part of the key. So an agent crossing STALE_SECONDS or DEAD_SECONDS
+# still flips the digest and still pushes immediately — the transition is
+# what matters, not the tick that leads to it.
+#
+# Deliberately NOT volatile: last_read (a real watermark move), last_tool_at
+# / blocked_since / stalled (real activity), context_pct. Those change only
+# when something actually happened, which is exactly when a broadcast is
+# warranted.
+_ROSTER_VOLATILE = ("last_seen",)
+
+
+def _roster_change_key(members: List[Dict[str, Any]]) -> str:
+    """Stable digest of a roster, ignoring fields that tick on their own.
+
+    Nested `context` gets the same treatment via _CTX_VOLATILE: it is the
+    statusline publisher's payload embedded per member, carrying the very
+    `_age_s` / `_relayed_at` fields _ctx_change_key already excludes. Left
+    in, they would re-introduce the churn one level down and this whole
+    exercise would be a no-op for any member with a live context ring.
+    """
+    def scrub(member: Dict[str, Any]) -> Dict[str, Any]:
+        out = {k: v for k, v in member.items() if k not in _ROSTER_VOLATILE}
+        ctx = out.get("context")
+        if isinstance(ctx, dict):
+            out["context"] = {k: v for k, v in ctx.items()
+                              if k not in _CTX_VOLATILE}
+        return out
+
+    return json.dumps([scrub(m) for m in members], sort_keys=True)
 
 
 def _read_context_usage() -> Dict[str, Dict[str, Any]]:
