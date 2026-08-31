@@ -61,7 +61,18 @@ const SAMPLE = {
     assert.strictEqual(panel.querySelectorAll('.data-card').length, 3);
   });
   check('renders three prune controls', () => {
-    assert.strictEqual(panel.querySelectorAll('.data-prune-row').length, 3);
+    // Filtered rather than counted straight: the Tidy up row reuses the prune
+    // row's chrome, and counting it here would let a MISSING prune control
+    // hide behind it. (The harness has no :not() support, hence the filter.)
+    const rows = panel.querySelectorAll('.data-prune-row')
+      .filter(r => !r.className.includes('tidy-row'));
+    assert.strictEqual(rows.length, 3);
+  });
+  check('renders the Tidy up control above the prune section', () => {
+    const all = panel.querySelectorAll('.data-prune-row');
+    assert.ok(all.length >= 4, 'tidy row plus three prune rows');
+    assert.ok(all[0].className.includes('tidy-row'),
+              'the reversible control comes before the destructive ones');
   });
   check('renders one table row per channel', () => {
     assert.strictEqual(panel.querySelectorAll('.dt-row').length, 3);

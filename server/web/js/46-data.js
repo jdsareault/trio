@@ -204,6 +204,244 @@
     return { wrap, input };
   }
 
+  // ── Tidy up: bulk-archive stale channels and agents ─────────────────────────
+  // Preview first, always. The server's dry_run defaults to true, so the
+  // Preview button is a plain POST; the real run happens only after the
+  // operator has read the list and confirmed. Archiving is REVERSIBLE for both
+  // kinds (Archive view restores channels, the roster's archived filter
+  // restores agents), so this is not a danger surface — but sweeping a name
+  // someone never saw would still be a surprise, hence the allowlist below.
+  const TIDY_DAYS_KEY = 'trio.tidy.days';
+  const TIDY_DEFAULT_DAYS = 14;
+
+  function readTidyDays() {
+    try {
+      const v = parseInt(localStorage.getItem(TIDY_DAYS_KEY), 10);
+      if (Number.isFinite(v) && v >= 0) return v;
+    } catch {}
+    return TIDY_DEFAULT_DAYS;
+  }
+  function saveTidyDays(days) {
+    try { localStorage.setItem(TIDY_DAYS_KEY, String(days)); } catch {}
+  }
+
+  // The age line under each name. `idle_days` is null when the server could
+  // not parse the stored timestamp — say so rather than print "idle 0 days",
+  // which would be a confident lie about the one number the decision rests on.
+  function idlePhrase(row) {
+    const d = row.idle_days;
+    if (d == null) return 'age unknown';
+    const whole = Math.round(d);
+    if (whole < 1) return 'idle less than a day';
+    return `idle ${plural(whole, 'day')}`;
+  }
+
+  function tidyRow(id, label, sub, badge, onToggle) {
+    const item = el('label', 'tidy-item');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.className = 'tidy-check';
+    box.checked = true;
+    box.dataset.id = id;
+    box.setAttribute('aria-label', `Archive ${label}`);
+    // Per-checkbox rather than one delegated listener on the container: the
+    // count in the footer is the only feedback that a box registered, so it
+    // must not depend on event bubbling the harness cannot reproduce either.
+    if (onToggle) box.addEventListener('change', onToggle);
+    item.append(box);
+    const text = el('span', 'tidy-item-text');
+    const name = el('span', 'tidy-name', label);
+    text.append(name);
+    if (badge) text.append(el('span', 'data-badge', badge));
+    text.append(el('span', 'tidy-sub', sub));
+    item.append(text);
+    return item;
+  }
+
+  function tidyGroup(title, rows, render, onToggle) {
+    const group = el('div', 'tidy-group');
+    const head = el('div', 'tidy-group-head');
+    head.append(el('span', 'tidy-group-title', title));
+    const all = el('button', 'tidy-link', 'None');
+    all.type = 'button';
+    head.append(all);
+    group.append(head);
+    const list = el('div', 'tidy-list');
+    rows.forEach(r => list.append(render(r)));
+    group.append(list);
+    // "None"/"All" toggles the whole group — with a long stale list, clicking
+    // forty boxes to keep one is not a review, it is a chore that gets skipped.
+    all.addEventListener('click', () => {
+      const boxes = [...list.querySelectorAll('.tidy-check')];
+      const next = all.textContent === 'All';
+      boxes.forEach(b => { b.checked = next; });
+      all.textContent = next ? 'None' : 'All';
+      if (onToggle) onToggle();
+    });
+    return group;
+  }
+
+  function renderTidyPreview(panel, host, preview, days) {
+    host.replaceChildren();
+    const channels = preview.channels || [];
+    const agents = preview.agents || [];
+    const skipped = (preview.skipped && preview.skipped.agents) || [];
+
+    if (!channels.length && !agents.length) {
+      const none = el('p', 'tidy-empty', days === 0
+        ? 'Nothing to archive — every channel and agent is already archived.'
+        : `Nothing has been idle for ${plural(days, 'day')}.`);
+      host.append(none);
+      if (skipped.length) host.append(skippedNote(skipped));
+      return;
+    }
+
+    const box = el('div', 'tidy-preview');
+    // Forward reference: the groups need a toggle callback, and the callback
+    // needs the footer nodes the groups are appended above.
+    let sync = () => {};
+    const onToggle = () => sync();
+    if (channels.length) {
+      box.append(tidyGroup(plural(channels.length, 'channel'), channels,
+        c => tidyRow(c.code, c.code, idlePhrase(c),
+          c.never_active ? 'no messages' : '', onToggle), onToggle));
+    }
+    if (agents.length) {
+      box.append(tidyGroup(plural(agents.length, 'agent'), agents,
+        a => tidyRow(a.id, a.name || a.id, idlePhrase(a),
+          a.never_active ? 'never used' : '', onToggle), onToggle));
+    }
+    if (skipped.length) box.append(skippedNote(skipped));
+
+    const foot = el('div', 'tidy-foot');
+    const count = el('span', 'tidy-count');
+    const go = el('button', 'dp-btn tidy-go', 'Archive selected');
+    go.type = 'button';
+    foot.append(count);
+    foot.append(go);
+    box.append(foot);
+    host.append(box);
+
+    const boxes = () => [...box.querySelectorAll('.tidy-check')];
+    const selected = () => boxes().filter(b => b.checked).map(b => b.dataset.id);
+    sync = () => {
+      const n = selected().length;
+      count.textContent = n
+        ? `${plural(n, 'item')} selected`
+        : 'Nothing selected';
+      go.disabled = n === 0;
+    };
+    sync();
+
+    go.addEventListener('click', () => {
+      const keep = new Set(selected());
+      const pickedChannels = channels.filter(c => keep.has(c.code)).map(c => c.code);
+      const pickedAgents = agents.filter(a => keep.has(a.id)).map(a => a.id);
+      if (!pickedChannels.length && !pickedAgents.length) return;
+      const bits = [];
+      if (pickedChannels.length) bits.push(plural(pickedChannels.length, 'channel'));
+      if (pickedAgents.length) bits.push(plural(pickedAgents.length, 'agent'));
+      ui.confirmAction(
+        `Archive ${bits.join(' and ')}?`,
+        'Archiving hides them from the sidebar and roster. Nothing is deleted — '
+        + 'restore them any time from the Archive view. Running agents are '
+        + 'never archived.',
+        () => withPending(go, async () => {
+          try {
+            // The ALLOWLIST, not the unchecked ids: the server rescans on this
+            // second request, and naming what was approved is what keeps the
+            // sweep inside the list that was actually read.
+            const res = await api.post('/api/archives/stale', {
+              older_than_days: days,
+              dry_run: false,
+              only_channels: pickedChannels,
+              only_agents: pickedAgents,
+            }, false);
+            announce(tidyOutcome(res));
+            await Trio.workspace?.refresh?.();
+            renderPage(panel);
+          } catch (e) { announce(e.message || 'Archive failed'); }
+        }),
+        { submitLabel: 'Archive' });
+    });
+  }
+
+  // Report what LANDED, per kind, and name the failures. A bulk sweep is
+  // allowed to half-succeed (an agent can refuse mid-run), and "Done" over a
+  // partial result is the message that sends someone looking for a channel
+  // that is still in their sidebar.
+  function tidyOutcome(res) {
+    const done = [];
+    const failed = [];
+    for (const [rows, noun] of [[res.channels || [], 'channel'],
+                                [res.agents || [], 'agent']]) {
+      const ok = rows.filter(r => r.archived).length;
+      if (ok) done.push(plural(ok, noun));
+      rows.filter(r => !r.archived).forEach(
+        r => failed.push(r.name || r.code || r.id));
+    }
+    if (!done.length && !failed.length) return 'Nothing to archive.';
+    const parts = [done.length ? `Archived ${done.join(' and ')}` : 'Archived nothing'];
+    if (failed.length) parts.push(`could not archive ${failed.join(', ')}`);
+    return parts.join(' — ') + '.';
+  }
+
+  function skippedNote(skipped) {
+    const note = el('p', 'tidy-skipped');
+    note.append(el('span', 'tidy-skipped-lead',
+      `${plural(skipped.length, 'running agent')} left alone: `));
+    note.append(document.createTextNode(
+      skipped.map(a => a.name || a.id).join(', ')
+      + '. Stop an agent first if you want to archive it.'));
+    return note;
+  }
+
+  function tidyControls(panel) {
+    const section = el('section', 'data-section');
+    section.append(el('h3', null, 'Tidy up'));
+    // Shares the prune row's chrome, but carries its own class: this is not a
+    // prune row, and the Data-page render test counts the two separately.
+    const row = el('div', 'data-prune-row tidy-row');
+    const text = el('div', 'dp-text');
+    text.append(el('span', 'dp-title', 'Archive stale channels and agents'));
+    text.append(el('span', 'dp-desc',
+      'Clears everything idle past the given age out of the sidebar and roster. '
+      + 'You see the list before anything happens, and nothing is deleted.'));
+    row.append(text);
+    const ctl = el('div', 'dp-ctl');
+    const days = daysInput(readTidyDays(), 'Idle days before a channel or agent counts as stale');
+    ctl.append(days.wrap);
+    const btn = el('button', 'dp-btn', 'Preview');
+    btn.type = 'button';
+    ctl.append(btn);
+    row.append(ctl);
+    section.append(row);
+
+    const host = el('div', 'tidy-results');
+    section.append(host);
+
+    btn.addEventListener('click', () => {
+      const n = readDays(days.input);
+      if (n == null) return;
+      saveTidyDays(n);
+      // Returned, not fired and forgotten: the click handler's promise is
+      // how the render tests await a preview that has actually landed.
+      return withPending(btn, async () => {
+        let preview;
+        try {
+          preview = await api.post('/api/archives/stale',
+            { older_than_days: n }, false);
+        } catch (e) {
+          host.replaceChildren(el('p', 'tidy-empty',
+            e.message || 'Could not scan for stale items.'));
+          return;
+        }
+        renderTidyPreview(panel, host, preview, n);
+      });
+    });
+    return section;
+  }
+
   // ── Per-channel breakdown ───────────────────────────────────────────────────
   function channelTable(panel, data) {
     const section = el('section', 'data-section');
@@ -290,9 +528,15 @@
     }
     body.replaceChildren();
     body.append(overviewCards(data));
+    // Tidy up sits ABOVE Prune: it is the reversible, everyday one, and the
+    // prune rows below it delete data permanently. Ordering them the other way
+    // puts the destructive surface in front of the routine errand.
+    body.append(tidyControls(panel));
     body.append(pruneControls(panel));
     body.append(channelTable(panel, data));
   }
 
-  Trio.data = { renderPage, fmtBytes };
+  // tidyOutcome is exported for the render tests: phrasing a PARTIAL sweep
+  // honestly is a property worth asserting directly, not through the DOM.
+  Trio.data = { renderPage, fmtBytes, tidyOutcome };
 })();

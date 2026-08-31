@@ -308,6 +308,28 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .workspace-view .data-table td.dt-act{ text-align:right; width:1%; white-space:nowrap; }
 .workspace-view .dt-chan{ font-weight:600; }
 .workspace-view .data-badge{ margin-left:8px; font-size:10px; text-transform:uppercase; letter-spacing:.05em; font-weight:700; color:var(--ink-3); background:var(--bg-sink); padding:2px 7px; border-radius:999px; }
+/* Tidy up — the stale-archive preview list on the Data page. Deliberately
+   quieter than the prune rows above it: archiving is reversible, so it gets
+   no danger colour, and the emphasis goes on the NAMES being swept. */
+.workspace-view .tidy-results:not(:empty){ margin-top:10px; }
+.workspace-view .tidy-empty{ font-size:13px; color:var(--ink-3); padding:2px 2px 0; }
+.workspace-view .tidy-preview{ background:var(--surface); border:1px solid var(--line-soft); border-radius:var(--r-md); box-shadow:var(--shadow-sm); padding:6px 16px 12px; }
+.workspace-view .tidy-group + .tidy-group{ margin-top:14px; }
+.workspace-view .tidy-group-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:10px 0 6px; border-bottom:1px solid var(--line-soft); }
+.workspace-view .tidy-group-title{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; font-weight:700; color:var(--ink-3); }
+.workspace-view .tidy-link{ font-size:12px; font-weight:600; color:var(--accent,var(--ink-2)); background:none; border:none; padding:2px 4px; }
+.workspace-view .tidy-link:hover{ text-decoration:underline; }
+.workspace-view .tidy-list{ display:flex; flex-direction:column; }
+.workspace-view .tidy-item{ display:flex; align-items:baseline; gap:10px; padding:8px 2px; border-bottom:1px solid var(--line-soft); cursor:pointer; }
+.workspace-view .tidy-item:last-child{ border-bottom:none; }
+.workspace-view .tidy-item input{ flex:none; align-self:center; }
+.workspace-view .tidy-item-text{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; min-width:0; }
+.workspace-view .tidy-name{ font-weight:600; font-size:13.5px; word-break:break-word; }
+.workspace-view .tidy-sub{ font-size:12px; color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.workspace-view .tidy-skipped{ font-size:12.5px; color:var(--ink-3); padding:10px 0 0; }
+.workspace-view .tidy-skipped-lead{ font-weight:600; }
+.workspace-view .tidy-foot{ display:flex; align-items:center; justify-content:flex-end; gap:12px; padding-top:12px; margin-top:4px; border-top:1px solid var(--line-soft); }
+.workspace-view .tidy-count{ font-size:12.5px; color:var(--ink-3); font-variant-numeric:tabular-nums; }
 .channel-drawer{
   grid-column:3; grid-row:1; min-width:0; min-height:0; width:auto;
   display:none; flex-direction:column; background:var(--surface); border-left:1px solid var(--line);
