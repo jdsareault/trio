@@ -205,24 +205,59 @@
   }
 
   // ── Tidy up: bulk-archive stale channels and agents ─────────────────────────
-  // Preview first, always. The server's dry_run defaults to true, so the
-  // Preview button is a plain POST; the real run happens only after the
-  // operator has read the list and confirmed. Archiving is REVERSIBLE for both
-  // kinds (Archive view restores channels, the roster's archived filter
-  // restores agents), so this is not a danger surface — but sweeping a name
-  // someone never saw would still be a surprise, hence the allowlist below.
-  const TIDY_DAYS_KEY = 'trio.tidy.days';
-  const TIDY_DEFAULT_DAYS = 14;
+  // TWO controls, not one. The kinds go stale on different clocks — a channel
+  // quiet for a week is an ordinary lull, an agent idle for a week is almost
+  // certainly finished — so one shared age input would force the looser
+  // threshold on both and leave half the clutter behind.
+  //
+  // Preview first, always. The server's dry_run defaults to true, so Preview
+  // is a plain POST; the real run happens only after the operator has read the
+  // list and confirmed. Archiving is REVERSIBLE for both kinds (the Archive
+  // view restores channels, the roster's archived filter restores agents), so
+  // this is not a danger surface — but sweeping a name nobody saw would still
+  // be a surprise, hence the allowlist on apply.
+  const TIDY_SWEEPS = [
+    {
+      kind: 'channel',
+      storageKey: 'trio.tidy.days.channel',
+      defaultDays: 7,
+      title: 'Archive stale channels',
+      desc: 'Clears channels with no recent activity out of the sidebar. '
+          + 'You see the list before anything happens, and nothing is deleted.',
+      aria: 'Idle days before a channel counts as stale',
+      noun: 'channel',
+      rowsOf: p => p.channels || [],
+      idOf: c => c.code,
+      labelOf: c => c.code,
+      badgeOf: c => (c.never_active ? 'no messages' : ''),
+      allowlistKey: 'only_channels',
+    },
+    {
+      kind: 'agent',
+      storageKey: 'trio.tidy.days.agent',
+      defaultDays: 14,
+      title: 'Archive stale agents',
+      desc: 'Clears agents you have stopped using out of the roster. Running '
+          + 'agents are never archived, whatever their age.',
+      aria: 'Idle days before an agent counts as stale',
+      noun: 'agent',
+      rowsOf: p => p.agents || [],
+      idOf: a => a.id,
+      labelOf: a => a.name || a.id,
+      badgeOf: a => (a.never_active ? 'never used' : ''),
+      allowlistKey: 'only_agents',
+    },
+  ];
 
-  function readTidyDays() {
+  function readTidyDays(spec) {
     try {
-      const v = parseInt(localStorage.getItem(TIDY_DAYS_KEY), 10);
+      const v = parseInt(localStorage.getItem(spec.storageKey), 10);
       if (Number.isFinite(v) && v >= 0) return v;
     } catch {}
-    return TIDY_DEFAULT_DAYS;
+    return spec.defaultDays;
   }
-  function saveTidyDays(days) {
-    try { localStorage.setItem(TIDY_DAYS_KEY, String(days)); } catch {}
+  function saveTidyDays(spec, days) {
+    try { localStorage.setItem(spec.storageKey, String(days)); } catch {}
   }
 
   // The age line under each name. `idle_days` is null when the server could
@@ -250,8 +285,7 @@
     if (onToggle) box.addEventListener('change', onToggle);
     item.append(box);
     const text = el('span', 'tidy-item-text');
-    const name = el('span', 'tidy-name', label);
-    text.append(name);
+    text.append(el('span', 'tidy-name', label));
     if (badge) text.append(el('span', 'data-badge', badge));
     text.append(el('span', 'tidy-sub', sub));
     item.append(text);
@@ -269,50 +303,41 @@
     const list = el('div', 'tidy-list');
     rows.forEach(r => list.append(render(r)));
     group.append(list);
-    // "None"/"All" toggles the whole group — with a long stale list, clicking
-    // forty boxes to keep one is not a review, it is a chore that gets skipped.
+    // Toggles the whole group — with a long stale list, clicking forty boxes
+    // to keep one is not a review, it is a chore that gets skipped.
     all.addEventListener('click', () => {
-      const boxes = [...list.querySelectorAll('.tidy-check')];
       const next = all.textContent === 'All';
-      boxes.forEach(b => { b.checked = next; });
+      list.querySelectorAll('.tidy-check').forEach(b => { b.checked = next; });
       all.textContent = next ? 'None' : 'All';
       if (onToggle) onToggle();
     });
     return group;
   }
 
-  function renderTidyPreview(panel, host, preview, days) {
+  function renderTidyPreview(panel, host, preview, days, spec) {
     host.replaceChildren();
-    const channels = preview.channels || [];
-    const agents = preview.agents || [];
-    const skipped = (preview.skipped && preview.skipped.agents) || [];
+    const rows = spec.rowsOf(preview);
+    const skipped = (preview.skipped && preview.skipped[spec.kind + 's']) || [];
+    const unavailable = spec.kind === 'agent' && preview.agents_unavailable;
 
-    if (!channels.length && !agents.length) {
-      const none = el('p', 'tidy-empty', days === 0
-        ? 'Nothing to archive — every channel and agent is already archived.'
-        : `Nothing has been idle for ${plural(days, 'day')}.`);
-      host.append(none);
-      if (preview.agents_unavailable) host.append(agentsOffNote());
+    if (!rows.length) {
+      host.append(el('p', 'tidy-empty', days === 0
+        ? `Nothing to archive — every ${spec.noun} is already archived.`
+        : `No ${spec.noun} has been idle for ${plural(days, 'day')}.`));
+      if (unavailable) host.append(agentsOffNote());
       if (skipped.length) host.append(skippedNote(skipped));
       return;
     }
 
     const box = el('div', 'tidy-preview');
-    // Forward reference: the groups need a toggle callback, and the callback
-    // needs the footer nodes the groups are appended above.
+    // Forward reference: the group needs a toggle callback, and the callback
+    // needs the footer nodes the group is appended above.
     let sync = () => {};
     const onToggle = () => sync();
-    if (channels.length) {
-      box.append(tidyGroup(plural(channels.length, 'channel'), channels,
-        c => tidyRow(c.code, c.code, idlePhrase(c),
-          c.never_active ? 'no messages' : '', onToggle), onToggle));
-    }
-    if (agents.length) {
-      box.append(tidyGroup(plural(agents.length, 'agent'), agents,
-        a => tidyRow(a.id, a.name || a.id, idlePhrase(a),
-          a.never_active ? 'never used' : '', onToggle), onToggle));
-    }
-    if (preview.agents_unavailable) box.append(agentsOffNote());
+    box.append(tidyGroup(plural(rows.length, spec.noun), rows,
+      r => tidyRow(spec.idOf(r), spec.labelOf(r), idlePhrase(r),
+                   spec.badgeOf(r), onToggle), onToggle));
+    if (unavailable) box.append(agentsOffNote());
     if (skipped.length) box.append(skippedNote(skipped));
 
     const foot = el('div', 'tidy-foot');
@@ -324,30 +349,24 @@
     box.append(foot);
     host.append(box);
 
-    const boxes = () => [...box.querySelectorAll('.tidy-check')];
-    const selected = () => boxes().filter(b => b.checked).map(b => b.dataset.id);
+    const selected = () => box.querySelectorAll('.tidy-check')
+      .filter(b => b.checked).map(b => b.dataset.id);
     sync = () => {
       const n = selected().length;
-      count.textContent = n
-        ? `${plural(n, 'item')} selected`
-        : 'Nothing selected';
+      count.textContent = n ? `${plural(n, spec.noun)} selected`
+                            : 'Nothing selected';
       go.disabled = n === 0;
     };
     sync();
 
     go.addEventListener('click', () => {
-      const keep = new Set(selected());
-      const pickedChannels = channels.filter(c => keep.has(c.code)).map(c => c.code);
-      const pickedAgents = agents.filter(a => keep.has(a.id)).map(a => a.id);
-      if (!pickedChannels.length && !pickedAgents.length) return;
-      const bits = [];
-      if (pickedChannels.length) bits.push(plural(pickedChannels.length, 'channel'));
-      if (pickedAgents.length) bits.push(plural(pickedAgents.length, 'agent'));
-      ui.confirmAction(
-        `Archive ${bits.join(' and ')}?`,
-        'Archiving hides them from the sidebar and roster. Nothing is deleted — '
-        + 'restore them any time from the Archive view. Running agents are '
-        + 'never archived.',
+      const picked = selected();
+      if (!picked.length) return;
+      return ui.confirmAction(
+        `Archive ${plural(picked.length, spec.noun)}?`,
+        `Archiving hides ${picked.length === 1 ? 'it' : 'them'} from the `
+        + `${spec.kind === 'agent' ? 'roster' : 'sidebar'}. Nothing is deleted `
+        + '— restore any time from the Archive view.',
         () => withPending(go, async () => {
           try {
             // The ALLOWLIST, not the unchecked ids: the server rescans on this
@@ -355,9 +374,9 @@
             // sweep inside the list that was actually read.
             const res = await api.post('/api/archives/stale', {
               older_than_days: days,
+              kinds: [spec.kind],
               dry_run: false,
-              only_channels: pickedChannels,
-              only_agents: pickedAgents,
+              [spec.allowlistKey]: picked,
             }, false);
             announce(tidyOutcome(res));
             await Trio.workspace?.refresh?.();
@@ -368,10 +387,10 @@
     });
   }
 
-  // Report what LANDED, per kind, and name the failures. A bulk sweep is
-  // allowed to half-succeed (an agent can refuse mid-run), and "Done" over a
-  // partial result is the message that sends someone looking for a channel
-  // that is still in their sidebar.
+  // Report what LANDED and name the failures. A bulk sweep is allowed to
+  // half-succeed (an agent can refuse mid-run), and "Done" over a partial
+  // result is the message that sends someone looking for a channel that is
+  // still in their sidebar.
   function tidyOutcome(res) {
     const done = [];
     const failed = [];
@@ -383,18 +402,19 @@
         r => failed.push(r.name || r.code || r.id));
     }
     if (!done.length && !failed.length) return 'Nothing to archive.';
-    const parts = [done.length ? `Archived ${done.join(' and ')}` : 'Archived nothing'];
+    const parts = [done.length ? `Archived ${done.join(' and ')}`
+                               : 'Archived nothing'];
     if (failed.length) parts.push(`could not archive ${failed.join(', ')}`);
     return parts.join(' — ') + '.';
   }
 
-  // The server narrows a both-kinds sweep to channels when agent control is
-  // off. Say so: a roster full of stale agents that the panel never mentions
-  // reads as a broken feature, not as a server configuration.
+  // The server narrows an agent sweep away when agent control is off. Say so:
+  // a roster full of stale agents that the panel never mentions reads as a
+  // broken feature, not as a server configuration.
   function agentsOffNote() {
     return el('p', 'tidy-skipped',
-      'Agents are not included — this server was started without agent '
-      + 'control, so it has no managed agents to archive.');
+      'This server was started without agent control, so it has no managed '
+      + 'agents to archive.');
   }
 
   function skippedNote(skipped) {
@@ -407,49 +427,53 @@
     return note;
   }
 
-  function tidyControls(panel) {
-    const section = el('section', 'data-section');
-    section.append(el('h3', null, 'Tidy up'));
-    // Shares the prune row's chrome, but carries its own class: this is not a
-    // prune row, and the Data-page render test counts the two separately.
-    const row = el('div', 'data-prune-row tidy-row');
+  function tidySweep(panel, spec) {
+    // Shares the prune row's chrome, but carries its own class: these are not
+    // prune rows, and the Data-page render test counts the two separately.
+    const row = el('div', `data-prune-row tidy-row tidy-row-${spec.kind}`);
     const text = el('div', 'dp-text');
-    text.append(el('span', 'dp-title', 'Archive stale channels and agents'));
-    text.append(el('span', 'dp-desc',
-      'Clears everything idle past the given age out of the sidebar and roster. '
-      + 'You see the list before anything happens, and nothing is deleted.'));
+    text.append(el('span', 'dp-title', spec.title));
+    text.append(el('span', 'dp-desc', spec.desc));
     row.append(text);
     const ctl = el('div', 'dp-ctl');
-    const days = daysInput(readTidyDays(), 'Idle days before a channel or agent counts as stale');
+    const days = daysInput(readTidyDays(spec), spec.aria);
     ctl.append(days.wrap);
     const btn = el('button', 'dp-btn', 'Preview');
     btn.type = 'button';
     ctl.append(btn);
     row.append(ctl);
-    section.append(row);
 
     const host = el('div', 'tidy-results');
-    section.append(host);
-
     btn.addEventListener('click', () => {
       const n = readDays(days.input);
       if (n == null) return;
-      saveTidyDays(n);
-      // Returned, not fired and forgotten: the click handler's promise is
-      // how the render tests await a preview that has actually landed.
+      saveTidyDays(spec, n);
+      // Returned, not fired and forgotten: the click handler's promise is how
+      // the render tests await a preview that has actually landed.
       return withPending(btn, async () => {
         let preview;
         try {
           preview = await api.post('/api/archives/stale',
-            { older_than_days: n }, false);
+            { older_than_days: n, kinds: [spec.kind] }, false);
         } catch (e) {
           host.replaceChildren(el('p', 'tidy-empty',
-            e.message || 'Could not scan for stale items.'));
+            e.message || `Could not scan for stale ${spec.noun}s.`));
           return;
         }
-        renderTidyPreview(panel, host, preview, n);
+        renderTidyPreview(panel, host, preview, n, spec);
       });
     });
+
+    const wrap = el('div', 'tidy-sweep');
+    wrap.append(row);
+    wrap.append(host);
+    return wrap;
+  }
+
+  function tidyControls(panel) {
+    const section = el('section', 'data-section');
+    section.append(el('h3', null, 'Tidy up'));
+    TIDY_SWEEPS.forEach(spec => section.append(tidySweep(panel, spec)));
     return section;
   }
 

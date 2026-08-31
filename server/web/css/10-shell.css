@@ -311,6 +311,8 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 /* Tidy up — the stale-archive preview list on the Data page. Deliberately
    quieter than the prune rows above it: archiving is reversible, so it gets
    no danger colour, and the emphasis goes on the NAMES being swept. */
+.workspace-view .tidy-sweep + .tidy-sweep{ margin-top:10px; }
+.workspace-view .tidy-sweep .data-prune-row{ margin-bottom:0; }
 .workspace-view .tidy-results:not(:empty){ margin-top:10px; }
 .workspace-view .tidy-empty{ font-size:13px; color:var(--ink-3); padding:2px 2px 0; }
 .workspace-view .tidy-preview{ background:var(--surface); border:1px solid var(--line-soft); border-radius:var(--r-md); box-shadow:var(--shadow-sm); padding:6px 16px 12px; }
