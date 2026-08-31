@@ -7265,6 +7265,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         because preview and apply are separate requests and anything that went
         stale in between would otherwise be archived unseen.
 
+        On a server with agent control disabled the agent half is dropped and
+        `agents_unavailable` is set, rather than the whole request being
+        refused: there are no managed agents to sweep there, but there are
+        still channels.
+
         A RUNNING agent is never a candidate, however idle it looks. Archiving
         an agent stops its process (see the archive branch of
         _apply_agent_action_inner), so a purely time-based sweep would kill live
@@ -7309,11 +7314,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         want_channels = "channel" in kinds
         want_agents = "agent" in kinds
-        # Same gate the per-agent and bulk-agent routes use. Listing agents we
-        # could never archive would be a preview that lies about its own
-        # follow-through, so this refuses rather than quietly narrowing scope.
-        if want_agents and not self._require_agent_control():
-            return
+        # A server started with --no-agent-control has no managed agents to
+        # archive. Refusing the whole request there would make the CHANNEL
+        # half unusable on exactly the throwaway instance someone would try
+        # this on first, so narrow the scope instead — and report the
+        # narrowing, because a preview that quietly drops half of what was
+        # asked for is the same lie as one that promises what it cannot do.
+        agents_unavailable = want_agents and not self._agent_control_enabled
+        if agents_unavailable:
+            want_agents = False
 
         exclude_channels = _string_id_set(body.get("exclude_channels"))
         exclude_agents = _string_id_set(body.get("exclude_agents"))
@@ -7453,6 +7462,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "cutoff": cutoff,
             "channels": channels,
             "agents": agents,
+            "agents_unavailable": agents_unavailable,
             "skipped": skipped,
             "excluded": excluded,
             "counts": {

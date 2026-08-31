@@ -292,6 +292,7 @@
         ? 'Nothing to archive — every channel and agent is already archived.'
         : `Nothing has been idle for ${plural(days, 'day')}.`);
       host.append(none);
+      if (preview.agents_unavailable) host.append(agentsOffNote());
       if (skipped.length) host.append(skippedNote(skipped));
       return;
     }
@@ -311,6 +312,7 @@
         a => tidyRow(a.id, a.name || a.id, idlePhrase(a),
           a.never_active ? 'never used' : '', onToggle), onToggle));
     }
+    if (preview.agents_unavailable) box.append(agentsOffNote());
     if (skipped.length) box.append(skippedNote(skipped));
 
     const foot = el('div', 'tidy-foot');
@@ -384,6 +386,15 @@
     const parts = [done.length ? `Archived ${done.join(' and ')}` : 'Archived nothing'];
     if (failed.length) parts.push(`could not archive ${failed.join(', ')}`);
     return parts.join(' — ') + '.';
+  }
+
+  // The server narrows a both-kinds sweep to channels when agent control is
+  // off. Say so: a roster full of stale agents that the panel never mentions
+  // reads as a broken feature, not as a server configuration.
+  function agentsOffNote() {
+    return el('p', 'tidy-skipped',
+      'Agents are not included — this server was started without agent '
+      + 'control, so it has no managed agents to archive.');
   }
 
   function skippedNote(skipped) {

@@ -294,6 +294,22 @@ try:
               "SELECT COUNT(*) FROM members WHERE id=? AND channel=?",
               (dead, web.AGENT_INBOX_CHANNEL)).fetchone()[0] == 0)
 
+    # ── agent control off narrows the sweep, it does not refuse it ──────────
+    web.NthWebHandler._agent_control_enabled = False
+    try:
+        st, d = http(port, "/api/archives/stale", body={"older_than_days": 30})
+        check("no agent control: the CHANNEL half still works — refusing the "
+              "whole sweep would make the feature unusable on a server that "
+              "simply has no managed agents", st == 200)
+        check("no agent control: no agent rows are returned", d["agents"] == [])
+        check("no agent control: and the narrowing is REPORTED, not silent",
+              d.get("agents_unavailable") is True)
+    finally:
+        web.NthWebHandler._agent_control_enabled = True
+    st, d = http(port, "/api/archives/stale", body={"older_than_days": 30})
+    check("agent control on: the narrowing flag is false",
+          d.get("agents_unavailable") is False)
+
     # ── scope ───────────────────────────────────────────────────────────────
     st, d = http(port, "/api/archives/stale",
                  body={"older_than_days": 30, "kinds": ["channel"]})

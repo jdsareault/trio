@@ -191,6 +191,20 @@ function clickOf(node) {
     assert.deepStrictEqual(subs, ['age unknown']);
   });
 
+  // ── agent control off: narrowed, and said so ──────────────────────────────
+  Trio.api.post = async () => ({
+    ok: true, dry_run: true, agents_unavailable: true,
+    channels: [{ code: 'oldroom', idle_days: 20, never_active: false }],
+    agents: [], skipped: { agents: [] }, counts: { channels: 1, agents: 0 },
+  });
+  await previewBtn2({});
+  check('a server without agent control still sweeps channels, and says why '
+        + 'agents are missing', () => {
+    assert.strictEqual(panel.querySelectorAll('.tidy-item').length, 1);
+    const note = panel.querySelector('.tidy-skipped');
+    assert.ok(note && /without agent control/.test(note.textContent));
+  });
+
   // ── nothing stale ─────────────────────────────────────────────────────────
   Trio.api.post = async () => ({
     ok: true, dry_run: true, channels: [], agents: [],
