@@ -7258,9 +7258,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
         Preview-first by design: `dry_run` defaults to TRUE, exactly like
         /api/prune, so a body that forgets the key CHANGES NOTHING and only
-        names what a real run would sweep. `exclude_channels` / `exclude_agents`
-        are what turn that preview into a decision — uncheck a row in the UI,
-        its id arrives here, it survives.
+        names what a real run would sweep. Two filters turn that preview into a
+        decision: `exclude_channels` / `exclude_agents` drop named rows from an
+        otherwise whole sweep, and `only_channels` / `only_agents` bound the
+        sweep to named rows. The dashboard sends the allowlist on a real run,
+        because preview and apply are separate requests and anything that went
+        stale in between would otherwise be archived unseen.
 
         A RUNNING agent is never a candidate, however idle it looks. Archiving
         an agent stops its process (see the archive branch of
@@ -7318,6 +7321,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "exclude_channels and exclude_agents must be "
                              "lists of strings")
             return
+        # The ALLOWLIST half of the filter, and the one the dashboard uses on a
+        # real run. Preview and apply are two requests, so the candidate set is
+        # rescanned in between: with exclusions alone, a channel that crossed
+        # the threshold in that window would be archived without ever having
+        # been shown — the exact surprise a preview-first flow exists to
+        # prevent. Sending back the rows the operator actually approved bounds
+        # the sweep to a subset of what they read.
+        #
+        # Absent (not empty) means "no allowlist", because an operator who
+        # unchecks every row must archive nothing, not everything.
+        only_channels = _string_id_set(body.get("only_channels"))
+        only_agents = _string_id_set(body.get("only_agents"))
+        if only_channels is None or only_agents is None:
+            self._error(400, "only_channels and only_agents must be lists "
+                             "of strings")
+            return
+        has_only_channels = body.get("only_channels") is not None
+        has_only_agents = body.get("only_agents") is not None
 
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(days=older_than_days)).isoformat()
@@ -7348,7 +7369,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     activity = r["last_at"] or r["created_at"]
                     if not activity or activity > cutoff:
                         continue
-                    if r["code"] in exclude_channels:
+                    if (r["code"] in exclude_channels
+                            or (has_only_channels
+                                and r["code"] not in only_channels)):
                         excluded["channels"].append(r["code"])
                         continue
                     channels.append({
@@ -7368,7 +7391,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     activity = r["last_active_at"] or r["created_at"]
                     if not activity or activity > cutoff:
                         continue
-                    if r["id"] in exclude_agents:
+                    if (r["id"] in exclude_agents
+                            or (has_only_agents and r["id"] not in only_agents)):
                         excluded["agents"].append(r["id"])
                         continue
                     entry = {

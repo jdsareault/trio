@@ -229,6 +229,31 @@ try:
     check("apply: an already-archived channel is no longer a candidate",
           codes(d) == {"emptyroom"})
 
+    # ── the allowlist bounds a real run to what was previewed ───────────────
+    # emptyroom is the only stale channel left. An allowlist naming something
+    # else must archive NOTHING, which is the property that stops a row that
+    # went stale between preview and apply from being swept unseen.
+    st, d = http(port, "/api/archives/stale",
+                 body={"older_than_days": 30, "kinds": ["channel"],
+                       "only_channels": ["freshroom"], "dry_run": False})
+    check("allowlist: a real run archives nothing outside the allowlist",
+          st == 200 and "emptyroom" not in archived_channels())
+    st, d = http(port, "/api/archives/stale",
+                 body={"older_than_days": 30, "kinds": ["channel"],
+                       "only_channels": []})
+    check("allowlist: an EMPTY allowlist selects nothing — an operator who "
+          "unchecks every row archives nothing, not everything",
+          st == 200 and d["counts"]["channels"] == 0)
+    st, d = http(port, "/api/archives/stale",
+                 body={"older_than_days": 30, "kinds": ["channel"],
+                       "only_channels": "emptyroom"})
+    check("allowlist: a non-list allowlist is refused", st == 400)
+    st, d = http(port, "/api/archives/stale",
+                 body={"older_than_days": 30, "kinds": ["channel"],
+                       "only_channels": ["emptyroom"], "dry_run": False})
+    check("allowlist: and the named row IS archived",
+          st == 200 and "emptyroom" in archived_channels())
+
     # ── agents: running is never a candidate ────────────────────────────────
     st, made = http(port, "/api/agents", body={
         "model": "sonnet", "channels": ["freshroom"], "prompt": "hi"})
