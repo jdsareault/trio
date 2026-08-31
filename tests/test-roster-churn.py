@@ -23,9 +23,12 @@ both are asserted here:
 Usage: python tests/test-roster-churn.py
 """
 import copy
+import json
 import os
+import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 SERVER = Path(__file__).resolve().parent.parent / "server"
@@ -73,6 +76,31 @@ ctx = [member(context={"used_pct": 12.0, "_age_s": 3, "_relayed_at": "T1"})]
 ctx_tick = [member(context={"used_pct": 12.0, "_age_s": 9, "_relayed_at": "T2"})]
 check("a context ring aging alone does not change the key",
       key(ctx) == key(ctx_tick))
+
+# That payload is NOT flat. project_context keeps harness.context_window and
+# harness.rate_limits, and rate_limits is a rolling window whose percentage
+# slides on its own — so a depth-1 scrub leaves self-ticking values two
+# levels down and the churn returns for exactly the members a live ring
+# makes most expensive to broadcast.
+def ring(age, pct, used):
+    return {"used_pct": pct, "_age_s": age,
+            "harness": {"context_window": {"used": used},
+                        "rate_limits": {"five_hour": {"used_percentage": 41.0}}}}
+
+
+check("a nested _age_s two levels down does not change the key",
+      key([member(context={"a": {"b": {"_age_s": 1, "keep": 1}}})])
+      == key([member(context={"a": {"b": {"_age_s": 99, "keep": 1}}})]))
+check("a rolling rate-limit window sliding does not change the key",
+      key([member(context=ring(1, 12.0, 5))])
+      == key([member(context={"used_pct": 12.0, "_age_s": 1,
+                              "harness": {
+                                  "context_window": {"used": 5},
+                                  "rate_limits": {"five_hour": {
+                                      "used_percentage": 88.0}}}})]))
+check("a real context_window move under harness DOES change the key",
+      key([member(context=ring(1, 12.0, 5))])
+      != key([member(context=ring(1, 12.0, 9))]))
 
 check("a heartbeat tick AND a ring aging together still do not",
       key([member(context={"used_pct": 5.0, "_age_s": 1})])
@@ -132,6 +160,91 @@ check("last_seen is declared volatile", "last_seen" in web._ROSTER_VOLATILE)
 for keep in ("last_read", "status", "last_tool_at", "blocked_since"):
     check(f"{keep!r} is NOT treated as volatile",
           keep not in web._ROSTER_VOLATILE)
+
+check("an empty roster produces a stable, non-crashing key", key([]) == "[]")
+
+# The digest is order-SENSITIVE: json.dumps(sort_keys=True) sorts dict KEYS,
+# not list order. That is only safe because _fetch_roster's SQL carries an
+# ORDER BY. If that were ever weakened, this same roster would reorder every
+# poll and the digest would flap on nothing — the churn this file exists to
+# kill, arriving through the back door. Pin the assumption the function
+# relies on but cannot itself guarantee.
+check("the key is order-SENSITIVE, so callers must supply stable SQL order",
+      key([member(id="ag_1"), member(id="ag_2", name="Bo")])
+      != key([member(id="ag_2", name="Bo"), member(id="ag_1")]))
+
+
+# ── the wiring: is the comparator actually IN the live poll loop? ──
+# Everything above calls _roster_change_key directly. None of it proves
+# EventHub.run() uses it rather than a bare json.dumps(members) a future
+# edit could reintroduce — that revert would leave every check above green
+# while restoring the bug in full. So drive the real background thread
+# against a real DB and watch the wire.
+import queue as _queue          # noqa: E402
+import sqlite3 as _sqlite3      # noqa: E402
+
+import nth_server as srv        # noqa: E402
+
+_tmp = Path(tempfile.mkdtemp(prefix="nth_churn_wire_"))
+srv.DB_DIR, srv.DB_PATH = _tmp, _tmp / "nth.db"
+_j = json.loads(srv.nth_connect(summary="wired", name="Wired", channel="wire-ch"))
+_ch, _me = _j["channel"], _j["member_id"]
+
+_hub = web.EventHub(srv.DB_PATH, _ch)
+_hub.start()
+_q = _hub.subscribe(include_history=False)
+
+
+def _drain(seconds=web.DB_POLL_INTERVAL * 6):
+    """Collect every payload the hub emits over the next few ticks."""
+    out, deadline = [], time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            out.append(json.loads(_q.get(timeout=0.1)))
+        except _queue.Empty:
+            continue
+    return out
+
+
+def _write(sql, params):
+    conn = _sqlite3.connect(str(srv.DB_PATH), timeout=5)
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+try:
+    _drain()   # let the hub settle and emit its first-tick roster
+
+    # A bare heartbeat tick — exactly what nth_monitor.py writes every 10s.
+    _write("UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
+           (web.now_iso(), _ch, _me))
+    check("the LIVE poll loop does not broadcast a heartbeat-only tick",
+          not [e for e in _drain() if e.get("type") == "roster"])
+
+    # Something that actually happened.
+    _write("UPDATE members SET status_text = ? WHERE channel = ? AND id = ?",
+           ("brb", _ch, _me))
+    check("the LIVE poll loop still broadcasts a real roster change",
+          [e for e in _drain() if e.get("type") == "roster"])
+
+    # The initial snapshot must stay FULL. A plausible-looking "consistency"
+    # refactor routing _prime_payloads through the same scrub would strip
+    # last_seen from every client's first paint, and nothing else would
+    # notice — the change key is not the payload.
+    _primed = [json.loads(p) for p in
+               _hub._prime_payloads(None, True, 0, include_history=False)]
+    _roster = next((e for e in _primed if e.get("type") == "roster"), None)
+    check("_prime_payloads ships an unscrubbed roster for first paint",
+          bool(_roster) and bool(_roster["members"][0].get("last_seen")))
+    check("_prime_payloads is not gated by the change key",
+          bool(_roster))
+finally:
+    _hub.unsubscribe(_q)
+    _hub.stop()
+    shutil.rmtree(_tmp, ignore_errors=True)
 
 print()
 if failures:
