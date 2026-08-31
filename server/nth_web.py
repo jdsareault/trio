@@ -271,6 +271,10 @@ BULK_SPAWNING_ACTIONS = ("wake", "compact", "clear")
 # bad agents, it is a locked database or a supervisor shutting down — and the
 # remaining agents will each pay the same timeout to learn the same fact.
 BULK_SYSTEMIC_STREAK = 3
+# What a stale-archive sweep is allowed to touch. Both are reversible stamps
+# (channels.archived_at, agents.archived_at) — this list is a scope selector,
+# not a destructiveness tier.
+STALE_ARCHIVE_KINDS = ("channel", "agent")
 
 
 class AgentActionError(Exception):
@@ -461,6 +465,44 @@ def _message_rates(db: sqlite3.Connection, now: float) -> Dict[str, Dict[str, in
 # ───────── Helpers ─────────
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _idle_days(timestamp: str, now: datetime) -> Optional[float]:
+    """Whole-ish days between an ISO timestamp and `now`, or None if unparseable.
+
+    None rather than 0: the UI prints this next to a name the operator is about
+    to archive, and "idle 0 days" for a row whose date we could not read is a
+    confident lie about the one number the decision rests on.
+    """
+    try:
+        then = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return round((now - then).total_seconds() / 86400, 1)
+
+
+def _string_id_set(raw: Any) -> Optional[set]:
+    """Coerce a JSON list of ids to a set of non-empty strings.
+
+    Returns None (not an empty set) when the input is present but not a list of
+    strings, so the caller can 400 instead of treating a malformed exclusion
+    list as "excluded nothing" — which would archive rows the operator had
+    just unchecked.
+    """
+    if raw is None:
+        return set()
+    if not isinstance(raw, list):
+        return None
+    out = set()
+    for item in raw:
+        if not isinstance(item, str):
+            return None
+        item = item.strip()
+        if item:
+            out.add(item)
+    return out
 
 
 def _slug(s: str, maxlen: int = 20) -> str:
@@ -3881,6 +3923,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_message_read()
         elif parsed.path == "/api/channels":
             self._handle_channel_create()
+        elif parsed.path == "/api/archives/stale":
+            # Before the exact-match arm below only for readability — the two
+            # paths cannot collide — but keep the bulk route first if either
+            # is ever loosened to a prefix match, as /api/agents/bulk is.
+            self._handle_archive_stale()
         elif parsed.path == "/api/archives":
             self._handle_archive_update()
         elif parsed.path == "/api/prune":
@@ -7205,6 +7252,258 @@ class NthWebHandler(BaseHTTPRequestHandler):
             else:
                 result["agent_archived"] = bool(still)
         self._json(result)
+
+    def _handle_archive_stale(self) -> None:
+        """Bulk-archive every channel and agent idle longer than a threshold.
+
+        Preview-first by design: `dry_run` defaults to TRUE, exactly like
+        /api/prune, so a body that forgets the key CHANGES NOTHING and only
+        names what a real run would sweep. `exclude_channels` / `exclude_agents`
+        are what turn that preview into a decision — uncheck a row in the UI,
+        its id arrives here, it survives.
+
+        A RUNNING agent is never a candidate, however idle it looks. Archiving
+        an agent stops its process (see the archive branch of
+        _apply_agent_action_inner), so a purely time-based sweep would kill live
+        work to tidy a sidebar. `last_active_at` alone cannot see this: an agent
+        parked at a prompt for a month is both maximally idle and maximally
+        alive. Those agents are reported under `skipped` rather than silently
+        dropped, so "why is that ancient one still in my roster?" has an answer
+        on screen.
+
+        Nothing here deletes. Both archives are the same reversible stamp the
+        single-item routes write, and both restore views already exist
+        (`/api/channels?archived=1`, `/api/agents?archived=1`).
+        """
+        # Storage tier, not the plain operator tier: this enumerates every
+        # channel and agent in the shared DB in one shot, which is the same
+        # workspace-wide disclosure /api/storage and /api/prune gate on.
+        ident = self._require_trusted_operator("archive stale channels and agents")
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=65536)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+
+        older_than_days = body.get("older_than_days")
+        # bool is an int subclass — reject True/False sneaking in as a count.
+        if (not isinstance(older_than_days, int)
+                or isinstance(older_than_days, bool) or older_than_days < 0):
+            self._error(400, "older_than_days must be a non-negative integer")
+            return
+        dry_run = body.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            self._error(400, "dry_run must be a boolean")
+            return
+        kinds = body.get("kinds", list(STALE_ARCHIVE_KINDS))
+        if (not isinstance(kinds, list) or not kinds
+                or any(k not in STALE_ARCHIVE_KINDS for k in kinds)):
+            self._error(400, "kinds must be a non-empty subset of "
+                             + "/".join(STALE_ARCHIVE_KINDS))
+            return
+        want_channels = "channel" in kinds
+        want_agents = "agent" in kinds
+        # Same gate the per-agent and bulk-agent routes use. Listing agents we
+        # could never archive would be a preview that lies about its own
+        # follow-through, so this refuses rather than quietly narrowing scope.
+        if want_agents and not self._require_agent_control():
+            return
+
+        exclude_channels = _string_id_set(body.get("exclude_channels"))
+        exclude_agents = _string_id_set(body.get("exclude_agents"))
+        if exclude_channels is None or exclude_agents is None:
+            self._error(400, "exclude_channels and exclude_agents must be "
+                             "lists of strings")
+            return
+
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=older_than_days)).isoformat()
+
+        channels: List[Dict[str, Any]] = []
+        agents: List[Dict[str, Any]] = []
+        skipped: Dict[str, List[Dict[str, Any]]] = {"channels": [], "agents": []}
+        excluded: Dict[str, List[str]] = {"channels": [], "agents": []}
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=10)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=8000")
+            if want_channels:
+                # COALESCE, not MAX alone: a channel created and never posted
+                # in has no message rows at all, and comparing NULL to the
+                # cutoff is NULL — so the emptiest channels in the sidebar,
+                # the ones a tidy-up exists for, would be the only ones it
+                # could never see. Falling back to created_at ages them from
+                # birth instead.
+                for r in db.execute(
+                        "SELECT c.code, c.status, c.created_at, "
+                        "  (SELECT MAX(created_at) FROM messages m "
+                        "     WHERE m.channel = c.code) AS last_at "
+                        "FROM channels c "
+                        "WHERE c.archived_at IS NULL AND c.code != ? "
+                        "ORDER BY c.code", (AGENT_INBOX_CHANNEL,)).fetchall():
+                    activity = r["last_at"] or r["created_at"]
+                    if not activity or activity > cutoff:
+                        continue
+                    if r["code"] in exclude_channels:
+                        excluded["channels"].append(r["code"])
+                        continue
+                    channels.append({
+                        "code": r["code"],
+                        "status": r["status"],
+                        "last_at": r["last_at"],
+                        "created_at": r["created_at"],
+                        "never_active": r["last_at"] is None,
+                        "idle_days": _idle_days(activity, now),
+                    })
+            if want_agents:
+                sup = get_supervisor()
+                for r in db.execute(
+                        "SELECT id, name, state, created_at, last_active_at "
+                        "FROM agents WHERE managed = 1 AND archived_at IS NULL "
+                        "ORDER BY name, id").fetchall():
+                    activity = r["last_active_at"] or r["created_at"]
+                    if not activity or activity > cutoff:
+                        continue
+                    if r["id"] in exclude_agents:
+                        excluded["agents"].append(r["id"])
+                        continue
+                    entry = {
+                        "id": r["id"],
+                        "name": r["name"],
+                        "state": r["state"],
+                        "last_active_at": r["last_active_at"],
+                        "created_at": r["created_at"],
+                        "never_active": r["last_active_at"] is None,
+                        "idle_days": _idle_days(activity, now),
+                    }
+                    # is_running_or_starting, not `state == running`: the state
+                    # column also reads "running" for a process that died with
+                    # its hub, and reads "idle"/"spawning" for ones that are
+                    # very much alive. This covers a local process, one still
+                    # being spawned, and a live process owned by another hub.
+                    try:
+                        live = sup.is_running_or_starting(r["id"])
+                    except Exception:
+                        # Unknown liveness is not evidence of death, and the
+                        # cost of guessing wrong is a killed agent. Skip it.
+                        live = True
+                    if live:
+                        skipped["agents"].append(
+                            {**entry, "reason": "running"})
+                        continue
+                    agents.append(entry)
+        except sqlite3.Error as e:
+            # Generic to the client, detail to the log — sqlite text names
+            # tables, columns and the DB path. Same rule as /api/cull.
+            sys.stderr.write(f"[nth_web] archive-stale db error: {e}\n")
+            self._error(500, "stale scan failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+
+        if not dry_run and len(agents) > MAX_BULK_AGENTS:
+            # Refuse rather than cap. A silent top-N would archive an arbitrary
+            # subset of a list the operator just read and approved, and report
+            # success — the one outcome a preview-first flow exists to prevent.
+            self._error(400, f"{len(agents)} agents exceeds the per-request "
+                             f"cap of {MAX_BULK_AGENTS} — raise the threshold "
+                             f"or exclude some and run again")
+            return
+
+        if not dry_run:
+            self._apply_stale_archive(channels, agents, ident)
+
+        payload = {
+            "ok": all(c.get("archived", True) for c in channels)
+                  and all(a.get("archived", True) for a in agents),
+            "dry_run": dry_run,
+            "older_than_days": older_than_days,
+            "cutoff": cutoff,
+            "channels": channels,
+            "agents": agents,
+            "skipped": skipped,
+            "excluded": excluded,
+            "counts": {
+                "channels": len(channels),
+                "agents": len(agents),
+                "skipped_agents": len(skipped["agents"]),
+                "excluded_channels": len(excluded["channels"]),
+                "excluded_agents": len(excluded["agents"]),
+            },
+        }
+        self._json(payload)
+
+    def _apply_stale_archive(self, channels: List[Dict[str, Any]],
+                             agents: List[Dict[str, Any]], ident) -> None:
+        """Archive the previewed rows in place, stamping each with its outcome.
+
+        Every row gets an `archived` flag and, on failure, an `error`. One bad
+        row never aborts the rest — the same contract as /api/agents/bulk,
+        for the same reason: a partial sweep is the normal outcome and the
+        operator needs to know WHICH half landed.
+        """
+        now = now_iso()
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=10)
+            db.execute("PRAGMA busy_timeout=8000")
+            with db:
+                for entry in channels:
+                    cur = db.execute(
+                        "UPDATE channels SET archived_at=?, archived_by=?, "
+                        "updated_at=? WHERE code=? AND archived_at IS NULL",
+                        (now, ident.member_id, now, entry["code"]))
+                    # rowcount 0 means it was archived between the scan and
+                    # here (another tab, another hub). That is the requested
+                    # end state, so it is not an error.
+                    entry["archived"] = True
+                    entry["already_archived"] = cur.rowcount == 0
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] archive-stale channel error: {e}\n")
+            for entry in channels:
+                entry.setdefault("archived", False)
+                entry.setdefault("error", "channel archive failed")
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+
+        # Agents go one at a time through the SAME code path the single-agent
+        # and bulk routes use, rather than a bare UPDATE here. That path stops
+        # the process, revokes sessions and tears down the private inbox; a
+        # second, simpler implementation of "archive an agent" would drift from
+        # it and leave live sessions behind on the tidy-up path only.
+        for entry in agents:
+            try:
+                ok = self._apply_agent_action(entry["id"], "archive", {}, ident)
+                entry["archived"] = bool(ok)
+                if not ok:
+                    entry["error"] = "agent not found"
+            except AgentActionError as exc:
+                entry["archived"] = False
+                entry["error"] = exc.message
+            except Exception as exc:  # noqa: BLE001 - one bad agent, not the batch
+                sys.stderr.write(
+                    f"[nth_web] archive-stale failed for {entry['id']!r}: "
+                    f"{type(exc).__name__}: {exc}\n")
+                entry["archived"] = False
+                entry["error"] = str(exc)
+
+        applied_c = sum(1 for c in channels if c.get("archived"))
+        applied_a = sum(1 for a in agents if a.get("archived"))
+        sys.stderr.write(
+            f"[nth_web] archive-stale: {applied_c}/{len(channels)} channels, "
+            f"{applied_a}/{len(agents)} agents archived\n")
 
     def _agent_archived_stamp(self, thread_key: str, viewer_id: str = "") -> str:
         """Newest archive stamp if every COUNTERPART in `thread_key` is an
